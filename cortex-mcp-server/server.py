@@ -830,17 +830,23 @@ def transcript_search(query: str, limit: int = 5) -> str:
 
 MINED_SESSIONS_FILE = CORTEX_DIR / ".mined_sessions"
 
-_MINE_PATTERNS = [
-    (re.compile(r"[^.!?]*\b(we decided|chose|went with|the approach is)\b[^.!?]*[.!?]?", re.IGNORECASE), "knowledge"),
-    (re.compile(r"[^.!?]*\b(the issue was|fixed by|turns out|the problem was|root cause)\b[^.!?]*[.!?]?", re.IGNORECASE), "lesson"),
-    (re.compile(r"[^.!?]*\b(this project uses|always use|never use|the convention is)\b[^.!?]*[.!?]?", re.IGNORECASE), "convention"),
-    (re.compile(r"[^.!?]*\b(I prefer|do not do|stop doing|user wants|user prefers)\b[^.!?]*[.!?]?", re.IGNORECASE), "preference"),
-    (re.compile(r"[^.!?]*\b(depends on|requires|is configured at|stored in)\b[^.!?]*[.!?]?", re.IGNORECASE), "knowledge"),
-]
-
-_USER_PREF_PATTERNS = [
-    re.compile(r"[^.!?]*\b(don't do|i want|always do|never do|please don't|stop doing)\b[^.!?]*[.!?]?", re.IGNORECASE),
-]
+_HAIKU_MINE_SYSTEM = (
+    "You are a knowledge extractor for a coding project memory system. "
+    "Read conversation exchanges and extract anything worth remembering. "
+    "Output structured memories in this exact format, one per block:\n\n"
+    "MEMORY\n"
+    "title: short descriptive title (no project prefix)\n"
+    "who: project-name (or general if unclear)\n"
+    "why: decided|learned|shipped|failed|convention|prefers|discovered|designed|blocked-by\n"
+    "content: one paragraph summary of what to remember\n\n"
+    "Rules:\n"
+    "- Extract decisions, lessons, things shipped, failures, conventions, preferences, discoveries\n"
+    "- Be generous — if in doubt, extract it\n"
+    "- Each memory should be self-contained and useful without the original conversation\n"
+    "- Skip trivial exchanges (greetings, simple file reads, routine git commands)\n"
+    "- If nothing worth saving, output NONE\n"
+    "- Do NOT add knowledge you weren't told — only extract what's in the conversation"
+)
 
 
 def _was_mined(session_id: str) -> bool:
@@ -905,45 +911,72 @@ def _parse_jsonl_session(jsonl_path: str) -> list[dict]:
     return pairs
 
 
-def _extract_insights_from_pair(pair: dict) -> list[dict]:
-    assistant_text = pair["assistant_text"]
-    user_text = pair["user_text"]
+def _extract_insights_haiku(pairs: list[dict], batch_size: int = 5) -> list[dict]:
+    """Use Haiku to extract structured memories from conversation exchanges."""
+    import subprocess as _sp
 
-    # Pre-filter: strip noise
-    clean_asst = re.sub(r'```[\s\S]*?```', '', assistant_text)
-    clean_asst = re.sub(r'`[^`]+`', '', clean_asst)
-    clean_asst = re.sub(r'^.*\|.*\|.*$', '', clean_asst, flags=re.MULTILINE)
-    clean_asst = re.sub(r'^[\$>].*$', '', clean_asst, flags=re.MULTILINE)
-    clean_asst = re.sub(r'^.*(?:/home/|/usr/|/etc/|/tmp/|/var/).*$', '', clean_asst, flags=re.MULTILINE)
+    _WHY_TO_TYPE = {
+        "decided": "knowledge", "learned": "lesson", "shipped": "knowledge",
+        "failed": "failure", "convention": "convention", "prefers": "preference",
+        "discovered": "knowledge", "designed": "knowledge", "blocked-by": "failure",
+    }
 
-    clean_user = re.sub(r'```[\s\S]*?```', '', user_text)
-    clean_user = re.sub(r'`[^`]+`', '', clean_user)
+    all_insights = []
 
-    insights = []
-    for pattern, memory_type in _MINE_PATTERNS:
-        for match in pattern.finditer(clean_asst):
-            snippet = match.group(0).strip()[:500]
-            if len(snippet) < 40:
+    # Process in batches to stay within token limits
+    for i in range(0, len(pairs), batch_size):
+        batch = pairs[i:i + batch_size]
+
+        # Format exchanges for Haiku
+        exchanges = []
+        for j, pair in enumerate(batch):
+            user = pair["user_text"][:1000]
+            asst = pair["assistant_text"][:2000]
+            exchanges.append(f"--- Exchange {j+1} ---\nUser: {user}\nAssistant: {asst}")
+        prompt = "\n\n".join(exchanges)
+
+        try:
+            result = _sp.run(
+                ["claude", "-p", "--model", "haiku", "--tools", "",
+                 "--system-prompt", _HAIKU_MINE_SYSTEM],
+                input=prompt,
+                capture_output=True, text=True, timeout=60,
+            )
+            if result.returncode != 0 or not result.stdout.strip():
                 continue
-            alpha_ratio = sum(c.isalpha() or c.isspace() for c in snippet) / max(len(snippet), 1)
-            if alpha_ratio < 0.6:
+
+            # Parse Haiku output into structured memories
+            output = result.stdout.strip()
+            if output == "NONE":
                 continue
-            insights.append({"content": snippet, "memory_type": memory_type})
 
-    for pattern in _USER_PREF_PATTERNS:
-        for match in pattern.finditer(clean_user):
-            snippet = match.group(0).strip()[:500]
-            if len(snippet) > 10:
-                insights.append({"content": snippet, "memory_type": "preference"})
+            for block in output.split("MEMORY"):
+                block = block.strip()
+                if not block:
+                    continue
+                mem = {}
+                for line in block.split("\n"):
+                    if ":" in line:
+                        key, val = line.split(":", 1)
+                        key = key.strip().lower()
+                        val = val.strip()
+                        if key in ("title", "who", "why", "content"):
+                            mem[key] = val
+                if mem.get("content") and mem.get("title"):
+                    why = mem.get("why", "discovered")
+                    if why not in _WHY_TO_TYPE:
+                        why = "discovered"
+                    all_insights.append({
+                        "title": mem["title"][:120],
+                        "content": mem["content"][:2000],
+                        "who": mem.get("who", "general"),
+                        "why": why,
+                        "memory_type": _WHY_TO_TYPE[why],
+                    })
+        except Exception:
+            continue
 
-    seen = set()
-    unique = []
-    for ins in insights:
-        key = ins["content"][:80]
-        if key not in seen:
-            seen.add(key)
-            unique.append(ins)
-    return unique
+    return all_insights
 
 
 def mine_session(jsonl_path: str) -> dict:
@@ -956,23 +989,35 @@ def mine_session(jsonl_path: str) -> dict:
         return {"skipped": True, "reason": "already mined"}
 
     pairs = _parse_jsonl_session(jsonl_path)
+    if not pairs:
+        _mark_mined(session_id)
+        return {"session_id": session_id, "chunks_processed": 0,
+                "memories_saved": 0, "duplicates_skipped": 0, "skipped": False}
+
+    # Use Haiku to extract structured insights
+    insights = _extract_insights_haiku(pairs)
     memories_saved = 0
     duplicates_skipped = 0
 
-    for pair in pairs:
-        for ins in _extract_insights_from_pair(pair):
-            content = ins["content"]
-            if _is_duplicate(content[:2000]):
-                duplicates_skipped += 1
-                continue
-            mem = _make_memory(
-                content=content[:2000], title=content[:80],
-                memory_type=ins["memory_type"], source_type="mined",
-                confidence=0.4, tags=["mined", session_id[:8]],
-                source_session_id=session_id,
-                full_record=f"User: {pair['user_text'][:500]}\n\nAssistant: {pair['assistant_text'][:500]}")
-            _save_memory(mem)
-            memories_saved += 1
+    for ins in insights:
+        if _is_duplicate(ins["content"][:2000]):
+            duplicates_skipped += 1
+            continue
+        # Use who as project tag
+        tags = ["mined", session_id[:8]]
+        if ins["who"] != "general":
+            tags.append(ins["who"])
+        mem = _make_memory(
+            content=ins["content"][:2000],
+            title=ins["title"],
+            memory_type=ins["memory_type"],
+            source_type="mined",
+            confidence=0.5,
+            tags=tags,
+            source_session_id=session_id,
+        )
+        _save_memory(mem)
+        memories_saved += 1
 
     _mark_mined(session_id)
     return {"session_id": session_id, "chunks_processed": len(pairs),
