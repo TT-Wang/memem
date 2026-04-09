@@ -40,8 +40,6 @@ Cortex uses hybrid search with 5 signals:
 
 Plus domain-aware filtering (auth, database, testing, API, deployment, etc.) that boosts same-domain memories.
 
-**Benchmark: 100% Recall@5, 0.879 MRR.**
-
 ## Memory lifecycle
 
 ```
