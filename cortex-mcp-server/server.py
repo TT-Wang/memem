@@ -88,7 +88,9 @@ def _search_memories(query: str, scope_id: str | None = None, limit: int = 10) -
     try:
         from embeddings import is_available, get_or_compute_embedding, cosine_similarity
         if is_available():
-            query_embedding = get_or_compute_embedding(f"query_{hash(query)}", query)
+            import hashlib
+            query_hash = hashlib.md5(query.encode()).hexdigest()[:12]
+            query_embedding = get_or_compute_embedding(f"query_{query_hash}", query)
             use_vectors = True
     except Exception:
         pass
@@ -150,16 +152,13 @@ def _search_memories(query: str, scope_id: str | None = None, limit: int = 10) -
             combined = (0.55 * keyword_score + 0.2 * confidence +
                        0.15 * impact + 0.1 * recency_boost) * learned_boost
 
-        # Domain match boost/penalty
+        # Domain match boost (additive, not multiplicative — prevents excluding valid results)
         if query_domain and query_domain != "general":
             mem_domain = mem.get("domain", "")
             if mem_domain == query_domain:
-                domain_match = 1.4  # 40% boost for same domain
-            elif mem_domain == "general" or not mem_domain:
-                domain_match = 1.0  # neutral for unclassified
-            else:
-                domain_match = 0.7  # penalty for different domain
-            combined = combined * domain_match
+                combined += 0.15  # boost for same domain
+            elif mem_domain and mem_domain != "general":
+                combined -= 0.02  # slight penalty for different domain (never kills a result)
 
         if combined > 0.05:  # minimum threshold
             scored.append((combined, mem))
@@ -270,7 +269,7 @@ def _check_contradictions(new_mem: dict, scope_id: str = "default", threshold: f
                         "no longer", "stop", "remove"}
 
     new_words = set(new_text.lower().split())
-    has_negation = bool(new_words & opposition_words)
+    new_has_negation = bool(new_words & opposition_words)
 
     for mem in existing:
         if mem["id"] == new_mem.get("id"):
@@ -300,21 +299,23 @@ def _check_contradictions(new_mem: dict, scope_id: str = "default", threshold: f
         except Exception:
             continue
 
-        # High similarity (same topic) + negation = likely contradiction
-        if similarity >= threshold and has_negation:
+        # Check negation in BOTH directions
+        mem_words_set = set(mem_text.lower().split())
+        mem_has_negation = bool(mem_words_set & opposition_words)
+        either_has_negation = new_has_negation or mem_has_negation
+
+        # High similarity (same topic) + negation in either = likely contradiction
+        if similarity >= threshold and either_has_negation:
             contradicting_ids.append(mem["id"])
 
-        # Very high similarity but different conclusion (detect by title difference)
-        if similarity >= 0.85:
+        # Very high similarity — may be updated knowledge
+        elif similarity >= 0.85:
             new_title_words = set(new_mem.get("title", "").lower().split())
             mem_title_words = set(mem.get("title", "").lower().split())
             if new_title_words and mem_title_words:
                 title_overlap = len(new_title_words & mem_title_words) / max(len(new_title_words | mem_title_words), 1)
-                if title_overlap > 0.5:
-                    # Same topic, possibly updated knowledge
-                    mem_words_set = set(mem_text.lower().split())
-                    if bool(mem_words_set & opposition_words) or has_negation:
-                        contradicting_ids.append(mem["id"])
+                if title_overlap > 0.5 and either_has_negation:
+                    contradicting_ids.append(mem["id"])
 
     return list(set(contradicting_ids))
 
@@ -402,18 +403,21 @@ def _was_seeded(scope_id: str) -> bool:
     """Check if a scope has already been seeded."""
     if not SEED_MARKER_FILE.exists():
         return False
-    seeded = set(SEED_MARKER_FILE.read_text().strip().split("\n"))
+    seeded = set(s for s in SEED_MARKER_FILE.read_text().strip().split("\n") if s)
     return scope_id in seeded
 
 
 def _mark_seeded(scope_id: str):
-    """Mark a scope as seeded so we don't re-scan."""
+    """Mark a scope as seeded so we don't re-scan. Atomic write."""
     existing = ""
     if SEED_MARKER_FILE.exists():
         existing = SEED_MARKER_FILE.read_text().strip()
-    seeded = set(existing.split("\n")) if existing else set()
+    seeded = set(s for s in existing.split("\n") if s) if existing else set()
     seeded.add(scope_id)
-    SEED_MARKER_FILE.write_text("\n".join(sorted(seeded)))
+    # Atomic write via temp file + rename
+    tmp = SEED_MARKER_FILE.with_suffix(".tmp")
+    tmp.write_text("\n".join(sorted(seeded)))
+    tmp.replace(SEED_MARKER_FILE)
 
 
 def _auto_seed(scope_id: str, project_dir: str | None = None) -> list[dict]:
@@ -833,34 +837,42 @@ def memory_feedback(memory_ids: str, approved: bool) -> str:
     ids = [mid.strip() for mid in memory_ids.split(",") if mid.strip()]
     updated = 0
 
-    # Find memories by prefix match
-    all_mems = _all_memories()
     for target_id in ids:
-        for mem in all_mems:
-            if mem["id"].startswith(target_id):
-                if approved:
-                    mem["confidence"] = min(1.0, float(mem.get("confidence", 0.5)) + 0.05)
-                    mem["success_count"] = mem.get("success_count", 0) + 1
-                else:
-                    mem["confidence"] = max(0.0, float(mem.get("confidence", 0.5)) - 0.1)
-                    mem["failure_count"] = mem.get("failure_count", 0) + 1
+        # Try direct load first (full UUID), then prefix match
+        mem = _load_memory(target_id)
+        if not mem:
+            # Prefix match — require at least 8 chars to prevent broad matches
+            if len(target_id) < 8:
+                continue
+            for f in MEMORIES_DIR.glob("*.json"):
+                if f.stem.startswith(target_id):
+                    mem = _load_memory(f.stem)
+                    break
+        if not mem:
+            continue
 
-                # Recalculate impact
-                s = mem.get("success_count", 0)
-                f = mem.get("failure_count", 0)
-                mem["impact_score"] = s / max(1, s + f)
-                mem["last_validated_at"] = _now()
+        if approved:
+            mem["confidence"] = min(1.0, float(mem.get("confidence", 0.5)) + 0.05)
+            mem["success_count"] = mem.get("success_count", 0) + 1
+        else:
+            mem["confidence"] = max(0.0, float(mem.get("confidence", 0.5)) - 0.1)
+            mem["failure_count"] = mem.get("failure_count", 0) + 1
 
-                # Auto-promote check
-                if (mem.get("promotion_status") == "candidate"
-                        and mem.get("retrieval_count", 0) >= 5
-                        and mem.get("impact_score", 0) > 0.7):
-                    mem["promotion_status"] = "learned"
-                    mem["verified"] = True
+        # Recalculate impact
+        s = mem.get("success_count", 0)
+        f = mem.get("failure_count", 0)
+        mem["impact_score"] = s / max(1, s + f)
+        mem["last_validated_at"] = _now()
 
-                _save_memory(mem)
-                updated += 1
-                break
+        # Auto-promote check
+        if (mem.get("promotion_status") == "candidate"
+                and mem.get("retrieval_count", 0) >= 5
+                and mem.get("impact_score", 0) > 0.7):
+            mem["promotion_status"] = "learned"
+            mem["verified"] = True
+
+        _save_memory(mem)
+        updated += 1
 
     return f"Updated {updated} memories (approved={approved})"
 
@@ -909,14 +921,20 @@ def memory_promote(memory_id: str) -> str:
     """Promote a candidate memory to learned status.
     memory_id: first 8 chars or full ID."""
 
-    for mem in _all_memories():
-        if mem["id"].startswith(memory_id):
-            if mem.get("promotion_status") == "learned":
-                return f"Memory {memory_id} is already learned."
-            mem["promotion_status"] = "learned"
-            mem["human_approved"] = True
-            _save_memory(mem)
-            return f"Memory promoted to learned: {mem.get('title', memory_id)}"
+    mem = _load_memory(memory_id)
+    if not mem and len(memory_id) >= 8:
+        for f in MEMORIES_DIR.glob("*.json"):
+            if f.stem.startswith(memory_id):
+                mem = _load_memory(f.stem)
+                break
+    if not mem:
+        return f"Memory not found: {memory_id}"
+    if mem.get("promotion_status") == "learned":
+        return f"Memory {memory_id} is already learned."
+    mem["promotion_status"] = "learned"
+    mem["human_approved"] = True
+    _save_memory(mem)
+    return f"Memory promoted to learned: {mem.get('title', memory_id)}"
 
     return f"Memory not found: {memory_id}"
 
@@ -1112,7 +1130,10 @@ def memory_import(source_path: str, scope_id: str = "default") -> str:
 
     Great for importing from Obsidian vaults, note directories, or documentation."""
 
-    source = Path(source_path).expanduser()
+    source = Path(source_path).expanduser().resolve()
+    home = Path.home().resolve()
+    if not str(source).startswith(str(home)):
+        return f"Access denied: can only import from within home directory"
     if not source.exists():
         return f"Path not found: {source_path}"
 
