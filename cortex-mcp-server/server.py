@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
+from starter_packs import detect_packs, get_pack_memories
 
 # ─── Storage ──────────────────────────────────────────────────────
 
@@ -355,6 +356,23 @@ def _auto_seed(scope_id: str, project_dir: str | None = None) -> list[dict]:
                 )
                 memories.append(mem)
                 break
+
+    # 7. Starter packs — universal + language-specific
+    detected_packs = detect_packs(cwd)
+    pack_memories = get_pack_memories(detected_packs)
+    for title, content, mem_type, tags in pack_memories:
+        mem = _make_memory(
+            content=content,
+            title=title,
+            memory_type=mem_type,
+            scope_id=scope_id,
+            tags=tags + ["starter-pack"],
+            source_type="starter_pack",
+        )
+        mem["confidence"] = 0.7  # starter pack knowledge is pre-vetted
+        mem["promotion_status"] = "learned"  # start as learned, not candidate
+        mem["verified"] = True
+        memories.append(mem)
 
     # Save all and mark seeded
     for mem in memories:
