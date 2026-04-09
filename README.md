@@ -3,7 +3,11 @@
 Persistent memory for Claude Code. Remembers across sessions, gets smarter over time.
 
 ```bash
-claude plugin install github:TT-Wang/cortex-plugin
+# Add the marketplace
+/plugin marketplace add TT-Wang/cortex-plugin
+
+# Install the plugin
+/plugin install cortex@cortex-marketplace
 ```
 
 ## What it does
