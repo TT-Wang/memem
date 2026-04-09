@@ -8,12 +8,5 @@
   },
   "repository": "https://github.com/TT-Wang/cortex-plugin",
   "license": "MIT",
-  "keywords": ["memory", "context", "knowledge", "recall", "learning"],
-  "mcpServers": {
-    "cortex": {
-      "command": "python3",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/cortex-mcp-server/server.py"],
-      "env": {}
-    }
-  }
+  "keywords": ["memory", "context", "knowledge", "recall", "learning"]
 }

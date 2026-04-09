@@ -2,12 +2,16 @@
   "name": "cortex-marketplace",
   "owner": {
     "name": "TT-Wang",
-    "email": "tt-wang@users.noreply.github.com"
+    "url": "https://github.com/TT-Wang"
+  },
+  "metadata": {
+    "description": "Cortex persistent memory plugin for Claude Code",
+    "version": "1.0.0"
   },
   "plugins": [
     {
       "name": "cortex",
-      "source": ".",
+      "source": "./",
       "description": "Intelligent cross-session memory and context assembly for Claude Code",
       "version": "0.1.0",
       "author": {
