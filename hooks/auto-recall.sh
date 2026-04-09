@@ -38,12 +38,16 @@ find "$SESSION_MARKER_DIR" -type f -mtime +7 -delete 2>/dev/null || true
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SERVER="$SCRIPT_DIR/../cortex-mcp-server/server.py"
 
-# Use Haiku to rewrite the prompt into vector-DB-friendly search keywords
+# Use Haiku to rewrite the prompt into vector-DB-friendly search sentences
 SMART_QUERY=$(claude -p --model haiku --tools "" \
-  --system-prompt "You are a keyword extractor. Output ONLY search phrases, never full sentences or explanations." \
-  "TASK: Convert this into 3-5 search phrases for a coding knowledge database. Each phrase should be 3-6 words, keyword-rich. Include project names and technical terms mentioned or implied.
+  --system-prompt "You are a search query rewriter for a vector database. Output ONLY the rewritten queries, nothing else." \
+  "TASK: Rewrite this user message into 3 short descriptive sentences that a vector database can match against stored memories. The database stores knowledge about coding projects — lessons, decisions, conventions, development history.
 
-NO markdown. NO explanations. Just the search phrases, one per line.
+RULES:
+- Each sentence should describe what the user is looking for, as if it were the memory itself
+- Stay close to the user's words — do NOT add outside knowledge or guess what project names mean
+- You MAY add synonyms for better coverage
+- One sentence per line, nothing else
 
 User message: $PROMPT" 2>/dev/null || echo "$PROMPT")
 
