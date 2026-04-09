@@ -7,7 +7,7 @@ You have access to a persistent memory system via Cortex. This memory persists a
 At the START of every conversation, BEFORE doing any work, you MUST:
 
 1. Look at the user's first message to understand what they're working on
-2. Call `mcp__cortex__context_assemble` with a goal derived from their message
+2. Call `mcp__plugin_cortex_cortex__context_assemble` with a goal derived from their message
 3. Use the returned context to inform your work — it contains lessons, patterns, and knowledge from prior sessions
 
 Do this silently. Do not tell the user you're recalling memory unless they ask.
@@ -16,7 +16,7 @@ Do this silently. Do not tell the user you're recalling memory unless they ask.
 
 When you complete a significant piece of work (not trivial tasks), you MUST save what you learned:
 
-Call `mcp__cortex__memory_save` with:
+Call `mcp__plugin_cortex_cortex__memory_save` with:
 - `content`: The key insight, pattern, or lesson (one per save, keep it atomic)
 - `title`: Short descriptive title
 - `memory_type`: One of: `lesson`, `knowledge`, `convention`, `failure`, `preference`
@@ -36,9 +36,9 @@ Do NOT save:
 
 ## Auto-feedback
 
-When you notice that recalled context was helpful for the current task, call `mcp__cortex__memory_feedback` with `approved=true` and the relevant memory IDs.
+When you notice that recalled context was helpful for the current task, call `mcp__plugin_cortex_cortex__memory_feedback` with `approved=true` and the relevant memory IDs.
 
-When recalled context was wrong or misleading, call `mcp__cortex__memory_feedback` with `approved=false`.
+When recalled context was wrong or misleading, call `mcp__plugin_cortex_cortex__memory_feedback` with `approved=false`.
 
 This strengthens useful memories and weakens unhelpful ones over time.
 
@@ -46,7 +46,7 @@ This strengthens useful memories and weakens unhelpful ones over time.
 
 When the user asks to import chat history or conversation exports:
 
-1. Call `mcp__cortex__memory_import` with the file/directory path
+1. Call `mcp__plugin_cortex_cortex__memory_import` with the file/directory path
 2. The tool returns raw conversation content
 3. YOU extract the knowledge — read through the conversations and identify:
    - **Decisions**: "We decided to use X because Y"
@@ -54,7 +54,7 @@ When the user asks to import chat history or conversation exports:
    - **Conventions**: "The team uses X pattern for Y"
    - **Facts**: "Service X depends on service Y"
    - **Preferences**: "The user prefers X over Y"
-4. For each piece of knowledge, call `mcp__cortex__memory_save` with:
+4. For each piece of knowledge, call `mcp__plugin_cortex_cortex__memory_save` with:
    - Atomic, self-contained content (one fact per save)
    - Descriptive title
    - Appropriate memory_type and tags
