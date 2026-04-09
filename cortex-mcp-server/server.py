@@ -1066,7 +1066,14 @@ if __name__ == "__main__":
 
     cmd = _sys.argv[1] if len(_sys.argv) >= 2 else None
 
-    if cmd == "--mine-session" and len(_sys.argv) >= 3:
+    if cmd == "--recall":
+        query = " ".join(_sys.argv[2:]) if len(_sys.argv) >= 3 else ""
+        if query:
+            result = memory_recall(query, limit=10)
+            print(result)
+        else:
+            print("No query provided.")
+    elif cmd == "--mine-session" and len(_sys.argv) >= 3:
         print(json.dumps(mine_session(_sys.argv[2])))
     elif cmd == "--mine-all":
         print(json.dumps(mine_all()))
