@@ -7,7 +7,7 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/auto-recall.sh\"",
-            "timeout": 45
+            "timeout": 5
           }
         ]
       }
