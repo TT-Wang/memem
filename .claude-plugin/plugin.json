@@ -1,0 +1,19 @@
+{
+  "name": "cortex",
+  "version": "0.1.0",
+  "description": "Intelligent cross-session memory and context assembly for Claude Code",
+  "author": {
+    "name": "TT-Wang",
+    "url": "https://github.com/TT-Wang"
+  },
+  "repository": "https://github.com/TT-Wang/cortex-plugin",
+  "license": "MIT",
+  "keywords": ["memory", "context", "knowledge", "recall", "learning"],
+  "mcpServers": {
+    "cortex": {
+      "command": "python3",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/cortex-mcp-server/server.py"],
+      "env": {}
+    }
+  }
+}
