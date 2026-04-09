@@ -39,8 +39,10 @@ CHROMADB_DIR = CORTEX_DIR / "chromadb"
 _chroma_client = chromadb.PersistentClient(path=str(CHROMADB_DIR))
 _collection = _chroma_client.get_or_create_collection("memories")
 
-OBSIDIAN_MEMORIES_DIR = Path.home() / "obsidian-brain" / "cortex" / "memories"
-OBSIDIAN_MEMORIES_DIR.mkdir(parents=True, exist_ok=True)
+OBSIDIAN_VAULT = Path.home() / "obsidian-brain"
+OBSIDIAN_MEMORIES_DIR = OBSIDIAN_VAULT / "cortex" / "memories"
+if OBSIDIAN_VAULT.exists():
+    OBSIDIAN_MEMORIES_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _slugify(text: str, max_len: int = 60) -> str:
@@ -78,11 +80,12 @@ def _load_memory(memory_id: str) -> dict | None:
         return None
 
 
-def _save_memory(mem: dict):
+def _flatten_meta(mem: dict) -> dict:
+    """Flatten memory dict to ChromaDB-compatible metadata (str/int/float/bool only)."""
     meta = {}
     for k, v in mem.items():
         if k in ("id", "essence"):
-            continue  # id and document handled separately
+            continue
         if v is None:
             meta[k] = ""
         elif isinstance(v, list):
@@ -93,27 +96,45 @@ def _save_memory(mem: dict):
             meta[k] = v
         else:
             meta[k] = str(v)
+    return meta
 
-    # Obsidian dual-write: compute filename before upsert so we can store it in metadata
-    _write_obsidian_memory(mem)
-    # Store obsidian_file in meta so deletion can find the file
-    if mem.get("obsidian_file"):
-        meta["obsidian_file"] = mem["obsidian_file"]
 
+def _save_memory(mem: dict, skip_obsidian: bool = False):
+    """Save to ChromaDB (primary), then Obsidian (if vault exists)."""
+    meta = _flatten_meta(mem)
+
+    # ChromaDB first (source of truth)
     _collection.upsert(
         ids=[mem["id"]],
         documents=[mem.get("essence", "")],
         metadatas=[meta]
     )
 
+    # Obsidian dual-write (skip for retrieval count updates)
+    if not skip_obsidian and OBSIDIAN_MEMORIES_DIR.parent.exists():
+        _write_obsidian_memory(mem)
+        if mem.get("obsidian_file"):
+            # Update ChromaDB metadata with obsidian filename
+            meta["obsidian_file"] = mem["obsidian_file"]
+            _collection.update(ids=[mem["id"]], metadatas=[meta])
+
 
 def _write_obsidian_memory(mem: dict):
     """Write a memory as markdown to the Obsidian vault."""
+    if not OBSIDIAN_MEMORIES_DIR.exists():
+        return
     title = mem.get("title", "Untitled")
     slug = _slugify(title)
     if not slug:
         slug = mem["id"][:8]
     filename = f"{slug}-{mem['id'][:8]}.md"
+
+    # Delete old file if slug changed (prevents orphans)
+    old_file = mem.get("obsidian_file", "")
+    if old_file and old_file != filename:
+        old_path = OBSIDIAN_MEMORIES_DIR / old_file
+        if old_path.exists():
+            old_path.unlink()
 
     # YAML frontmatter
     tags = mem.get("domain_tags", [])
@@ -235,22 +256,24 @@ def _detect_domain_room(content: str, title: str = "", tags: list[str] | None = 
     return (domain, room)
 
 
-def _is_duplicate(content: str, scope_id: str = "default", threshold: float = 0.8, return_match: bool = False):
-    """Check if content is too similar to an existing memory."""
-    content_words = set(content.lower().split())
-    if not content_words:
-        return None if return_match else False
-
-    for mem in _all_memories(scope_id):
-        mem_text = mem.get("essence", "")
-        if not mem_text:
-            continue
-        mem_words = set(mem_text.lower().split())
-        if not mem_words:
-            continue
-        overlap = len(content_words & mem_words) / max(len(content_words), len(mem_words))
-        if overlap >= threshold:
-            return mem if return_match else True
+def _is_duplicate(content: str, scope_id: str = "default", threshold: float = 0.3, return_match: bool = False):
+    """Check if content is too similar to an existing memory using ChromaDB similarity.
+    threshold: ChromaDB distance below which content is considered duplicate (lower = more similar)."""
+    try:
+        kwargs = {"query_texts": [content], "n_results": 1, "include": ["documents", "metadatas", "distances"]}
+        if scope_id:
+            kwargs["where"] = {"scope_id": scope_id}
+        result = _collection.query(**kwargs)
+        if not result["ids"] or not result["ids"][0]:
+            return None if return_match else False
+        distance = result["distances"][0][0]
+        if distance < threshold:
+            if return_match:
+                flat = {"ids": result["ids"][0], "documents": result["documents"][0], "metadatas": result["metadatas"][0]}
+                return _reconstruct_memory(flat, 0)
+            return True
+    except Exception:
+        pass
     return None if return_match else False
 
 
@@ -572,16 +595,11 @@ def memory_recall(query: str, scope_id: str = "default", limit: int = 10) -> str
     if transcript_results and "No matching" not in transcript_results:
         sections.append(f"### Related Session Logs\n\n{transcript_results}")
 
-    # Update retrieval counts
+    # Update retrieval counts (skip Obsidian rewrite — just metadata update)
     for mem in memories:
         mem["retrieval_count"] = mem.get("retrieval_count", 0) + 1
         mem["last_retrieved_at"] = _now()
-        _save_memory(mem)
-
-    log_entry = {"id": str(uuid.uuid4()), "goal": query,
-                 "memory_ids": [m["id"] for m in memories],
-                 "scope_id": scope_id, "timestamp": _now()}
-    (LOGS_DIR / f"retrieval-{log_entry['id']}.json").write_text(json.dumps(log_entry, indent=2))
+        _save_memory(mem, skip_obsidian=True)
 
     return "\n".join(sections) if sections else f"No memories found for: {query}"
 
@@ -789,7 +807,10 @@ def transcript_search(query: str, limit: int = 5) -> str:
     for jsonl_path in base_dir.rglob("*.jsonl"):
         if "/subagents/" in str(jsonl_path):
             continue
+        # Skip tiny sessions (likely Haiku expansion calls)
         try:
+            if jsonl_path.stat().st_size < 5000:
+                continue
             pairs = _parse_jsonl_session(str(jsonl_path))
         except Exception:
             continue
@@ -1003,23 +1024,33 @@ def garbage_collect() -> dict:
             except (ValueError, TypeError):
                 pass
 
-    # Merge: >90% word overlap
+    # Merge: find near-duplicates via ChromaDB similarity search
     remaining = [m for m in _all_memories() if m["id"] not in deleted_ids]
-    for i in range(len(remaining)):
-        a = remaining[i]
-        if a["id"] in deleted_ids:
+    for mem in remaining:
+        if mem["id"] in deleted_ids:
             continue
-        for j in range(i + 1, len(remaining)):
-            b = remaining[j]
-            if b["id"] in deleted_ids:
+        try:
+            result = _collection.query(query_texts=[mem.get("essence", "")], n_results=2,
+                                       include=["documents", "metadatas", "distances"])
+            if not result["ids"] or len(result["ids"][0]) < 2:
                 continue
-            wa = set(a.get("essence", "").lower().split())
-            wb = set(b.get("essence", "").lower().split())
-            if wa and wb and len(wa & wb) / max(len(wa), len(wb)) > 0.9:
-                loser = b if float(a.get("confidence", 0)) >= float(b.get("confidence", 0)) else a
-                if _delete_memory(loser["id"]):
-                    deleted_ids.add(loser["id"])
+            # First result is self, second is nearest neighbor
+            neighbor_id = result["ids"][0][1]
+            distance = result["distances"][0][1]
+            if distance < 0.1 and neighbor_id not in deleted_ids:  # very similar
+                neighbor = _load_memory(neighbor_id)
+                if not neighbor:
+                    continue
+                # Keep higher confidence
+                if float(mem.get("confidence", 0)) >= float(neighbor.get("confidence", 0)):
+                    loser_id = neighbor_id
+                else:
+                    loser_id = mem["id"]
+                if _delete_memory(loser_id):
+                    deleted_ids.add(loser_id)
                     merged += 1
+        except Exception:
+            continue
 
     # Prune: cap at 500
     remaining = [m for m in _all_memories() if m["id"] not in deleted_ids]
@@ -1033,8 +1064,18 @@ def garbage_collect() -> dict:
                 deleted_ids.add(mem["id"])
                 pruned += 1
 
+    # Clean up old retrieval logs (>30 days)
+    logs_cleaned = 0
+    for log_file in LOGS_DIR.glob("retrieval-*.json"):
+        try:
+            if log_file.stat().st_mtime < thirty_days_ago:
+                log_file.unlink()
+                logs_cleaned += 1
+        except OSError:
+            pass
+
     return {"decayed": decayed, "merged": merged, "pruned": pruned,
-            "remaining": len(_all_memories())}
+            "logs_cleaned": logs_cleaned, "remaining": len(_all_memories())}
 
 
 # ─── CLI ─────────────────────────────────────────────────────────
