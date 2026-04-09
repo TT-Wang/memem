@@ -119,6 +119,253 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _make_memory(content: str, title: str, memory_type: str = "knowledge",
+                 scope_id: str = "default", tags: list[str] | None = None,
+                 source_type: str = "auto_seed") -> dict:
+    """Create a memory dict without saving."""
+    return {
+        "id": str(uuid.uuid4()),
+        "essence": content,
+        "full_record": content,
+        "title": title,
+        "memory_type": memory_type,
+        "scope_type": "project",
+        "scope_id": scope_id,
+        "confidence": 0.6,  # slightly above default — seeded knowledge
+        "impact_score": 0.0,
+        "success_count": 0,
+        "failure_count": 0,
+        "retrieval_count": 0,
+        "promotion_status": "candidate",
+        "verified": False,
+        "human_approved": False,
+        "domain_tags": tags or [],
+        "associations": [],
+        "contradicts": [],
+        "source_type": source_type,
+        "created_at": _now(),
+        "last_retrieved_at": None,
+        "last_validated_at": None,
+    }
+
+
+# ─── Auto-seed ───────────────────────────────────────────────────
+
+SEED_MARKER_FILE = CORTEX_DIR / ".seeded_scopes"
+
+
+def _was_seeded(scope_id: str) -> bool:
+    """Check if a scope has already been seeded."""
+    if not SEED_MARKER_FILE.exists():
+        return False
+    seeded = set(SEED_MARKER_FILE.read_text().strip().split("\n"))
+    return scope_id in seeded
+
+
+def _mark_seeded(scope_id: str):
+    """Mark a scope as seeded so we don't re-scan."""
+    existing = ""
+    if SEED_MARKER_FILE.exists():
+        existing = SEED_MARKER_FILE.read_text().strip()
+    seeded = set(existing.split("\n")) if existing else set()
+    seeded.add(scope_id)
+    SEED_MARKER_FILE.write_text("\n".join(sorted(seeded)))
+
+
+def _auto_seed(scope_id: str, project_dir: str | None = None) -> list[dict]:
+    """Scan a project and create starter memories.
+
+    Extracts knowledge from:
+    - README.md / CLAUDE.md (project description, conventions)
+    - package.json / pyproject.toml / Cargo.toml (tech stack, deps)
+    - .gitignore patterns (what the project cares about)
+    - git log (recent activity patterns)
+    - Directory structure (architecture)
+    """
+    if _was_seeded(scope_id):
+        return []
+
+    cwd = project_dir or os.getcwd()
+    if not os.path.isdir(cwd):
+        return []
+
+    memories = []
+
+    # 1. README / CLAUDE.md — project description
+    for doc_name in ["CLAUDE.md", "README.md", "readme.md"]:
+        doc_path = os.path.join(cwd, doc_name)
+        if os.path.exists(doc_path):
+            try:
+                content = open(doc_path).read()[:2000]
+                # Extract first heading + first paragraph
+                lines = content.split("\n")
+                title_line = next((l for l in lines if l.startswith("# ")), "")
+                title = title_line.lstrip("# ").strip() or doc_name
+                # Get first meaningful paragraph
+                paragraphs = re.split(r'\n\n+', content)
+                desc = next((p for p in paragraphs if len(p.strip()) > 20
+                            and not p.startswith("#")), "")
+                if desc:
+                    mem = _make_memory(
+                        content=f"Project: {title}. {desc.strip()[:500]}",
+                        title=f"Project overview: {title}",
+                        memory_type="knowledge",
+                        scope_id=scope_id,
+                        tags=["project", "overview"],
+                    )
+                    memories.append(mem)
+            except OSError:
+                pass
+
+    # 2. Tech stack from config files
+    tech_detectors = [
+        ("pyproject.toml", "Python"),
+        ("package.json", "JavaScript/Node.js"),
+        ("Cargo.toml", "Rust"),
+        ("go.mod", "Go"),
+        ("Gemfile", "Ruby"),
+        ("pom.xml", "Java/Maven"),
+        ("build.gradle", "Java/Gradle"),
+        ("requirements.txt", "Python"),
+        ("composer.json", "PHP"),
+    ]
+    detected_stack = []
+    for filename, lang in tech_detectors:
+        if os.path.exists(os.path.join(cwd, filename)):
+            detected_stack.append(lang)
+
+    if detected_stack:
+        stack_str = ", ".join(set(detected_stack))
+        mem = _make_memory(
+            content=f"Tech stack: {stack_str}",
+            title=f"Tech stack: {stack_str}",
+            memory_type="knowledge",
+            scope_id=scope_id,
+            tags=["tech-stack"] + [s.lower().split("/")[0] for s in detected_stack],
+        )
+        memories.append(mem)
+
+    # 3. Dependencies (extract key deps from config)
+    pyproject = os.path.join(cwd, "pyproject.toml")
+    if os.path.exists(pyproject):
+        try:
+            content = open(pyproject).read()
+            # Extract dependency names
+            deps_match = re.findall(r'"([a-zA-Z][a-zA-Z0-9_-]+)', content)
+            key_deps = [d for d in set(deps_match) if len(d) > 2][:15]
+            if key_deps:
+                mem = _make_memory(
+                    content=f"Key dependencies: {', '.join(sorted(key_deps))}",
+                    title="Project dependencies",
+                    memory_type="knowledge",
+                    scope_id=scope_id,
+                    tags=["dependencies"],
+                )
+                memories.append(mem)
+        except OSError:
+            pass
+
+    pkg_json = os.path.join(cwd, "package.json")
+    if os.path.exists(pkg_json):
+        try:
+            data = json.loads(open(pkg_json).read())
+            all_deps = list(data.get("dependencies", {}).keys()) + list(data.get("devDependencies", {}).keys())
+            if all_deps:
+                mem = _make_memory(
+                    content=f"Key dependencies: {', '.join(sorted(all_deps[:15]))}",
+                    title="Project dependencies",
+                    memory_type="knowledge",
+                    scope_id=scope_id,
+                    tags=["dependencies"],
+                )
+                memories.append(mem)
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    # 4. Directory structure — architecture overview
+    top_dirs = []
+    try:
+        for entry in sorted(os.listdir(cwd)):
+            full = os.path.join(cwd, entry)
+            if os.path.isdir(full) and not entry.startswith(".") and entry not in (
+                "node_modules", "__pycache__", "venv", ".venv", "dist", "build", ".git"
+            ):
+                top_dirs.append(entry)
+    except OSError:
+        pass
+
+    if top_dirs:
+        mem = _make_memory(
+            content=f"Project structure: {', '.join(top_dirs[:15])}",
+            title="Directory structure",
+            memory_type="knowledge",
+            scope_id=scope_id,
+            tags=["architecture", "structure"],
+        )
+        memories.append(mem)
+
+    # 5. Git — recent patterns
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["git", "log", "--oneline", "-10", "--no-decorate"],
+            capture_output=True, text=True, cwd=cwd, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            commits = result.stdout.strip()
+            mem = _make_memory(
+                content=f"Recent git history:\n{commits}",
+                title="Recent development activity",
+                memory_type="knowledge",
+                scope_id=scope_id,
+                tags=["git", "history"],
+            )
+            memories.append(mem)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+    # 6. Test framework detection
+    test_patterns = {
+        "pytest": ["conftest.py", "pytest.ini", "pyproject.toml"],
+        "jest": ["jest.config.js", "jest.config.ts"],
+        "vitest": ["vitest.config.ts", "vitest.config.js"],
+        "mocha": [".mocharc.yml", ".mocharc.json"],
+        "cargo test": ["Cargo.toml"],
+    }
+    for framework, indicators in test_patterns.items():
+        for indicator in indicators:
+            path = os.path.join(cwd, indicator)
+            if os.path.exists(path):
+                if framework == "pytest" and indicator == "pyproject.toml":
+                    try:
+                        if "pytest" not in open(path).read():
+                            continue
+                    except OSError:
+                        continue
+                if framework == "cargo test" and indicator == "Cargo.toml":
+                    # Only if tests/ dir exists
+                    if not os.path.isdir(os.path.join(cwd, "tests")):
+                        continue
+                mem = _make_memory(
+                    content=f"Test framework: {framework}",
+                    title=f"Uses {framework} for testing",
+                    memory_type="convention",
+                    scope_id=scope_id,
+                    tags=["testing", framework.replace(" ", "-")],
+                )
+                memories.append(mem)
+                break
+
+    # Save all and mark seeded
+    for mem in memories:
+        _save_memory(mem)
+
+    if memories:
+        _mark_seeded(scope_id)
+
+    return memories
+
+
 # ─── MCP Server ──────────────────────────────────────────────────
 
 mcp = FastMCP("cortex")
@@ -131,6 +378,13 @@ def context_assemble(goal: str, scope_id: str = "default", limit: int = 10) -> s
     Returns formatted context blocks from memory."""
 
     memories = _search_memories(goal, scope_id=scope_id, limit=limit)
+
+    # Auto-seed on first use — scan the project and create starter memories
+    if not memories and not _was_seeded(scope_id):
+        seeded = _auto_seed(scope_id)
+        if seeded:
+            # Re-search after seeding
+            memories = _search_memories(goal, scope_id=scope_id, limit=limit)
 
     if not memories:
         return "No relevant memories found. This is a fresh topic."
@@ -348,6 +602,162 @@ def memory_promote(memory_id: str) -> str:
             return f"Memory promoted to learned: {mem.get('title', memory_id)}"
 
     return f"Memory not found: {memory_id}"
+
+
+@mcp.tool()
+def memory_import(source_path: str, scope_id: str = "default") -> str:
+    """Import knowledge from files or directories into memory.
+
+    Supports:
+    - Markdown files (.md) — each heading becomes a memory
+    - JSON files (.json) — each key-value or array item becomes a memory
+    - Text files (.txt) — entire file becomes one memory
+    - Directories — recursively imports all supported files
+
+    Great for importing from Obsidian vaults, note directories, or documentation."""
+
+    source = Path(source_path).expanduser()
+    if not source.exists():
+        return f"Path not found: {source_path}"
+
+    imported = 0
+
+    if source.is_file():
+        imported = _import_file(source, scope_id)
+    elif source.is_dir():
+        for root, dirs, files in os.walk(source, followlinks=False):
+            # Skip hidden and noise
+            dirs[:] = [d for d in dirs if not d.startswith(".")
+                      and d not in ("node_modules", "__pycache__", ".git", "venv")]
+            for fname in sorted(files):
+                if fname.startswith("."):
+                    continue
+                fpath = Path(root) / fname
+                imported += _import_file(fpath, scope_id)
+
+    return f"Imported {imported} memories from {source_path}"
+
+
+def _import_file(fpath: Path, scope_id: str) -> int:
+    """Import a single file into memory. Returns count of memories created."""
+    ext = fpath.suffix.lower()
+
+    try:
+        content = fpath.read_text(errors="ignore")
+    except OSError:
+        return 0
+
+    if not content.strip():
+        return 0
+
+    count = 0
+    rel_name = fpath.name
+
+    if ext in (".md", ".markdown"):
+        count = _import_markdown(content, rel_name, scope_id)
+    elif ext == ".json":
+        count = _import_json(content, rel_name, scope_id)
+    elif ext in (".txt", ".text", ".rst"):
+        # One memory per file
+        if len(content.strip()) > 20:
+            mem = _make_memory(
+                content=content.strip()[:2000],
+                title=fpath.stem,
+                memory_type="knowledge",
+                scope_id=scope_id,
+                tags=["imported", fpath.stem.lower()],
+                source_type="import",
+            )
+            _save_memory(mem)
+            count = 1
+
+    return count
+
+
+def _import_markdown(content: str, filename: str, scope_id: str) -> int:
+    """Split markdown by headings, create one memory per section."""
+    sections = re.split(r'^(#{1,3}\s+.+)$', content, flags=re.MULTILINE)
+
+    count = 0
+    current_title = filename.replace(".md", "")
+    current_content = ""
+
+    for part in sections:
+        part = part.strip()
+        if not part:
+            continue
+        if re.match(r'^#{1,3}\s+', part):
+            # Save previous section
+            if current_content.strip() and len(current_content.strip()) > 20:
+                mem = _make_memory(
+                    content=current_content.strip()[:2000],
+                    title=current_title,
+                    memory_type="knowledge",
+                    scope_id=scope_id,
+                    tags=["imported", filename.replace(".md", "").lower()],
+                    source_type="import",
+                )
+                _save_memory(mem)
+                count += 1
+            current_title = part.lstrip("# ").strip()
+            current_content = ""
+        else:
+            current_content += part + "\n"
+
+    # Last section
+    if current_content.strip() and len(current_content.strip()) > 20:
+        mem = _make_memory(
+            content=current_content.strip()[:2000],
+            title=current_title,
+            memory_type="knowledge",
+            scope_id=scope_id,
+            tags=["imported", filename.replace(".md", "").lower()],
+            source_type="import",
+        )
+        _save_memory(mem)
+        count += 1
+
+    return count
+
+
+def _import_json(content: str, filename: str, scope_id: str) -> int:
+    """Import JSON — each top-level key or array item becomes a memory."""
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError:
+        return 0
+
+    count = 0
+    if isinstance(data, dict):
+        for key, value in data.items():
+            text = f"{key}: {json.dumps(value)}" if not isinstance(value, str) else f"{key}: {value}"
+            if len(text) > 20:
+                mem = _make_memory(
+                    content=text[:2000],
+                    title=key,
+                    memory_type="knowledge",
+                    scope_id=scope_id,
+                    tags=["imported", filename.replace(".json", "").lower()],
+                    source_type="import",
+                )
+                _save_memory(mem)
+                count += 1
+    elif isinstance(data, list):
+        for i, item in enumerate(data[:50]):  # cap at 50
+            text = json.dumps(item) if not isinstance(item, str) else item
+            if len(text) > 20:
+                mem = _make_memory(
+                    content=text[:2000],
+                    title=f"{filename} item {i+1}",
+                    memory_type="knowledge",
+                    scope_id=scope_id,
+                    tags=["imported", filename.replace(".json", "").lower()],
+                    source_type="import",
+                )
+                _save_memory(mem)
+                count += 1
+
+    return count
 
 
 # ─── Run ─────────────────────────────────────────────────────────
