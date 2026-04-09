@@ -1,0 +1,23 @@
+{
+  "name": "cortex-marketplace",
+  "owner": {
+    "name": "TT-Wang",
+    "email": "tt-wang@users.noreply.github.com"
+  },
+  "plugins": [
+    {
+      "name": "cortex",
+      "source": ".",
+      "description": "Intelligent cross-session memory and context assembly for Claude Code",
+      "version": "0.1.0",
+      "author": {
+        "name": "TT-Wang"
+      },
+      "homepage": "https://github.com/TT-Wang/cortex-plugin",
+      "repository": "https://github.com/TT-Wang/cortex-plugin",
+      "license": "MIT",
+      "keywords": ["memory", "context", "knowledge", "recall", "learning"],
+      "category": "productivity"
+    }
+  ]
+}
