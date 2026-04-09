@@ -935,12 +935,6 @@ def context_assemble(goal: str, scope_id: str = "default", limit: int = 10) -> s
     """Assemble relevant context using memory hierarchy.
     L0+L1 always loaded. L2 loaded by domain match. L3 searched on demand."""
 
-    # Auto-seed if needed — scan all projects in the user's workspace
-    # Check the seeded marker, not memory count — user may have saved
-    # memories manually before auto-seed had a chance to run.
-    if not _was_seeded(scope_id):
-        seeded = _auto_seed_workspace(scope_id)
-
     all_mems = _all_memories(scope_id)
 
     if not all_mems:
@@ -1079,10 +1073,6 @@ def memory_save(
 def memory_recall(query: str, scope_id: str = "default", limit: int = 10) -> str:
     """Search memory by keyword. Returns matching memories with their content."""
 
-    # Auto-seed if needed (in case context_assemble wasn't called first)
-    if not _was_seeded(scope_id):
-        _auto_seed_workspace(scope_id)
-
     memories = _search_memories(query, scope_id=scope_id, limit=limit)
 
     if not memories:
@@ -1105,10 +1095,6 @@ def memory_recall(query: str, scope_id: str = "default", limit: int = 10) -> str
 @mcp.tool()
 def memory_list(scope_id: str = "default") -> str:
     """List all memories in a scope."""
-
-    # Auto-seed if needed (in case context_assemble wasn't called first)
-    if not _was_seeded(scope_id):
-        _auto_seed_workspace(scope_id)
 
     memories = _all_memories(scope_id)
     if not memories:
@@ -1630,4 +1616,7 @@ def _import_json(content: str, filename: str, scope_id: str) -> int:
 # ─── Run ─────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    # Auto-seed on startup so starter packs are ready before any tool call
+    if not _was_seeded("default"):
+        _auto_seed_workspace("default")
     mcp.run(transport="stdio")
