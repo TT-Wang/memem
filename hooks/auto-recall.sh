@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Cortex auto-recall hook — reads user's prompt from stdin, recalls relevant memories.
 # Fires on UserPromptSubmit. Only runs once per session (first message).
+#
+# Flow: Haiku scans _index.md → picks relevant memories generously → loads full content
 
 set -euo pipefail
 
@@ -38,26 +40,8 @@ find "$SESSION_MARKER_DIR" -type f -mtime +7 -delete 2>/dev/null || true
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SERVER="$SCRIPT_DIR/../cortex-mcp-server/server.py"
 
-# Use Haiku to rewrite the prompt into vector-DB-friendly search sentences
-SMART_QUERY=$(claude -p --model haiku --tools "" \
-  --system-prompt "You are a search query rewriter for a vector database. Output ONLY the rewritten queries, nothing else." \
-  "TASK: Rewrite this user message into 3 short descriptive sentences that a vector database can match against stored memories. The database stores knowledge about coding projects — lessons, decisions, conventions, development history.
-
-RULES:
-- Each sentence should describe what the user is looking for, as if it were the memory itself
-- Stay close to the user's words — do NOT add outside knowledge or guess what project names mean
-- You MAY add synonyms for better coverage
-- One sentence per line, nothing else
-
-User message: $PROMPT" 2>/dev/null || echo "$PROMPT")
-
-# Fallback to raw prompt if Haiku returned empty
-if [ -z "$SMART_QUERY" ]; then
-  SMART_QUERY="$PROMPT"
-fi
-
-# Call memory_recall with the smart query
-RESULT=$(python3 "$SERVER" --recall "$SMART_QUERY" 2>/dev/null || echo "")
+# Smart recall: Haiku scans index, picks generously, loads full content
+RESULT=$(python3 "$SERVER" --recall-smart "$PROMPT" 2>/dev/null || echo "")
 
 # If we got results, inject as additional context
 if [ -n "$RESULT" ] && [ "$RESULT" != "No query provided." ]; then

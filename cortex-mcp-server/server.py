@@ -1147,7 +1147,8 @@ def _format_index_line(mem: dict) -> str:
     domain_tags = mem.get("domain_tags") or []
     tags_str = " ".join(f"#{t}" for t in domain_tags if t)
 
-    line = f"- [{date_str}] {verb}: {description}"
+    mem_id = mem.get("id", "")[:8]
+    line = f"- [{date_str}] {verb}: {description} ({mem_id})"
     if tags_str:
         line += f" | {tags_str}"
     return line
@@ -1328,6 +1329,115 @@ related: []
     return True
 
 
+# ─── Smart Recall (LLM-based index scanning) ────────────────────
+
+def _smart_recall(prompt: str, scope_id: str = "default") -> str:
+    """Haiku scans _index.md, picks generously, loads full content.
+    Falls back to memory_recall if index doesn't exist or Haiku fails."""
+    import subprocess as _sp
+
+    # Read index
+    if not INDEX_PATH.exists():
+        return memory_recall(prompt, scope_id=scope_id, limit=10)
+
+    index_content = INDEX_PATH.read_text()
+    if not index_content.strip():
+        return memory_recall(prompt, scope_id=scope_id, limit=10)
+
+    # Haiku picks relevant memories from index
+    system_prompt = (
+        "You are a memory selector. Output ONLY 8-character memory IDs, one per line, nothing else."
+    )
+    user_prompt = (
+        f"USER MESSAGE:\n{prompt}\n\n"
+        f"MEMORY INDEX:\n{index_content}\n\n"
+        "Select any memories that could be relevant to the user's message. "
+        "Be generous — include anything that might help, even loosely related. "
+        "Let the user's intent guide you. Output ONLY the 8-char IDs from parentheses, one per line."
+    )
+
+    picked_ids = []
+    try:
+        result = _sp.run(
+            ["claude", "-p", "--model", "haiku", "--tools", "",
+             "--system-prompt", system_prompt],
+            input=user_prompt,
+            capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            # Extract 8-char hex IDs from output
+            for line in result.stdout.strip().split("\n"):
+                line = line.strip().strip("-").strip()
+                # Match 8-char hex ID
+                match = re.search(r'\b([0-9a-f]{8})\b', line)
+                if match:
+                    picked_ids.append(match.group(1))
+    except Exception:
+        pass
+
+    if not picked_ids:
+        # Fallback to old recall
+        return memory_recall(prompt, scope_id=scope_id, limit=10)
+
+    # Load full content of picked memories
+    all_memories = _all_memories(scope_id)
+    mem_by_prefix = {}
+    for m in all_memories:
+        prefix = m["id"][:8]
+        mem_by_prefix[prefix] = m
+
+    picked_mems = [mem_by_prefix[pid] for pid in picked_ids if pid in mem_by_prefix]
+
+    if not picked_mems:
+        return memory_recall(prompt, scope_id=scope_id, limit=10)
+
+    # Format output grouped by project
+    by_project = {}
+    for m in picked_mems:
+        project = _extract_project(m)
+        by_project.setdefault(project, []).append(m)
+
+    sections = []
+    sorted_projects = sorted(p for p in by_project if p != "general")
+    if "general" in by_project:
+        sorted_projects.append("general")
+
+    for project in sorted_projects:
+        mems = by_project[project]
+        lines = [f"### {project}"]
+        for m in mems:
+            title = m.get("title", "Untitled")
+            clean_title = re.sub(r'^\[[^\]]+\]\s*', '', title).split("\n")[0].strip()
+            why = _map_memory_type_to_why(
+                m.get("memory_type", "knowledge"),
+                m.get("source_type", ""),
+                m.get("essence", "")
+            )
+            essence = m.get("essence", "")
+            full_record = m.get("full_record")
+
+            entry = f"- **{clean_title}** ({why})"
+            if essence and essence[:50] != clean_title[:50]:
+                entry += f"\n  {essence[:400]}"
+            if full_record and full_record != essence:
+                entry += f"\n  > {full_record[:400]}"
+            lines.append(entry)
+        sections.append("\n".join(lines))
+
+    # Also include transcript search
+    transcript_results = transcript_search(prompt, limit=3)
+    if transcript_results and "No matching" not in transcript_results:
+        sections.append(f"### Related Session Logs\n\n{transcript_results}")
+
+    # Update retrieval counts
+    for mem in picked_mems:
+        mem["retrieval_count"] = mem.get("retrieval_count", 0) + 1
+        mem["last_retrieved_at"] = _now()
+        _save_memory(mem, skip_obsidian=True)
+
+    return "\n\n".join(sections) if sections else f"No memories found for: {prompt}"
+
+
 # ─── CLI ─────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -1335,7 +1445,13 @@ if __name__ == "__main__":
 
     cmd = _sys.argv[1] if len(_sys.argv) >= 2 else None
 
-    if cmd == "--recall":
+    if cmd == "--recall-smart":
+        query = " ".join(_sys.argv[2:]) if len(_sys.argv) >= 3 else ""
+        if query:
+            print(_smart_recall(query))
+        else:
+            print("No query provided.")
+    elif cmd == "--recall":
         query = " ".join(_sys.argv[2:]) if len(_sys.argv) >= 3 else ""
         if query:
             result = memory_recall(query, limit=10)
