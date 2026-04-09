@@ -398,6 +398,51 @@ def _make_memory(content: str, title: str, memory_type: str = "knowledge",
 
 SEED_MARKER_FILE = CORTEX_DIR / ".seeded_scopes"
 
+# Indicators that a directory is a project (not just a random folder)
+_PROJECT_INDICATORS = {
+    ".git", "pyproject.toml", "package.json", "Cargo.toml", "go.mod",
+    "Gemfile", "pom.xml", "build.gradle", "requirements.txt",
+    "composer.json", "Makefile", "CMakeLists.txt",
+}
+
+# Directories to skip when scanning workspace
+_SKIP_DIRS = {
+    "node_modules", "__pycache__", "venv", ".venv", "dist", "build",
+    ".cache", ".local", ".config", ".ssh", ".gnupg", ".claude",
+    ".cortex", ".npm", ".cargo", ".rustup",
+}
+
+
+def _detect_workspace_projects(workspace: str | None = None) -> list[str]:
+    """Find all project directories in the user's workspace.
+
+    Scans immediate children of the workspace directory for directories
+    that contain project indicators (e.g. .git, package.json, pyproject.toml).
+    """
+    workspace = workspace or os.environ.get("HOME", os.path.expanduser("~"))
+    if not os.path.isdir(workspace):
+        return []
+
+    projects = []
+    try:
+        for entry in sorted(os.listdir(workspace)):
+            if entry.startswith(".") or entry in _SKIP_DIRS:
+                continue
+            full_path = os.path.join(workspace, entry)
+            if not os.path.isdir(full_path):
+                continue
+            # Check if this directory has any project indicators
+            try:
+                contents = set(os.listdir(full_path))
+            except OSError:
+                continue
+            if contents & _PROJECT_INDICATORS:
+                projects.append(full_path)
+    except OSError:
+        pass
+
+    return projects
+
 
 def _was_seeded(scope_id: str) -> bool:
     """Check if a scope has already been seeded."""
@@ -437,6 +482,7 @@ def _auto_seed(scope_id: str, project_dir: str | None = None) -> list[dict]:
     if not os.path.isdir(cwd):
         return []
 
+    project_name = os.path.basename(cwd)
     memories = []
 
     # 1. README / CLAUDE.md — project description
@@ -456,10 +502,10 @@ def _auto_seed(scope_id: str, project_dir: str | None = None) -> list[dict]:
                 if desc:
                     mem = _make_memory(
                         content=f"Project: {title}. {desc.strip()[:500]}",
-                        title=f"Project overview: {title}",
+                        title=f"[{project_name}] Project overview: {title}",
                         memory_type="knowledge",
                         scope_id=scope_id,
-                        tags=["project", "overview"],
+                        tags=["project", "overview", project_name],
                     )
                     memories.append(mem)
             except OSError:
@@ -485,11 +531,11 @@ def _auto_seed(scope_id: str, project_dir: str | None = None) -> list[dict]:
     if detected_stack:
         stack_str = ", ".join(set(detected_stack))
         mem = _make_memory(
-            content=f"Tech stack: {stack_str}",
-            title=f"Tech stack: {stack_str}",
+            content=f"[{project_name}] Tech stack: {stack_str}",
+            title=f"[{project_name}] Tech stack: {stack_str}",
             memory_type="knowledge",
             scope_id=scope_id,
-            tags=["tech-stack"] + [s.lower().split("/")[0] for s in detected_stack],
+            tags=["tech-stack", project_name] + [s.lower().split("/")[0] for s in detected_stack],
         )
         memories.append(mem)
 
@@ -503,11 +549,11 @@ def _auto_seed(scope_id: str, project_dir: str | None = None) -> list[dict]:
             key_deps = [d for d in set(deps_match) if len(d) > 2][:15]
             if key_deps:
                 mem = _make_memory(
-                    content=f"Key dependencies: {', '.join(sorted(key_deps))}",
-                    title="Project dependencies",
+                    content=f"[{project_name}] Key dependencies: {', '.join(sorted(key_deps))}",
+                    title=f"[{project_name}] Project dependencies",
                     memory_type="knowledge",
                     scope_id=scope_id,
-                    tags=["dependencies"],
+                    tags=["dependencies", project_name],
                 )
                 memories.append(mem)
         except OSError:
@@ -520,11 +566,11 @@ def _auto_seed(scope_id: str, project_dir: str | None = None) -> list[dict]:
             all_deps = list(data.get("dependencies", {}).keys()) + list(data.get("devDependencies", {}).keys())
             if all_deps:
                 mem = _make_memory(
-                    content=f"Key dependencies: {', '.join(sorted(all_deps[:15]))}",
-                    title="Project dependencies",
+                    content=f"[{project_name}] Key dependencies: {', '.join(sorted(all_deps[:15]))}",
+                    title=f"[{project_name}] Project dependencies",
                     memory_type="knowledge",
                     scope_id=scope_id,
-                    tags=["dependencies"],
+                    tags=["dependencies", project_name],
                 )
                 memories.append(mem)
         except (OSError, json.JSONDecodeError):
@@ -544,11 +590,11 @@ def _auto_seed(scope_id: str, project_dir: str | None = None) -> list[dict]:
 
     if top_dirs:
         mem = _make_memory(
-            content=f"Project structure: {', '.join(top_dirs[:15])}",
-            title="Directory structure",
+            content=f"[{project_name}] Project structure: {', '.join(top_dirs[:15])}",
+            title=f"[{project_name}] Directory structure",
             memory_type="knowledge",
             scope_id=scope_id,
-            tags=["architecture", "structure"],
+            tags=["architecture", "structure", project_name],
         )
         memories.append(mem)
 
@@ -562,11 +608,11 @@ def _auto_seed(scope_id: str, project_dir: str | None = None) -> list[dict]:
         if result.returncode == 0 and result.stdout.strip():
             commits = result.stdout.strip()
             mem = _make_memory(
-                content=f"Recent git history:\n{commits}",
-                title="Recent development activity",
+                content=f"[{project_name}] Recent git history:\n{commits}",
+                title=f"[{project_name}] Recent development activity",
                 memory_type="knowledge",
                 scope_id=scope_id,
-                tags=["git", "history"],
+                tags=["git", "history", project_name],
             )
             memories.append(mem)
     except (OSError, subprocess.TimeoutExpired):
@@ -595,11 +641,11 @@ def _auto_seed(scope_id: str, project_dir: str | None = None) -> list[dict]:
                     if not os.path.isdir(os.path.join(cwd, "tests")):
                         continue
                 mem = _make_memory(
-                    content=f"Test framework: {framework}",
-                    title=f"Uses {framework} for testing",
+                    content=f"[{project_name}] Test framework: {framework}",
+                    title=f"[{project_name}] Uses {framework} for testing",
                     memory_type="convention",
                     scope_id=scope_id,
-                    tags=["testing", framework.replace(" ", "-")],
+                    tags=["testing", framework.replace(" ", "-"), project_name],
                 )
                 memories.append(mem)
                 break
@@ -631,6 +677,254 @@ def _auto_seed(scope_id: str, project_dir: str | None = None) -> list[dict]:
     return memories
 
 
+def _auto_seed_workspace(scope_id: str) -> list[dict]:
+    """Scan all project directories in the user's workspace and seed memories.
+
+    Detects the workspace from $HOME, finds all child directories that look
+    like projects, and runs _auto_seed on each one. Starter packs are
+    collected across all projects to cover all detected languages.
+    """
+    if _was_seeded(scope_id):
+        return []
+
+    projects = _detect_workspace_projects()
+    if not projects:
+        return []
+
+    # Collect starter packs across all projects so we get all languages
+    all_packs = set()
+    for project_dir in projects:
+        all_packs.update(detect_packs(project_dir))
+
+    all_seeded = []
+    for project_dir in projects:
+        mems = _auto_seed_single_project(scope_id, project_dir,
+                                          include_starter_packs=False)
+        all_seeded.extend(mems)
+
+    # Add starter packs once, covering all detected languages
+    pack_memories = get_pack_memories(list(all_packs))
+    for title, content, mem_type, tags in pack_memories:
+        mem = _make_memory(
+            content=content,
+            title=title,
+            memory_type=mem_type,
+            scope_id=scope_id,
+            tags=tags + ["starter-pack"],
+            source_type="starter_pack",
+        )
+        mem["confidence"] = 0.7
+        mem["promotion_status"] = "learned"
+        mem["verified"] = True
+        _save_memory(mem)
+        all_seeded.append(mem)
+
+    if all_seeded:
+        _mark_seeded(scope_id)
+
+    return all_seeded
+
+
+def _auto_seed_single_project(scope_id: str, project_dir: str,
+                               include_starter_packs: bool = True) -> list[dict]:
+    """Seed memories from a single project directory without marking as seeded.
+
+    This is the inner scan logic extracted so _auto_seed_workspace can call it
+    for multiple projects under one scope.
+    """
+    cwd = project_dir
+    if not os.path.isdir(cwd):
+        return []
+
+    project_name = os.path.basename(cwd)
+    memories = []
+
+    # 1. README / CLAUDE.md — project description
+    for doc_name in ["CLAUDE.md", "README.md", "readme.md"]:
+        doc_path = os.path.join(cwd, doc_name)
+        if os.path.exists(doc_path):
+            try:
+                content = open(doc_path).read()[:2000]
+                lines = content.split("\n")
+                title_line = next((l for l in lines if l.startswith("# ")), "")
+                title = title_line.lstrip("# ").strip() or doc_name
+                paragraphs = re.split(r'\n\n+', content)
+                desc = next((p for p in paragraphs if len(p.strip()) > 20
+                            and not p.startswith("#")), "")
+                if desc:
+                    mem = _make_memory(
+                        content=f"Project: {title}. {desc.strip()[:500]}",
+                        title=f"[{project_name}] Project overview: {title}",
+                        memory_type="knowledge",
+                        scope_id=scope_id,
+                        tags=["project", "overview", project_name],
+                    )
+                    memories.append(mem)
+            except OSError:
+                pass
+
+    # 2. Tech stack
+    tech_detectors = [
+        ("pyproject.toml", "Python"),
+        ("package.json", "JavaScript/Node.js"),
+        ("Cargo.toml", "Rust"),
+        ("go.mod", "Go"),
+        ("Gemfile", "Ruby"),
+        ("pom.xml", "Java/Maven"),
+        ("build.gradle", "Java/Gradle"),
+        ("requirements.txt", "Python"),
+        ("composer.json", "PHP"),
+    ]
+    detected_stack = []
+    for filename, lang in tech_detectors:
+        if os.path.exists(os.path.join(cwd, filename)):
+            detected_stack.append(lang)
+
+    if detected_stack:
+        stack_str = ", ".join(set(detected_stack))
+        mem = _make_memory(
+            content=f"[{project_name}] Tech stack: {stack_str}",
+            title=f"[{project_name}] Tech stack: {stack_str}",
+            memory_type="knowledge",
+            scope_id=scope_id,
+            tags=["tech-stack", project_name] + [s.lower().split("/")[0] for s in detected_stack],
+        )
+        memories.append(mem)
+
+    # 3. Dependencies
+    pyproject = os.path.join(cwd, "pyproject.toml")
+    if os.path.exists(pyproject):
+        try:
+            content = open(pyproject).read()
+            deps_match = re.findall(r'"([a-zA-Z][a-zA-Z0-9_-]+)', content)
+            key_deps = [d for d in set(deps_match) if len(d) > 2][:15]
+            if key_deps:
+                mem = _make_memory(
+                    content=f"[{project_name}] Key dependencies: {', '.join(sorted(key_deps))}",
+                    title=f"[{project_name}] Project dependencies",
+                    memory_type="knowledge",
+                    scope_id=scope_id,
+                    tags=["dependencies", project_name],
+                )
+                memories.append(mem)
+        except OSError:
+            pass
+
+    pkg_json = os.path.join(cwd, "package.json")
+    if os.path.exists(pkg_json):
+        try:
+            data = json.loads(open(pkg_json).read())
+            all_deps = list(data.get("dependencies", {}).keys()) + list(data.get("devDependencies", {}).keys())
+            if all_deps:
+                mem = _make_memory(
+                    content=f"[{project_name}] Key dependencies: {', '.join(sorted(all_deps[:15]))}",
+                    title=f"[{project_name}] Project dependencies",
+                    memory_type="knowledge",
+                    scope_id=scope_id,
+                    tags=["dependencies", project_name],
+                )
+                memories.append(mem)
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    # 4. Directory structure
+    top_dirs = []
+    try:
+        for entry in sorted(os.listdir(cwd)):
+            full = os.path.join(cwd, entry)
+            if os.path.isdir(full) and not entry.startswith(".") and entry not in (
+                "node_modules", "__pycache__", "venv", ".venv", "dist", "build", ".git"
+            ):
+                top_dirs.append(entry)
+    except OSError:
+        pass
+
+    if top_dirs:
+        mem = _make_memory(
+            content=f"[{project_name}] Project structure: {', '.join(top_dirs[:15])}",
+            title=f"[{project_name}] Directory structure",
+            memory_type="knowledge",
+            scope_id=scope_id,
+            tags=["architecture", "structure", project_name],
+        )
+        memories.append(mem)
+
+    # 5. Git — recent patterns
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["git", "log", "--oneline", "-10", "--no-decorate"],
+            capture_output=True, text=True, cwd=cwd, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            commits = result.stdout.strip()
+            mem = _make_memory(
+                content=f"[{project_name}] Recent git history:\n{commits}",
+                title=f"[{project_name}] Recent development activity",
+                memory_type="knowledge",
+                scope_id=scope_id,
+                tags=["git", "history", project_name],
+            )
+            memories.append(mem)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+    # 6. Test framework detection
+    test_patterns = {
+        "pytest": ["conftest.py", "pytest.ini", "pyproject.toml"],
+        "jest": ["jest.config.js", "jest.config.ts"],
+        "vitest": ["vitest.config.ts", "vitest.config.js"],
+        "mocha": [".mocharc.yml", ".mocharc.json"],
+        "cargo test": ["Cargo.toml"],
+    }
+    for framework, indicators in test_patterns.items():
+        for indicator in indicators:
+            path = os.path.join(cwd, indicator)
+            if os.path.exists(path):
+                if framework == "pytest" and indicator == "pyproject.toml":
+                    try:
+                        if "pytest" not in open(path).read():
+                            continue
+                    except OSError:
+                        continue
+                if framework == "cargo test" and indicator == "Cargo.toml":
+                    if not os.path.isdir(os.path.join(cwd, "tests")):
+                        continue
+                mem = _make_memory(
+                    content=f"[{project_name}] Test framework: {framework}",
+                    title=f"[{project_name}] Uses {framework} for testing",
+                    memory_type="convention",
+                    scope_id=scope_id,
+                    tags=["testing", framework.replace(" ", "-"), project_name],
+                )
+                memories.append(mem)
+                break
+
+    # 7. Starter packs — only include once across all projects
+    if include_starter_packs:
+        detected_packs = detect_packs(cwd)
+        pack_memories = get_pack_memories(detected_packs)
+        for title, content, mem_type, tags in pack_memories:
+            mem = _make_memory(
+                content=content,
+                title=title,
+                memory_type=mem_type,
+                scope_id=scope_id,
+                tags=tags + ["starter-pack"],
+                source_type="starter_pack",
+            )
+            mem["confidence"] = 0.7
+            mem["promotion_status"] = "learned"
+            mem["verified"] = True
+            memories.append(mem)
+
+    # Save all
+    for mem in memories:
+        _save_memory(mem)
+
+    return memories
+
+
 # ─── MCP Server ──────────────────────────────────────────────────
 
 mcp = FastMCP("cortex")
@@ -641,13 +935,13 @@ def context_assemble(goal: str, scope_id: str = "default", limit: int = 10) -> s
     """Assemble relevant context using memory hierarchy.
     L0+L1 always loaded. L2 loaded by domain match. L3 searched on demand."""
 
-    all_mems = _all_memories(scope_id)
+    # Auto-seed if needed — scan all projects in the user's workspace
+    # Check the seeded marker, not memory count — user may have saved
+    # memories manually before auto-seed had a chance to run.
+    if not _was_seeded(scope_id):
+        seeded = _auto_seed_workspace(scope_id)
 
-    # Auto-seed if needed (existing logic)
-    if not all_mems and not _was_seeded(scope_id):
-        seeded = _auto_seed(scope_id)
-        if seeded:
-            all_mems = _all_memories(scope_id)
+    all_mems = _all_memories(scope_id)
 
     if not all_mems:
         return "No relevant memories found. This is a fresh topic."
