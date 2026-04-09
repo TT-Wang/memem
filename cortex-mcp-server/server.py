@@ -8,7 +8,7 @@ Sections:
   Storage:     ChromaDB + Obsidian dual-write CRUD
   Generation:  _make_memory, domain detection, dedup
   Auto-seed:   Scan workspace projects + load starter packs on first run
-  Retrieval:   Vector similarity search via ChromaDB, Haiku query expansion
+  Retrieval:   Vector similarity search via ChromaDB
   MCP Tools:   memory_recall, memory_save, memory_list, memory_feedback, memory_import
   Transcript:  Search raw Claude Code JSONL session files
   Mining:      Parse JSONL sessions, extract insights, save as memories
@@ -520,23 +520,6 @@ def _search_memories(query: str, scope_id: str | None = None, limit: int = 10) -
         return []
 
 
-def _expand_query(query: str) -> str:
-    """Use Haiku to expand a search query with synonyms and related terms."""
-    try:
-        import subprocess as _sp
-        result = _sp.run(
-            ["claude", "-p", "--model", "haiku",
-             f"Add synonyms, abbreviations, and related terms to this search query. "
-             f"Return ONLY the expanded query as a single line, nothing else.\n"
-             f"Query: {query}"],
-            capture_output=True, text=True, timeout=15,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return f"{query} {result.stdout.strip()}"
-    except Exception:
-        pass
-    return query
-
 
 # ─── MCP Tools ────────────────────────────────────────────────────
 
@@ -563,12 +546,10 @@ def _format_memory_as_bullet(mem: dict) -> str:
 def memory_recall(query: str, scope_id: str = "default", limit: int = 10) -> str:
     """Search all memory sources for a query. Returns structured markdown.
 
-    Pipeline: expand query (Haiku) -> search memories (vector+keyword) ->
-    search raw transcripts (live JSONL) -> format as markdown."""
+    Pipeline: ChromaDB vector search -> raw transcript search -> format as markdown."""
 
-    expanded = _expand_query(query)
-    memories = _search_memories(expanded, scope_id=scope_id, limit=limit)
-    transcript_results = transcript_search(expanded, limit=3)
+    memories = _search_memories(query, scope_id=scope_id, limit=limit)
+    transcript_results = transcript_search(query, limit=3)
 
     if not memories and ("No matching" in transcript_results or not transcript_results):
         return f"No memories found for: {query}"
