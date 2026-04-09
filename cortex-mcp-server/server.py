@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Cortex MCP Server — persistent memory and context assembly for Claude Code.
+Cortex MCP Server — persistent memory for Claude Code.
 
 Stores memories as JSON files in ~/.cortex/memories/
 No database required — works out of the box.
 
 Tools:
-  - context_assemble: Assemble relevant context for a goal
+  - memory_recall: Search all memory sources (Haiku-expanded query + vector search + transcript logs)
   - memory_save: Save a piece of knowledge
-  - memory_recall: Search memory by keyword
   - memory_list: List all memories in a scope
   - memory_feedback: Report whether recalled memories helped
   - memory_stats: Show memory system statistics
   - memory_promote: Promote a candidate memory to learned
+  - transcript_search: Search raw Claude Code JSONL session files
 """
 
 import json
@@ -184,59 +184,6 @@ def _format_memory_as_bullet(mem: dict) -> str:
         line += f"\n  > {full_record[:500]}"
 
     return line
-
-
-def _format_foundation(memories: list[dict]) -> str:
-    """Format L0 project identity and starter pack conventions as a briefing."""
-    # Split into project info and conventions
-    project_mems = [m for m in memories if m.get("source_type") in ("auto_seed",)]
-    convention_mems = [m for m in memories if m.get("source_type") == "starter_pack"]
-    user_mems = [m for m in memories if m.get("source_type") in ("user", "import")]
-
-    sections = []
-
-    if project_mems:
-        # Group project mems by project name (extract from title like "[cortex] ...")
-        projects = {}
-        for m in project_mems:
-            title = m.get("title", "")
-            if title.startswith("["):
-                proj = title.split("]")[0].lstrip("[")
-            else:
-                proj = "general"
-            projects.setdefault(proj, []).append(m)
-
-        lines = ["## Project Context"]
-        for proj, mems in sorted(projects.items()):
-            # One line per project: tech stack + key info
-            overview = next((m.get("essence", "") for m in mems
-                           if "overview" in m.get("title", "").lower()), "")
-            tech = next((m.get("essence", "") for m in mems
-                        if "tech stack" in m.get("title", "").lower()), "")
-            summary = tech or overview[:100] or "project detected"
-            lines.append(f"- **{proj}**: {summary}")
-        sections.append("\n".join(lines))
-
-    if user_mems:
-        lines = ["## Key Knowledge"]
-        for m in user_mems:
-            lines.append(f"- **{m.get('title', '')}** — {m.get('essence', '')[:200]}")
-        sections.append("\n".join(lines))
-
-    if convention_mems:
-        # Group conventions by domain, show compact summary
-        by_domain = {}
-        for m in convention_mems:
-            d = m.get("domain", "general")
-            by_domain.setdefault(d, []).append(m)
-
-        lines = ["## Conventions"]
-        for domain, mems in sorted(by_domain.items()):
-            titles = ", ".join(m.get("title", "")[:40] for m in mems)
-            lines.append(f"- **{domain}**: {titles}")
-        sections.append("\n".join(lines))
-
-    return "\n\n".join(sections)
 
 
 def _now() -> str:
@@ -797,95 +744,25 @@ def _auto_seed_single_project(scope_id: str, project_dir: str,
 mcp = FastMCP("cortex")
 
 
-@mcp.tool()
-def context_assemble(goal: str, scope_id: str = "default", limit: int = 10) -> str:
-    """Assemble relevant context as a structured markdown briefing.
-
-    Foundation (always loaded): project identity + conventions.
-    Search results (by relevance): project-specific memories matching the goal.
-    Raw logs: matching transcript exchanges from session history."""
-
-    all_mems = _all_memories(scope_id)
-
-    if not all_mems:
-        return "No memories found. This is a fresh workspace."
-
-    # Reassign tiers
-    for mem in all_mems:
-        mem["tier"] = _assign_tier(mem)
-
-    # ── Foundation: project identity (L0) + starter packs + user knowledge ──
-    foundation_mems = [m for m in all_mems
-                       if m.get("tier") in ("L0", "L1")
-                       or m.get("source_type") == "starter_pack"]
-
-    # ── Search: only project-specific memories (exclude starter packs) ──
-    searchable = [m for m in all_mems if m.get("source_type") != "starter_pack"]
-    # Run search on searchable memories only
-    searched = _search_memories(goal, scope_id=scope_id, limit=limit)
-    searched = [m for m in searched if m.get("source_type") != "starter_pack"]
-
-    # Exclude foundation duplicates from search results
-    foundation_ids = {m["id"] for m in foundation_mems}
-    searched = [m for m in searched if m["id"] not in foundation_ids]
-
-    # ── Raw transcript search: attach matching session exchanges ──
-    transcript_results = transcript_search(goal, limit=3)
-
-    # ── Build markdown output ──
-    sections = []
-
-    # Foundation
-    foundation_text = _format_foundation(foundation_mems)
-    if foundation_text:
-        sections.append(foundation_text)
-
-    # Search results
-    if searched:
-        lines = ["## Recalled Memories"]
-        # Group by source type
-        by_source = {}
-        for m in searched:
-            src = m.get("source_type", "other")
-            by_source.setdefault(src, []).append(m)
-
-        for src_label, src_key in [("From past sessions", "mined"),
-                                    ("From project knowledge", "auto_seed"),
-                                    ("Saved knowledge", "user"),
-                                    ("Imported", "import")]:
-            mems = by_source.get(src_key, [])
-            if mems:
-                lines.append(f"\n### {src_label}")
-                for m in mems:
-                    lines.append(_format_memory_as_bullet(m))
-
-        sections.append("\n".join(lines))
-
-    # Raw transcript matches
-    if transcript_results and "No matching" not in transcript_results:
-        sections.append(f"## Related Session Logs\n\n{transcript_results}")
-
-    # ── Update retrieval counts (search results only, not foundation) ──
-    memory_ids = []
-    for mem in searched:
-        memory_ids.append(mem["id"])
-        mem["retrieval_count"] = mem.get("retrieval_count", 0) + 1
-        mem["last_retrieved_at"] = _now()
-        _save_memory(mem)
-
-    # Log retrieval
-    log_entry = {
-        "id": str(uuid.uuid4()),
-        "goal": goal,
-        "memory_ids": memory_ids,
-        "scope_id": scope_id,
-        "timestamp": _now(),
-    }
-    log_path = LOGS_DIR / f"retrieval-{log_entry['id']}.json"
-    log_path.write_text(json.dumps(log_entry, indent=2))
-
-    result = "\n\n".join(sections) if sections else "No relevant memories found."
-    return f"Context: {len(foundation_mems)} foundation + {len(searched)} recalled + transcript logs\n\n{result}"
+def _expand_query(query: str) -> str:
+    """Use Haiku to expand a search query with synonyms and related terms.
+    Falls back to original query if expansion fails."""
+    try:
+        import subprocess as _sp
+        result = _sp.run(
+            ["claude", "-p", "--model", "haiku",
+             f"Add synonyms, abbreviations, and related terms to this search query. "
+             f"Return ONLY the expanded query as a single line, nothing else.\n"
+             f"Query: {query}"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            expanded = result.stdout.strip()
+            # Combine original + expanded for best coverage
+            return f"{query} {expanded}"
+    except Exception:
+        pass
+    return query
 
 
 @mcp.tool()
@@ -942,23 +819,30 @@ def memory_save(
 
 @mcp.tool()
 def memory_recall(query: str, scope_id: str = "default", limit: int = 10) -> str:
-    """Search memory by keyword. Returns matching memories grouped by source,
-    with raw session logs attached when available."""
+    """Search all memory sources for a query. Returns structured markdown.
 
-    # Search project-specific memories (exclude starter packs from results)
-    memories = _search_memories(query, scope_id=scope_id, limit=limit)
-    memories = [m for m in memories if m.get("source_type") != "starter_pack"]
+    Pipeline: expand query (Haiku) → search memories (vector+keyword) →
+    search raw transcripts (live JSONL) → format as markdown → return.
 
-    # Also search raw transcripts
-    transcript_results = transcript_search(query, limit=3)
+    Use this for any memory retrieval — session start, mid-conversation,
+    or explicit search. One tool for all recall needs."""
+
+    # 1. Expand query with Haiku for better semantic coverage
+    expanded = _expand_query(query)
+
+    # 2. Search saved memories (all types)
+    memories = _search_memories(expanded, scope_id=scope_id, limit=limit)
+
+    # 3. Search raw session transcripts (live JSONL files)
+    transcript_results = transcript_search(expanded, limit=3)
 
     if not memories and ("No matching" in transcript_results or not transcript_results):
         return f"No memories found for: {query}"
 
+    # 4. Format as structured markdown
     sections = []
 
     if memories:
-        # Group by source type
         by_source = {}
         for m in memories:
             src = m.get("source_type", "other")
@@ -966,8 +850,9 @@ def memory_recall(query: str, scope_id: str = "default", limit: int = 10) -> str
 
         lines = []
         for src_label, src_key in [("From past sessions", "mined"),
-                                    ("From project knowledge", "auto_seed"),
+                                    ("Project knowledge", "auto_seed"),
                                     ("Saved knowledge", "user"),
+                                    ("Best practices", "starter_pack"),
                                     ("Imported", "import")]:
             mems = by_source.get(src_key, [])
             if mems:
@@ -978,9 +863,25 @@ def memory_recall(query: str, scope_id: str = "default", limit: int = 10) -> str
 
         sections.append("\n".join(lines))
 
-    # Attach raw session logs
     if transcript_results and "No matching" not in transcript_results:
         sections.append(f"### Related Session Logs\n\n{transcript_results}")
+
+    # 5. Update retrieval counts
+    for mem in memories:
+        mem["retrieval_count"] = mem.get("retrieval_count", 0) + 1
+        mem["last_retrieved_at"] = _now()
+        _save_memory(mem)
+
+    # Log retrieval
+    log_entry = {
+        "id": str(uuid.uuid4()),
+        "goal": query,
+        "memory_ids": [m["id"] for m in memories],
+        "scope_id": scope_id,
+        "timestamp": _now(),
+    }
+    log_path = LOGS_DIR / f"retrieval-{log_entry['id']}.json"
+    log_path.write_text(json.dumps(log_entry, indent=2))
 
     return "\n".join(sections) if sections else f"No memories found for: {query}"
 
