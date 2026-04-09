@@ -320,6 +320,26 @@ def _check_contradictions(new_mem: dict, scope_id: str = "default", threshold: f
     return list(set(contradicting_ids))
 
 
+def _is_duplicate(content: str, scope_id: str = "default", threshold: float = 0.8) -> bool:
+    """Check if content is too similar to an existing memory."""
+    content_words = set(content.lower().split())
+    if not content_words:
+        return False
+
+    existing = _all_memories(scope_id)
+    for mem in existing:
+        mem_text = mem.get("essence", "")
+        if not mem_text:
+            continue
+        mem_words = set(mem_text.lower().split())
+        if not mem_words:
+            continue
+        overlap = len(content_words & mem_words) / max(len(content_words), len(mem_words))
+        if overlap >= threshold:
+            return True
+    return False
+
+
 def _assign_tier(mem: dict) -> str:
     """Assign memory tier based on type, confidence, and retrieval patterns.
 
@@ -361,24 +381,27 @@ def _assign_tier(mem: dict) -> str:
 
 def _make_memory(content: str, title: str, memory_type: str = "knowledge",
                  scope_id: str = "default", tags: list[str] | None = None,
-                 source_type: str = "auto_seed") -> dict:
+                 source_type: str = "auto_seed", confidence: float = 0.6,
+                 promotion_status: str = "candidate", verified: bool = False,
+                 source_session_id: str | None = None,
+                 full_record: str | None = None) -> dict:
     """Create a memory dict without saving."""
     domain, room = _detect_domain_room(content, title, tags)
     mem = {
         "id": str(uuid.uuid4()),
         "essence": content,
-        "full_record": content,
+        "full_record": full_record if full_record is not None else content,
         "title": title,
         "memory_type": memory_type,
         "scope_type": "project",
         "scope_id": scope_id,
-        "confidence": 0.6,  # slightly above default — seeded knowledge
+        "confidence": confidence,
         "impact_score": 0.0,
         "success_count": 0,
         "failure_count": 0,
         "retrieval_count": 0,
-        "promotion_status": "candidate",
-        "verified": False,
+        "promotion_status": promotion_status,
+        "verified": verified,
         "human_approved": False,
         "domain": domain,
         "room": room,
@@ -386,6 +409,7 @@ def _make_memory(content: str, title: str, memory_type: str = "knowledge",
         "associations": [],
         "contradicts": [],
         "source_type": source_type,
+        "source_session_id": source_session_id,
         "created_at": _now(),
         "last_retrieved_at": None,
         "last_validated_at": None,
@@ -464,217 +488,6 @@ def _mark_seeded(scope_id: str):
     tmp.write_text("\n".join(sorted(seeded)))
     tmp.replace(SEED_MARKER_FILE)
 
-
-def _auto_seed(scope_id: str, project_dir: str | None = None) -> list[dict]:
-    """Scan a project and create starter memories.
-
-    Extracts knowledge from:
-    - README.md / CLAUDE.md (project description, conventions)
-    - package.json / pyproject.toml / Cargo.toml (tech stack, deps)
-    - .gitignore patterns (what the project cares about)
-    - git log (recent activity patterns)
-    - Directory structure (architecture)
-    """
-    if _was_seeded(scope_id):
-        return []
-
-    cwd = project_dir or os.getcwd()
-    if not os.path.isdir(cwd):
-        return []
-
-    project_name = os.path.basename(cwd)
-    memories = []
-
-    # 1. README / CLAUDE.md — project description
-    for doc_name in ["CLAUDE.md", "README.md", "readme.md"]:
-        doc_path = os.path.join(cwd, doc_name)
-        if os.path.exists(doc_path):
-            try:
-                content = open(doc_path).read()[:2000]
-                # Extract first heading + first paragraph
-                lines = content.split("\n")
-                title_line = next((l for l in lines if l.startswith("# ")), "")
-                title = title_line.lstrip("# ").strip() or doc_name
-                # Get first meaningful paragraph
-                paragraphs = re.split(r'\n\n+', content)
-                desc = next((p for p in paragraphs if len(p.strip()) > 20
-                            and not p.startswith("#")), "")
-                if desc:
-                    mem = _make_memory(
-                        content=f"Project: {title}. {desc.strip()[:500]}",
-                        title=f"[{project_name}] Project overview: {title}",
-                        memory_type="knowledge",
-                        scope_id=scope_id,
-                        tags=["project", "overview", project_name],
-                    )
-                    memories.append(mem)
-            except OSError:
-                pass
-
-    # 2. Tech stack from config files
-    tech_detectors = [
-        ("pyproject.toml", "Python"),
-        ("package.json", "JavaScript/Node.js"),
-        ("Cargo.toml", "Rust"),
-        ("go.mod", "Go"),
-        ("Gemfile", "Ruby"),
-        ("pom.xml", "Java/Maven"),
-        ("build.gradle", "Java/Gradle"),
-        ("requirements.txt", "Python"),
-        ("composer.json", "PHP"),
-    ]
-    detected_stack = []
-    for filename, lang in tech_detectors:
-        if os.path.exists(os.path.join(cwd, filename)):
-            detected_stack.append(lang)
-
-    if detected_stack:
-        stack_str = ", ".join(set(detected_stack))
-        mem = _make_memory(
-            content=f"[{project_name}] Tech stack: {stack_str}",
-            title=f"[{project_name}] Tech stack: {stack_str}",
-            memory_type="knowledge",
-            scope_id=scope_id,
-            tags=["tech-stack", project_name] + [s.lower().split("/")[0] for s in detected_stack],
-        )
-        memories.append(mem)
-
-    # 3. Dependencies (extract key deps from config)
-    pyproject = os.path.join(cwd, "pyproject.toml")
-    if os.path.exists(pyproject):
-        try:
-            content = open(pyproject).read()
-            # Extract dependency names
-            deps_match = re.findall(r'"([a-zA-Z][a-zA-Z0-9_-]+)', content)
-            key_deps = [d for d in set(deps_match) if len(d) > 2][:15]
-            if key_deps:
-                mem = _make_memory(
-                    content=f"[{project_name}] Key dependencies: {', '.join(sorted(key_deps))}",
-                    title=f"[{project_name}] Project dependencies",
-                    memory_type="knowledge",
-                    scope_id=scope_id,
-                    tags=["dependencies", project_name],
-                )
-                memories.append(mem)
-        except OSError:
-            pass
-
-    pkg_json = os.path.join(cwd, "package.json")
-    if os.path.exists(pkg_json):
-        try:
-            data = json.loads(open(pkg_json).read())
-            all_deps = list(data.get("dependencies", {}).keys()) + list(data.get("devDependencies", {}).keys())
-            if all_deps:
-                mem = _make_memory(
-                    content=f"[{project_name}] Key dependencies: {', '.join(sorted(all_deps[:15]))}",
-                    title=f"[{project_name}] Project dependencies",
-                    memory_type="knowledge",
-                    scope_id=scope_id,
-                    tags=["dependencies", project_name],
-                )
-                memories.append(mem)
-        except (OSError, json.JSONDecodeError):
-            pass
-
-    # 4. Directory structure — architecture overview
-    top_dirs = []
-    try:
-        for entry in sorted(os.listdir(cwd)):
-            full = os.path.join(cwd, entry)
-            if os.path.isdir(full) and not entry.startswith(".") and entry not in (
-                "node_modules", "__pycache__", "venv", ".venv", "dist", "build", ".git"
-            ):
-                top_dirs.append(entry)
-    except OSError:
-        pass
-
-    if top_dirs:
-        mem = _make_memory(
-            content=f"[{project_name}] Project structure: {', '.join(top_dirs[:15])}",
-            title=f"[{project_name}] Directory structure",
-            memory_type="knowledge",
-            scope_id=scope_id,
-            tags=["architecture", "structure", project_name],
-        )
-        memories.append(mem)
-
-    # 5. Git — recent patterns
-    try:
-        import subprocess
-        result = subprocess.run(
-            ["git", "log", "--oneline", "-10", "--no-decorate"],
-            capture_output=True, text=True, cwd=cwd, timeout=5,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            commits = result.stdout.strip()
-            mem = _make_memory(
-                content=f"[{project_name}] Recent git history:\n{commits}",
-                title=f"[{project_name}] Recent development activity",
-                memory_type="knowledge",
-                scope_id=scope_id,
-                tags=["git", "history", project_name],
-            )
-            memories.append(mem)
-    except (OSError, subprocess.TimeoutExpired):
-        pass
-
-    # 6. Test framework detection
-    test_patterns = {
-        "pytest": ["conftest.py", "pytest.ini", "pyproject.toml"],
-        "jest": ["jest.config.js", "jest.config.ts"],
-        "vitest": ["vitest.config.ts", "vitest.config.js"],
-        "mocha": [".mocharc.yml", ".mocharc.json"],
-        "cargo test": ["Cargo.toml"],
-    }
-    for framework, indicators in test_patterns.items():
-        for indicator in indicators:
-            path = os.path.join(cwd, indicator)
-            if os.path.exists(path):
-                if framework == "pytest" and indicator == "pyproject.toml":
-                    try:
-                        if "pytest" not in open(path).read():
-                            continue
-                    except OSError:
-                        continue
-                if framework == "cargo test" and indicator == "Cargo.toml":
-                    # Only if tests/ dir exists
-                    if not os.path.isdir(os.path.join(cwd, "tests")):
-                        continue
-                mem = _make_memory(
-                    content=f"[{project_name}] Test framework: {framework}",
-                    title=f"[{project_name}] Uses {framework} for testing",
-                    memory_type="convention",
-                    scope_id=scope_id,
-                    tags=["testing", framework.replace(" ", "-"), project_name],
-                )
-                memories.append(mem)
-                break
-
-    # 7. Starter packs — universal + language-specific
-    detected_packs = detect_packs(cwd)
-    pack_memories = get_pack_memories(detected_packs)
-    for title, content, mem_type, tags in pack_memories:
-        mem = _make_memory(
-            content=content,
-            title=title,
-            memory_type=mem_type,
-            scope_id=scope_id,
-            tags=tags + ["starter-pack"],
-            source_type="starter_pack",
-        )
-        mem["confidence"] = 0.7  # starter pack knowledge is pre-vetted
-        mem["promotion_status"] = "learned"  # start as learned, not candidate
-        mem["verified"] = True
-        memories.append(mem)
-
-    # Save all and mark seeded
-    for mem in memories:
-        _save_memory(mem)
-
-    if memories:
-        _mark_seeded(scope_id)
-
-    return memories
 
 
 def _auto_seed_workspace(scope_id: str) -> list[dict]:
@@ -1010,37 +823,12 @@ def memory_save(
     Use after discovering patterns, conventions, lessons, or failures.
     Tags should be comma-separated."""
 
-    memory_id = str(uuid.uuid4())
     domain_tags = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
     effective_title = title or content[:60]
-    domain, room = _detect_domain_room(content, effective_title, domain_tags)
 
-    mem = {
-        "id": memory_id,
-        "essence": content,
-        "full_record": content,
-        "title": effective_title,
-        "memory_type": memory_type,
-        "scope_type": "project",
-        "scope_id": scope_id,
-        "confidence": 0.5,
-        "impact_score": 0.0,
-        "success_count": 0,
-        "failure_count": 0,
-        "retrieval_count": 0,
-        "promotion_status": "candidate",
-        "verified": False,
-        "human_approved": False,
-        "domain": domain,
-        "room": room,
-        "domain_tags": domain_tags,
-        "associations": [],
-        "contradicts": [],
-        "source_type": "user",
-        "created_at": _now(),
-        "last_retrieved_at": None,
-        "last_validated_at": None,
-    }
+    mem = _make_memory(content=content, title=effective_title, memory_type=memory_type,
+                       scope_id=scope_id, tags=domain_tags, source_type="user",
+                       confidence=0.5)
 
     # Check for contradictions
     contra_ids = _check_contradictions(mem, scope_id=scope_id)
@@ -1066,7 +854,7 @@ def memory_save(
     except Exception:
         pass
 
-    return f"Memory saved: {memory_id[:8]}... \"{title or content[:60]}\""
+    return f"Memory saved: {mem['id'][:8]}... \"{title or content[:60]}\""
 
 
 @mcp.tool()
@@ -1223,8 +1011,6 @@ def memory_promote(memory_id: str) -> str:
     mem["human_approved"] = True
     _save_memory(mem)
     return f"Memory promoted to learned: {mem.get('title', memory_id)}"
-
-    return f"Memory not found: {memory_id}"
 
 
 def _import_chatgpt_export(filepath: Path, scope_id: str) -> int:
@@ -1719,16 +1505,41 @@ def _extract_insights_from_pair(pair: dict) -> list[dict]:
     assistant_text = pair["assistant_text"]
     user_text = pair["user_text"]
 
+    def _clean_text(text: str) -> str:
+        """Strip code blocks, paths, and other noisy content from text."""
+        # Strip code fences
+        clean = re.sub(r'```[\s\S]*?```', '', text)
+        # Strip inline code
+        clean = re.sub(r'`[^`]+`', '', clean)
+        # Strip markdown table rows (lines containing |)
+        clean = re.sub(r'^.*\|.*\|.*$', '', clean, flags=re.MULTILINE)
+        # Strip command output lines (starting with $ or >)
+        clean = re.sub(r'^[\$>].*$', '', clean, flags=re.MULTILINE)
+        # Strip lines with filesystem paths
+        clean = re.sub(r'^.*(?:/home/|/usr/|/etc/|/tmp/|/var/).*$', '', clean, flags=re.MULTILINE)
+        return clean
+
+    clean_assistant = _clean_text(assistant_text)
+    clean_user = _clean_text(user_text)
+
     # Scan assistant text for saveable insights
     for pattern, memory_type in _MINE_PATTERNS:
-        for match in pattern.finditer(assistant_text):
+        for match in pattern.finditer(clean_assistant):
             snippet = match.group(0).strip()
-            if len(snippet) > 20:
-                insights.append({"content": snippet, "memory_type": memory_type})
+            # Minimum 40 chars for assistant insights
+            if len(snippet) < 40:
+                continue
+            # Maximum 500 chars
+            snippet = snippet[:500]
+            # Require at least 60% alpha characters (filters code/paths)
+            alpha_ratio = sum(c.isalpha() or c.isspace() for c in snippet) / max(len(snippet), 1)
+            if alpha_ratio < 0.6:
+                continue
+            insights.append({"content": snippet, "memory_type": memory_type})
 
     # Check user text for explicit preference signals
     for pattern in _USER_PREF_PATTERNS:
-        for match in pattern.finditer(user_text):
+        for match in pattern.finditer(clean_user):
             snippet = match.group(0).strip()
             if len(snippet) > 10:
                 insights.append({"content": snippet, "memory_type": "preference"})
@@ -1760,40 +1571,21 @@ def mine_session(jsonl_path: str) -> dict:
 
     pairs = _parse_jsonl_session(jsonl_path)
     memories_saved = 0
+    duplicates_skipped = 0
 
     for pair in pairs:
         insights = _extract_insights_from_pair(pair)
         for ins in insights:
             content = ins["content"]
             memory_type = ins["memory_type"]
-            domain, room = _detect_domain_room(content)
-            mem = {
-                "id": str(uuid.uuid4()),
-                "essence": content[:2000],
-                "full_record": content[:2000],
-                "title": content[:80],
-                "memory_type": memory_type,
-                "scope_type": "project",
-                "scope_id": "default",
-                "confidence": 0.4,
-                "impact_score": 0.0,
-                "success_count": 0,
-                "failure_count": 0,
-                "retrieval_count": 0,
-                "promotion_status": "candidate",
-                "verified": False,
-                "human_approved": False,
-                "domain": domain,
-                "room": room,
-                "domain_tags": ["mined", session_id[:8]],
-                "associations": [],
-                "contradicts": [],
-                "source_type": "mined",
-                "created_at": _now(),
-                "last_retrieved_at": None,
-                "last_validated_at": None,
-            }
-            mem["tier"] = _assign_tier(mem)
+            if _is_duplicate(content[:2000]):
+                duplicates_skipped += 1
+                continue
+            mem = _make_memory(content=content[:2000], title=content[:80],
+                               memory_type=memory_type, source_type="mined",
+                               confidence=0.4, tags=["mined", session_id[:8]],
+                               source_session_id=session_id,
+                               full_record=f"User: {pair['user_text'][:500]}\n\nAssistant: {pair['assistant_text'][:500]}")
             _save_memory(mem)
             memories_saved += 1
 
@@ -1802,6 +1594,7 @@ def mine_session(jsonl_path: str) -> dict:
         "session_id": session_id,
         "chunks_processed": len(pairs),
         "memories_saved": memories_saved,
+        "duplicates_skipped": duplicates_skipped,
         "skipped": False,
     }
 
@@ -1906,7 +1699,8 @@ if __name__ == "__main__":
 
     elif len(_sys.argv) >= 2 and _sys.argv[1] == "--install-cron":
         import subprocess as _subprocess
-        _cron_entry = "0 * * * * bash /home/claude-user/cortex-plugin/cortex-mcp-server/mine-cron.sh"
+        _cron_script = str(Path(__file__).resolve().parent / "mine-cron.sh")
+        _cron_entry = f"0 * * * * bash {_cron_script}"
         _result = _subprocess.run(["crontab", "-l"], capture_output=True, text=True)
         _existing = _result.stdout if _result.returncode == 0 else ""
         if "mine-cron.sh" in _existing:
