@@ -320,11 +320,15 @@ def _check_contradictions(new_mem: dict, scope_id: str = "default", threshold: f
     return list(set(contradicting_ids))
 
 
-def _is_duplicate(content: str, scope_id: str = "default", threshold: float = 0.8) -> bool:
-    """Check if content is too similar to an existing memory."""
+def _is_duplicate(content: str, scope_id: str = "default", threshold: float = 0.8, return_match: bool = False):
+    """Check if content is too similar to an existing memory.
+
+    When return_match=False (default): return bool.
+    When return_match=True: return the matching memory dict if found, or None if no duplicate.
+    """
     content_words = set(content.lower().split())
     if not content_words:
-        return False
+        return None if return_match else False
 
     existing = _all_memories(scope_id)
     for mem in existing:
@@ -336,8 +340,8 @@ def _is_duplicate(content: str, scope_id: str = "default", threshold: float = 0.
             continue
         overlap = len(content_words & mem_words) / max(len(content_words), len(mem_words))
         if overlap >= threshold:
-            return True
-    return False
+            return mem if return_match else True
+    return None if return_match else False
 
 
 def _assign_tier(mem: dict) -> str:
@@ -387,13 +391,14 @@ def _make_memory(content: str, title: str, memory_type: str = "knowledge",
                  full_record: str | None = None) -> dict:
     """Create a memory dict without saving."""
     domain, room = _detect_domain_room(content, title, tags)
+    # full_record: store None if it's the same as content (no duplication)
+    effective_full_record = None if (full_record is None or full_record == content) else full_record
     mem = {
         "id": str(uuid.uuid4()),
         "essence": content,
-        "full_record": full_record if full_record is not None else content,
+        "full_record": effective_full_record,
         "title": title,
         "memory_type": memory_type,
-        "scope_type": "project",
         "scope_id": scope_id,
         "confidence": confidence,
         "impact_score": 0.0,
@@ -402,11 +407,9 @@ def _make_memory(content: str, title: str, memory_type: str = "knowledge",
         "retrieval_count": 0,
         "promotion_status": promotion_status,
         "verified": verified,
-        "human_approved": False,
         "domain": domain,
         "room": room,
         "domain_tags": tags or [],
-        "associations": [],
         "contradicts": [],
         "source_type": source_type,
         "source_session_id": source_session_id,
@@ -826,6 +829,12 @@ def memory_save(
     domain_tags = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
     effective_title = title or content[:60]
 
+    # Check for duplicates before creating a new memory
+    existing = _is_duplicate(content, scope_id=scope_id, return_match=True)
+    if existing:
+        existing_title = existing.get("title", "unknown")[:60]
+        return f"Memory already exists (similar to: \"{existing_title}\"). Not saved."
+
     mem = _make_memory(content=content, title=effective_title, memory_type=memory_type,
                        scope_id=scope_id, tags=domain_tags, source_type="user",
                        confidence=0.5)
@@ -1008,7 +1017,6 @@ def memory_promote(memory_id: str) -> str:
     if mem.get("promotion_status") == "learned":
         return f"Memory {memory_id} is already learned."
     mem["promotion_status"] = "learned"
-    mem["human_approved"] = True
     _save_memory(mem)
     return f"Memory promoted to learned: {mem.get('title', memory_id)}"
 
@@ -1682,6 +1690,96 @@ def transcript_search(query: str, limit: int = 5) -> str:
     return "\n\n---\n\n".join(lines)
 
 
+# ─── Garbage Collection ──────────────────────────────────────────
+
+def garbage_collect() -> dict:
+    """Decay stale low-value memories, merge near-duplicates, prune excess."""
+    decayed = 0
+    merged = 0
+    pruned = 0
+    deleted_ids: set[str] = set()
+    now = datetime.now(timezone.utc)
+    thirty_days_ago = now.timestamp() - 30 * 86400
+
+    # 1. DECAY — delete stale low-value memories
+    for mem in _all_memories():
+        if mem["id"] in deleted_ids:
+            continue
+        confidence = float(mem.get("confidence", 0.5))
+        retrieval_count = int(mem.get("retrieval_count", 0))
+        created_at_str = mem.get("created_at")
+        if confidence < 0.3 and retrieval_count == 0 and created_at_str:
+            try:
+                created_dt = datetime.fromisoformat(created_at_str)
+                if created_dt.timestamp() < thirty_days_ago:
+                    if _delete_memory(mem["id"]):
+                        deleted_ids.add(mem["id"])
+                        decayed += 1
+            except (ValueError, TypeError):
+                pass
+
+    # 2. MERGE — combine near-duplicates (>90% word overlap)
+    remaining_mems = [m for m in _all_memories() if m["id"] not in deleted_ids]
+    for i in range(len(remaining_mems)):
+        mem_a = remaining_mems[i]
+        if mem_a["id"] in deleted_ids:
+            continue
+        for j in range(i + 1, len(remaining_mems)):
+            mem_b = remaining_mems[j]
+            if mem_b["id"] in deleted_ids:
+                continue
+            text_a = mem_a.get("essence", "")
+            text_b = mem_b.get("essence", "")
+            if not text_a or not text_b:
+                continue
+            words_a = set(text_a.lower().split())
+            words_b = set(text_b.lower().split())
+            if not words_a or not words_b:
+                continue
+            overlap = len(words_a & words_b) / max(len(words_a), len(words_b))
+            if overlap > 0.9:
+                # Decide which to keep
+                conf_a = float(mem_a.get("confidence", 0.5))
+                conf_b = float(mem_b.get("confidence", 0.5))
+                if conf_a > conf_b:
+                    to_delete = mem_b
+                elif conf_b > conf_a:
+                    to_delete = mem_a
+                else:
+                    # Equal confidence — keep newer one (later created_at)
+                    try:
+                        dt_a = datetime.fromisoformat(mem_a.get("created_at", ""))
+                        dt_b = datetime.fromisoformat(mem_b.get("created_at", ""))
+                        to_delete = mem_a if dt_b >= dt_a else mem_b
+                    except (ValueError, TypeError):
+                        to_delete = mem_b
+                if to_delete["id"] not in deleted_ids:
+                    if _delete_memory(to_delete["id"]):
+                        deleted_ids.add(to_delete["id"])
+                        merged += 1
+
+    # 3. PRUNE — enforce max count of 500
+    remaining_mems = [m for m in _all_memories() if m["id"] not in deleted_ids]
+    if len(remaining_mems) > 500:
+        def _score(m: dict) -> float:
+            confidence = float(m.get("confidence", 0.5))
+            impact = float(m.get("impact_score", 0.0))
+            retrieval = min(int(m.get("retrieval_count", 0)) / 10, 0.2)
+            return confidence * 0.5 + impact * 0.3 + retrieval
+
+        pruneable = [m for m in remaining_mems if m.get("promotion_status") != "learned"]
+        pruneable.sort(key=_score)
+        excess = len(remaining_mems) - 500
+        for mem in pruneable[:excess]:
+            if mem["id"] not in deleted_ids:
+                if _delete_memory(mem["id"]):
+                    deleted_ids.add(mem["id"])
+                    pruned += 1
+
+    remaining = len([m for m in _all_memories() if m["id"] not in deleted_ids])
+    return {"decayed": decayed, "merged": merged, "pruned": pruned, "remaining": remaining}
+
+
 # ─── Run ─────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -1697,6 +1795,53 @@ if __name__ == "__main__":
         print(json.dumps(result))
         _sys.exit(0)
 
+    elif len(_sys.argv) >= 2 and _sys.argv[1] == "--purge-mined":
+        deleted = 0
+        for mem_file in MEMORIES_DIR.glob("*.json"):
+            try:
+                mem = json.loads(mem_file.read_text())
+                if mem.get("source_type") == "mined":
+                    mem_file.unlink()
+                    deleted += 1
+            except Exception:
+                pass
+        if MINED_SESSIONS_FILE.exists():
+            MINED_SESSIONS_FILE.write_text("")
+        print(json.dumps({"deleted": deleted}))
+        _sys.exit(0)
+
+    elif len(_sys.argv) >= 2 and _sys.argv[1] == "--fix-schema":
+        migrated = 0
+        fields_removed = 0
+        tiers_fixed = 0
+        dead_fields = {"associations", "scope_type", "human_approved"}
+        for mem_file in MEMORIES_DIR.glob("*.json"):
+            try:
+                mem = json.loads(mem_file.read_text())
+            except (json.JSONDecodeError, OSError):
+                continue
+            changed = False
+            # Remove dead fields
+            for field in dead_fields:
+                if field in mem:
+                    del mem[field]
+                    fields_removed += 1
+                    changed = True
+            # Normalize full_record: if equals essence, set to None
+            if mem.get("full_record") == mem.get("essence"):
+                mem["full_record"] = None
+                changed = True
+            # Fix missing tier
+            if "tier" not in mem:
+                mem["tier"] = _assign_tier(mem)
+                tiers_fixed += 1
+                changed = True
+            if changed:
+                mem_file.write_text(json.dumps(mem, indent=2, default=str))
+                migrated += 1
+        print(json.dumps({"migrated": migrated, "fields_removed": fields_removed, "tiers_fixed": tiers_fixed}))
+        _sys.exit(0)
+
     elif len(_sys.argv) >= 2 and _sys.argv[1] == "--install-cron":
         import subprocess as _subprocess
         _cron_script = str(Path(__file__).resolve().parent / "mine-cron.sh")
@@ -1709,6 +1854,11 @@ if __name__ == "__main__":
             _new_crontab = _existing.rstrip("\n") + ("\n" if _existing else "") + _cron_entry + "\n"
             _subprocess.run(["crontab", "-"], input=_new_crontab, text=True, check=True)
             print(f"Cron entry installed: {_cron_entry}")
+        _sys.exit(0)
+
+    elif len(_sys.argv) >= 2 and _sys.argv[1] == "--gc":
+        result = garbage_collect()
+        print(json.dumps(result))
         _sys.exit(0)
 
     # Auto-seed on startup so starter packs are ready before any tool call
