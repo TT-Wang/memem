@@ -1,48 +1,43 @@
-# Cortex
+# Cortex — Persistent Memory
 
-Cortex is your persistent memory. It remembers knowledge across sessions and assembles relevant context for every task.
+You have access to a persistent memory system via Cortex. This memory persists across sessions and gets smarter over time.
 
-## How to use
+## MANDATORY: Auto-recall on every session
 
-Before starting work on any task, recall relevant memory:
+At the START of every conversation, BEFORE doing any work, you MUST:
 
-```
-mcp__cortex__context_assemble(goal="your task description")
-```
+1. Look at the user's first message to understand what they're working on
+2. Call `mcp__cortex__context_assemble` with a goal derived from their message
+3. Use the returned context to inform your work — it contains lessons, patterns, and knowledge from prior sessions
 
-This searches your memory + the web and returns the best context for your task.
+Do this silently. Do not tell the user you're recalling memory unless they ask.
 
-After completing work successfully, save what you learned:
+## MANDATORY: Auto-save on completion
 
-```
-mcp__cortex__memory_save(content="key insight or pattern", title="short title", memory_type="lesson")
-```
+When you complete a significant piece of work (not trivial tasks), you MUST save what you learned:
 
-## Tools
+Call `mcp__cortex__memory_save` with:
+- `content`: The key insight, pattern, or lesson (one per save, keep it atomic)
+- `title`: Short descriptive title
+- `memory_type`: One of: `lesson`, `knowledge`, `convention`, `failure`, `preference`
+- `tags`: Comma-separated relevant tags
 
-- `context_assemble` — Assemble relevant context for a goal. Call this first on any task.
-- `memory_save` — Save a piece of knowledge. Use after discovering patterns, conventions, or lessons.
-- `memory_recall` — Search memory by keyword. Use when you need specific knowledge.
-- `memory_list` — List all memories in a scope.
-- `memory_feedback` — Report whether recalled memories were useful (approved/rejected). This strengthens or weakens memories over time.
-- `memory_stats` — Show memory system statistics.
-- `memory_promote` — Promote a candidate memory to learned status.
+Examples of what to save:
+- "This project uses Poetry instead of pip" (convention)
+- "The auth module requires Redis for session storage" (knowledge)
+- "Using mock.patch on the class not the instance fixed the test" (lesson)
+- "User prefers short responses without code explanations" (preference)
+- "Library X v2.3 has a race condition in async mode" (failure)
 
-## When to save memory
+Do NOT save:
+- Trivial or obvious facts
+- Things already documented in the project
+- Temporary state or in-progress work
 
-Save when you discover:
-- **Conventions**: "This project uses snake_case for API endpoints"
-- **Lessons**: "RS256 is better than HS256 for production JWT"
-- **Patterns**: "Always validate token expiry server-side"
-- **Failures**: "Library X has a memory leak in version 2.3"
-- **Preferences**: "User prefers concise responses without summaries"
+## Auto-feedback
 
-Do NOT save trivial or obvious knowledge. Only save what would help a future session.
+When you notice that recalled context was helpful for the current task, call `mcp__cortex__memory_feedback` with `approved=true` and the relevant memory IDs.
 
-## Memory lifecycle
+When recalled context was wrong or misleading, call `mcp__cortex__memory_feedback` with `approved=false`.
 
-1. New knowledge starts as **candidate** (confidence 0.5)
-2. When retrieved and the task succeeds → confidence increases
-3. When retrieved and the task fails → confidence decreases
-4. High-confidence memories are auto-promoted to **learned**
-5. Learned memories are prioritized in future context assembly
+This strengthens useful memories and weakens unhelpful ones over time.
