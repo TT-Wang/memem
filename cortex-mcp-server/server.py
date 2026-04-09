@@ -2,16 +2,18 @@
 """
 Cortex MCP Server — persistent memory for Claude Code.
 
+Storage backends: ChromaDB (vector search) + Obsidian markdown vault.
+
 Sections:
-  Storage:     JSON file CRUD (~/.cortex/memories/)
+  Storage:     ChromaDB + Obsidian dual-write CRUD
   Generation:  _make_memory, domain detection, dedup
   Auto-seed:   Scan workspace projects + load starter packs on first run
-  Retrieval:   Vector + keyword hybrid search, Haiku query expansion
+  Retrieval:   Vector similarity search via ChromaDB, Haiku query expansion
   MCP Tools:   memory_recall, memory_save, memory_list, memory_feedback, memory_import
   Transcript:  Search raw Claude Code JSONL session files
   Mining:      Parse JSONL sessions, extract insights, save as memories
   GC:          Decay stale, merge duplicates, prune excess
-  CLI:         --mine-session, --mine-all, --gc, --purge-mined, --install-cron
+  CLI:         --mine-session, --mine-all, --gc, --purge-mined, --migrate, --install-cron
 """
 
 import json
@@ -21,50 +23,155 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+import chromadb
 from mcp.server.fastmcp import FastMCP
 from starter_packs import detect_packs, get_pack_memories
 
 # ─── Storage ──────────────────────────────────────────────────────
 
 CORTEX_DIR = Path(os.environ.get("CORTEX_DIR", os.path.expanduser("~/.cortex")))
-MEMORIES_DIR = CORTEX_DIR / "memories"
+MEMORIES_DIR = CORTEX_DIR / "memories"  # kept for migration
 LOGS_DIR = CORTEX_DIR / "logs"
 
-MEMORIES_DIR.mkdir(parents=True, exist_ok=True)
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+CHROMADB_DIR = CORTEX_DIR / "chromadb"
+_chroma_client = chromadb.PersistentClient(path=str(CHROMADB_DIR))
+_collection = _chroma_client.get_or_create_collection("memories")
+
+OBSIDIAN_MEMORIES_DIR = Path.home() / "obsidian-brain" / "cortex" / "memories"
+OBSIDIAN_MEMORIES_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _slugify(text: str, max_len: int = 60) -> str:
+    """Convert text to a filesystem-safe slug."""
+    slug = re.sub(r'[^a-z0-9]+', '-', text.lower()).strip('-')
+    return slug[:max_len]
+
+
+def _reconstruct_memory(result: dict, idx: int) -> dict:
+    """Reconstruct a memory dict from ChromaDB result."""
+    mem = {"id": result["ids"][idx], "essence": result["documents"][idx]}
+    meta = result["metadatas"][idx]
+    for k, v in meta.items():
+        # Restore lists from comma-separated strings
+        if k in ("domain_tags", "contradicts"):
+            mem[k] = [x for x in v.split(",") if x] if v else []
+        # Restore bools
+        elif k in ("verified",):
+            mem[k] = v == "true" if isinstance(v, str) else bool(v)
+        # Restore None from empty string
+        elif v == "":
+            mem[k] = None
+        else:
+            mem[k] = v
+    return mem
 
 
 def _load_memory(memory_id: str) -> dict | None:
-    path = MEMORIES_DIR / f"{memory_id}.json"
-    if path.exists():
-        return json.loads(path.read_text())
-    return None
+    try:
+        result = _collection.get(ids=[memory_id], include=["documents", "metadatas"])
+        if not result["ids"]:
+            return None
+        return _reconstruct_memory(result, 0)
+    except Exception:
+        return None
 
 
 def _save_memory(mem: dict):
-    path = MEMORIES_DIR / f"{mem['id']}.json"
-    path.write_text(json.dumps(mem, indent=2, default=str))
+    meta = {}
+    for k, v in mem.items():
+        if k in ("id", "essence"):
+            continue  # id and document handled separately
+        if v is None:
+            meta[k] = ""
+        elif isinstance(v, list):
+            meta[k] = ",".join(str(x) for x in v)
+        elif isinstance(v, bool):
+            meta[k] = str(v).lower()
+        elif isinstance(v, (str, int, float)):
+            meta[k] = v
+        else:
+            meta[k] = str(v)
+
+    # Obsidian dual-write: compute filename before upsert so we can store it in metadata
+    _write_obsidian_memory(mem)
+    # Store obsidian_file in meta so deletion can find the file
+    if mem.get("obsidian_file"):
+        meta["obsidian_file"] = mem["obsidian_file"]
+
+    _collection.upsert(
+        ids=[mem["id"]],
+        documents=[mem.get("essence", "")],
+        metadatas=[meta]
+    )
+
+
+def _write_obsidian_memory(mem: dict):
+    """Write a memory as markdown to the Obsidian vault."""
+    title = mem.get("title", "Untitled")
+    slug = _slugify(title)
+    if not slug:
+        slug = mem["id"][:8]
+    filename = f"{slug}-{mem['id'][:8]}.md"
+
+    # YAML frontmatter
+    tags = mem.get("domain_tags", [])
+    if isinstance(tags, str):
+        tags = [t for t in tags.split(",") if t]
+
+    frontmatter = f"""---
+id: {mem['id']}
+type: {mem.get('memory_type', 'knowledge')}
+confidence: {mem.get('confidence', 0.5)}
+source: {mem.get('source_type', 'unknown')}
+domain: {mem.get('domain', 'general')}
+tags: [{', '.join(tags)}]
+created: {mem.get('created_at', '')[:10]}
+---"""
+
+    # Body
+    essence = mem.get("essence", "")
+    body = f"\n\n{essence}"
+
+    # Full record as blockquote
+    full_record = mem.get("full_record")
+    if full_record and full_record != essence:
+        body += f"\n\n> {full_record[:500]}"
+
+    filepath = OBSIDIAN_MEMORIES_DIR / filename
+    filepath.write_text(frontmatter + body)
+
+    # Store filename in mem for deletion tracking
+    mem["obsidian_file"] = filename
 
 
 def _delete_memory(memory_id: str) -> bool:
-    path = MEMORIES_DIR / f"{memory_id}.json"
-    if path.exists():
-        path.unlink()
+    try:
+        # Try to find and delete obsidian file
+        result = _collection.get(ids=[memory_id], include=["metadatas"])
+        if result["ids"]:
+            obsidian_file = result["metadatas"][0].get("obsidian_file", "")
+            if obsidian_file:
+                obsidian_path = OBSIDIAN_MEMORIES_DIR / obsidian_file
+                if obsidian_path.exists():
+                    obsidian_path.unlink()
+
+        _collection.delete(ids=[memory_id])
         return True
-    return False
+    except Exception:
+        return False
 
 
 def _all_memories(scope_id: str | None = None) -> list[dict]:
-    memories = []
-    for f in MEMORIES_DIR.glob("*.json"):
-        try:
-            mem = json.loads(f.read_text())
-            if scope_id and mem.get("scope_id") != scope_id:
-                continue
-            memories.append(mem)
-        except (json.JSONDecodeError, OSError):
-            continue
-    return memories
+    try:
+        if scope_id:
+            result = _collection.get(where={"scope_id": scope_id}, include=["documents", "metadatas"])
+        else:
+            result = _collection.get(include=["documents", "metadatas"])
+        return [_reconstruct_memory(result, i) for i in range(len(result["ids"]))]
+    except Exception:
+        return []
 
 
 def _now() -> str:
@@ -77,9 +184,11 @@ def _find_memory(memory_id: str) -> dict | None:
     if mem:
         return mem
     if len(memory_id) >= 8:
-        for f in MEMORIES_DIR.glob("*.json"):
-            if f.stem.startswith(memory_id):
-                return _load_memory(f.stem)
+        # Prefix match — get all IDs and filter
+        all_ids = _collection.get(include=[])["ids"]
+        for mid in all_ids:
+            if mid.startswith(memory_id):
+                return _load_memory(mid)
     return None
 
 
@@ -374,68 +483,18 @@ def _auto_seed_workspace(scope_id: str) -> list[dict]:
 # ─── Retrieval ────────────────────────────────────────────────────
 
 def _search_memories(query: str, scope_id: str | None = None, limit: int = 10) -> list[dict]:
-    """Hybrid search: vector similarity (70%) + keyword (15%) + metadata (15%)."""
-    all_mems = _all_memories(scope_id)
-    if not all_mems:
-        return []
-
-    query_lower = query.lower()
-    query_words = set(query_lower.split())
-    query_domain, _ = _detect_domain_room(query)
-
-    # Try vector search
-    use_vectors = False
-    query_embedding = None
+    """Search memories using ChromaDB native vector similarity."""
     try:
-        from embeddings import is_available, get_or_compute_embedding, cosine_similarity
-        if is_available():
-            import hashlib
-            query_hash = hashlib.md5(query.encode()).hexdigest()[:12]
-            query_embedding = get_or_compute_embedding(f"query_{query_hash}", query)
-            use_vectors = True
+        kwargs = {"query_texts": [query], "n_results": limit, "include": ["documents", "metadatas", "distances"]}
+        if scope_id:
+            kwargs["where"] = {"scope_id": scope_id}
+        result = _collection.query(**kwargs)
+        if not result["ids"] or not result["ids"][0]:
+            return []
+        flat = {"ids": result["ids"][0], "documents": result["documents"][0], "metadatas": result["metadatas"][0]}
+        return [_reconstruct_memory(flat, i) for i in range(len(flat["ids"]))]
     except Exception:
-        pass
-
-    scored = []
-    for mem in all_mems:
-        text = f"{mem.get('essence', '')} {mem.get('title', '')} {' '.join(mem.get('domain_tags', []))}".lower()
-        text_words = set(text.split())
-
-        keyword_score = len(query_words & text_words) / len(query_words) if query_words else 0.0
-
-        vector_score = 0.0
-        if use_vectors and query_embedding:
-            try:
-                mem_text = mem.get("essence", "") or mem.get("title", "")
-                if mem_text:
-                    mem_embedding = get_or_compute_embedding(mem["id"], mem_text)
-                    vector_score = max(0.0, cosine_similarity(query_embedding, mem_embedding))
-            except Exception:
-                pass
-
-        confidence = float(mem.get("confidence", 0.5))
-        learned_boost = 1.1 if mem.get("promotion_status") == "learned" else 1.0
-
-        if use_vectors:
-            combined = (0.70 * vector_score + 0.15 * keyword_score + 0.05 * confidence +
-                       0.05 * float(mem.get("impact_score", 0.0)) + 0.05 * 0.0) * learned_boost
-        else:
-            combined = (0.55 * keyword_score + 0.20 * confidence +
-                       0.15 * float(mem.get("impact_score", 0.0)) + 0.10 * 0.0) * learned_boost
-
-        # Domain boost
-        if query_domain and query_domain != "general":
-            mem_domain = mem.get("domain", "")
-            if mem_domain == query_domain:
-                combined += 0.15
-            elif mem_domain and mem_domain != "general":
-                combined -= 0.02
-
-        if combined > 0.05:
-            scored.append((combined, mem))
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [m for _, m in scored[:limit]]
+        return []
 
 
 def _expand_query(query: str) -> str:
@@ -541,13 +600,6 @@ def memory_save(content: str, title: str = "", memory_type: str = "lesson",
     mem = _make_memory(content=content, title=effective_title, memory_type=memory_type,
                        scope_id=scope_id, tags=domain_tags, source_type="user", confidence=0.5)
     _save_memory(mem)
-
-    try:
-        from embeddings import is_available, get_or_compute_embedding
-        if is_available():
-            get_or_compute_embedding(mem["id"], content)
-    except Exception:
-        pass
 
     return f"Memory saved: {mem['id'][:8]}... \"{effective_title}\""
 
@@ -999,20 +1051,37 @@ if __name__ == "__main__":
     elif cmd == "--gc":
         print(json.dumps(garbage_collect()))
     elif cmd == "--purge-mined":
-        deleted = sum(1 for f in MEMORIES_DIR.glob("*.json")
-                      if json.loads(f.read_text()).get("source_type") == "mined" and not f.unlink())
-        # Re-count since unlink returns None
         deleted = 0
-        for f in MEMORIES_DIR.glob("*.json"):
-            try:
-                if json.loads(f.read_text()).get("source_type") == "mined":
-                    f.unlink()
-                    deleted += 1
-            except Exception:
-                pass
+        try:
+            result = _collection.get(where={"source_type": "mined"}, include=["metadatas"])
+            ids = result["ids"]
+            for mid, meta in zip(ids, result["metadatas"]):
+                obsidian_file = meta.get("obsidian_file", "")
+                if obsidian_file:
+                    obsidian_path = OBSIDIAN_MEMORIES_DIR / obsidian_file
+                    if obsidian_path.exists():
+                        obsidian_path.unlink()
+            if ids:
+                _collection.delete(ids=ids)
+                deleted = len(ids)
+        except Exception:
+            pass
         if MINED_SESSIONS_FILE.exists():
             MINED_SESSIONS_FILE.write_text("")
         print(json.dumps({"deleted": deleted}))
+    elif cmd == "--migrate":
+        migrated = 0
+        errors = 0
+        json_dir = MEMORIES_DIR
+        if json_dir.exists():
+            for f in json_dir.glob("*.json"):
+                try:
+                    mem = json.loads(f.read_text())
+                    _save_memory(mem)  # This now writes to ChromaDB + Obsidian
+                    migrated += 1
+                except Exception as e:
+                    errors += 1
+        print(json.dumps({"migrated": migrated, "errors": errors}))
     elif cmd == "--install-cron":
         import subprocess as _sp
         cron_script = str(Path(__file__).resolve().parent / "mine-cron.sh")
