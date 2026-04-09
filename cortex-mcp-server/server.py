@@ -1331,6 +1331,50 @@ related: []
 
 # ─── Smart Recall (LLM-based index scanning) ────────────────────
 
+def _load_obsidian_memories(picked_ids: list[str]) -> list[dict]:
+    """Load memory content directly from Obsidian files by ID prefix."""
+    if not OBSIDIAN_MEMORIES_DIR.exists():
+        return []
+
+    # Build a map of id_prefix → file path
+    file_map = {}
+    for f in OBSIDIAN_MEMORIES_DIR.glob("*.md"):
+        # Filename format: {slug}-{id[:8]}.md
+        name = f.stem  # e.g. "cortex-unified-recall-abc12345"
+        if len(name) >= 8:
+            id_prefix = name[-8:]
+            file_map[id_prefix] = f
+
+    results = []
+    for pid in picked_ids:
+        filepath = file_map.get(pid)
+        if not filepath or not filepath.exists():
+            continue
+        try:
+            content = filepath.read_text()
+            # Parse frontmatter
+            meta = {"title": "Untitled", "who": "general", "why": "discovered", "body": ""}
+            if content.startswith("---"):
+                parts = content.split("---", 2)
+                if len(parts) >= 3:
+                    fm = parts[1].strip()
+                    body = parts[2].strip()
+                    for line in fm.split("\n"):
+                        if ":" in line:
+                            key, val = line.split(":", 1)
+                            key = key.strip()
+                            val = val.strip()
+                            if key in ("title", "who", "why"):
+                                meta[key] = val
+                    meta["body"] = body
+            else:
+                meta["body"] = content.strip()
+            results.append(meta)
+        except OSError:
+            continue
+    return results
+
+
 def _smart_recall(prompt: str, scope_id: str = "default") -> str:
     """Haiku scans _index.md, picks generously, loads full content.
     Falls back to memory_recall if index doesn't exist or Haiku fails."""
@@ -1379,23 +1423,16 @@ def _smart_recall(prompt: str, scope_id: str = "default") -> str:
         # Fallback to old recall
         return memory_recall(prompt, scope_id=scope_id, limit=10)
 
-    # Load full content of picked memories
-    all_memories = _all_memories(scope_id)
-    mem_by_prefix = {}
-    for m in all_memories:
-        prefix = m["id"][:8]
-        mem_by_prefix[prefix] = m
+    # Load full content from Obsidian files (not ChromaDB)
+    picked_files = _load_obsidian_memories(picked_ids)
 
-    picked_mems = [mem_by_prefix[pid] for pid in picked_ids if pid in mem_by_prefix]
-
-    if not picked_mems:
+    if not picked_files:
         return memory_recall(prompt, scope_id=scope_id, limit=10)
 
     # Format output grouped by project
     by_project = {}
-    for m in picked_mems:
-        project = _extract_project(m)
-        by_project.setdefault(project, []).append(m)
+    for mem in picked_files:
+        by_project.setdefault(mem["who"], []).append(mem)
 
     sections = []
     sorted_projects = sorted(p for p in by_project if p != "general")
@@ -1406,21 +1443,9 @@ def _smart_recall(prompt: str, scope_id: str = "default") -> str:
         mems = by_project[project]
         lines = [f"### {project}"]
         for m in mems:
-            title = m.get("title", "Untitled")
-            clean_title = re.sub(r'^\[[^\]]+\]\s*', '', title).split("\n")[0].strip()
-            why = _map_memory_type_to_why(
-                m.get("memory_type", "knowledge"),
-                m.get("source_type", ""),
-                m.get("essence", "")
-            )
-            essence = m.get("essence", "")
-            full_record = m.get("full_record")
-
-            entry = f"- **{clean_title}** ({why})"
-            if essence and essence[:50] != clean_title[:50]:
-                entry += f"\n  {essence[:400]}"
-            if full_record and full_record != essence:
-                entry += f"\n  > {full_record[:400]}"
+            entry = f"- **{m['title']}** ({m['why']})"
+            if m["body"]:
+                entry += f"\n  {m['body'][:500]}"
             lines.append(entry)
         sections.append("\n".join(lines))
 
@@ -1428,12 +1453,6 @@ def _smart_recall(prompt: str, scope_id: str = "default") -> str:
     transcript_results = transcript_search(prompt, limit=3)
     if transcript_results and "No matching" not in transcript_results:
         sections.append(f"### Related Session Logs\n\n{transcript_results}")
-
-    # Update retrieval counts
-    for mem in picked_mems:
-        mem["retrieval_count"] = mem.get("retrieval_count", 0) + 1
-        mem["last_retrieved_at"] = _now()
-        _save_memory(mem, skip_obsidian=True)
 
     return "\n\n".join(sections) if sections else f"No memories found for: {prompt}"
 
