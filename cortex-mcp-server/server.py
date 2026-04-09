@@ -167,30 +167,75 @@ def _search_memories(query: str, scope_id: str | None = None, limit: int = 10) -
     return [m for _, m in scored[:limit]]
 
 
-def _format_memory_for_context(mem: dict) -> str:
-    """Format a memory as a tagged context block."""
+def _format_memory_as_bullet(mem: dict) -> str:
+    """Format a single memory as a markdown bullet for LLM consumption."""
     title = mem.get("title", "Untitled")
-    mem_type = mem.get("memory_type", "unknown")
-    confidence = float(mem.get("confidence", 0.5))
-    impact = float(mem.get("impact_score", 0.0))
     essence = mem.get("essence", "")
-
-    content = f"## {title}\n"
-    content += f"*Type: {mem_type} | Confidence: {confidence:.1f} | Impact: {impact:.2f}*\n\n"
-    content += essence
-
-    # Include full exchange context for mined memories
     full_record = mem.get("full_record")
+
+    line = f"- **{title}**"
+    # Add essence if it's different from title
+    if essence and essence[:60] != title[:60]:
+        line += f" — {essence[:300]}"
+
+    # Attach raw exchange log for mined memories
     if full_record and full_record != essence:
-        content += f"\n\n> Context: {full_record[:500]}"
+        line += f"\n  > {full_record[:500]}"
 
-    tags = mem.get("domain_tags", [])
-    if tags:
-        content += f"\n\nTags: {', '.join(tags)}"
+    return line
 
-    mem_id = mem.get("id", "unknown")
-    tier = mem.get("tier", "L2")
-    return f'<context source="memory" relevance="{confidence:.2f}" memory_id="{mem_id}" tier="{tier}">\n{content}\n</context>'
+
+def _format_foundation(memories: list[dict]) -> str:
+    """Format L0 project identity and starter pack conventions as a briefing."""
+    # Split into project info and conventions
+    project_mems = [m for m in memories if m.get("source_type") in ("auto_seed",)]
+    convention_mems = [m for m in memories if m.get("source_type") == "starter_pack"]
+    user_mems = [m for m in memories if m.get("source_type") in ("user", "import")]
+
+    sections = []
+
+    if project_mems:
+        # Group project mems by project name (extract from title like "[cortex] ...")
+        projects = {}
+        for m in project_mems:
+            title = m.get("title", "")
+            if title.startswith("["):
+                proj = title.split("]")[0].lstrip("[")
+            else:
+                proj = "general"
+            projects.setdefault(proj, []).append(m)
+
+        lines = ["## Project Context"]
+        for proj, mems in sorted(projects.items()):
+            # One line per project: tech stack + key info
+            overview = next((m.get("essence", "") for m in mems
+                           if "overview" in m.get("title", "").lower()), "")
+            tech = next((m.get("essence", "") for m in mems
+                        if "tech stack" in m.get("title", "").lower()), "")
+            summary = tech or overview[:100] or "project detected"
+            lines.append(f"- **{proj}**: {summary}")
+        sections.append("\n".join(lines))
+
+    if user_mems:
+        lines = ["## Key Knowledge"]
+        for m in user_mems:
+            lines.append(f"- **{m.get('title', '')}** — {m.get('essence', '')[:200]}")
+        sections.append("\n".join(lines))
+
+    if convention_mems:
+        # Group conventions by domain, show compact summary
+        by_domain = {}
+        for m in convention_mems:
+            d = m.get("domain", "general")
+            by_domain.setdefault(d, []).append(m)
+
+        lines = ["## Conventions"]
+        for domain, mems in sorted(by_domain.items()):
+            titles = ", ".join(m.get("title", "")[:40] for m in mems)
+            lines.append(f"- **{domain}**: {titles}")
+        sections.append("\n".join(lines))
+
+    return "\n\n".join(sections)
 
 
 def _now() -> str:
@@ -753,35 +798,75 @@ mcp = FastMCP("cortex")
 
 @mcp.tool()
 def context_assemble(goal: str, scope_id: str = "default", limit: int = 10) -> str:
-    """Assemble relevant context using memory hierarchy.
-    L0+L1 always loaded. L2 loaded by domain match. L3 searched on demand."""
+    """Assemble relevant context as a structured markdown briefing.
+
+    Foundation (always loaded): project identity + conventions.
+    Search results (by relevance): project-specific memories matching the goal.
+    Raw logs: matching transcript exchanges from session history."""
 
     all_mems = _all_memories(scope_id)
 
     if not all_mems:
-        return "No relevant memories found. This is a fresh topic."
+        return "No memories found. This is a fresh workspace."
 
-    # Reassign tiers (they may have changed since last save)
+    # Reassign tiers
     for mem in all_mems:
         mem["tier"] = _assign_tier(mem)
 
-    # L0 + L1: Always loaded
-    always_load = [m for m in all_mems if m.get("tier") in ("L0", "L1")]
+    # ── Foundation: project identity (L0) + starter packs + user knowledge ──
+    foundation_mems = [m for m in all_mems
+                       if m.get("tier") in ("L0", "L1")
+                       or m.get("source_type") == "starter_pack"]
 
-    # L2 + L3: Search for relevant ones
+    # ── Search: only project-specific memories (exclude starter packs) ──
+    searchable = [m for m in all_mems if m.get("source_type") != "starter_pack"]
+    # Run search on searchable memories only
     searched = _search_memories(goal, scope_id=scope_id, limit=limit)
-    # Exclude duplicates already in always_load
-    always_ids = {m["id"] for m in always_load}
-    searched = [m for m in searched if m["id"] not in always_ids]
+    searched = [m for m in searched if m.get("source_type") != "starter_pack"]
 
-    # Combine: always_load first, then searched
-    final = always_load + searched
+    # Exclude foundation duplicates from search results
+    foundation_ids = {m["id"] for m in foundation_mems}
+    searched = [m for m in searched if m["id"] not in foundation_ids]
 
-    # Update retrieval counts
-    blocks = []
+    # ── Raw transcript search: attach matching session exchanges ──
+    transcript_results = transcript_search(goal, limit=3)
+
+    # ── Build markdown output ──
+    sections = []
+
+    # Foundation
+    foundation_text = _format_foundation(foundation_mems)
+    if foundation_text:
+        sections.append(foundation_text)
+
+    # Search results
+    if searched:
+        lines = ["## Recalled Memories"]
+        # Group by source type
+        by_source = {}
+        for m in searched:
+            src = m.get("source_type", "other")
+            by_source.setdefault(src, []).append(m)
+
+        for src_label, src_key in [("From past sessions", "mined"),
+                                    ("From project knowledge", "auto_seed"),
+                                    ("Saved knowledge", "user"),
+                                    ("Imported", "import")]:
+            mems = by_source.get(src_key, [])
+            if mems:
+                lines.append(f"\n### {src_label}")
+                for m in mems:
+                    lines.append(_format_memory_as_bullet(m))
+
+        sections.append("\n".join(lines))
+
+    # Raw transcript matches
+    if transcript_results and "No matching" not in transcript_results:
+        sections.append(f"## Related Session Logs\n\n{transcript_results}")
+
+    # ── Update retrieval counts (search results only, not foundation) ──
     memory_ids = []
-    for mem in final:
-        blocks.append(_format_memory_for_context(mem))
+    for mem in searched:
         memory_ids.append(mem["id"])
         mem["retrieval_count"] = mem.get("retrieval_count", 0) + 1
         mem["last_retrieved_at"] = _now()
@@ -798,25 +883,8 @@ def context_assemble(goal: str, scope_id: str = "default", limit: int = 10) -> s
     log_path = LOGS_DIR / f"retrieval-{log_entry['id']}.json"
     log_path.write_text(json.dumps(log_entry, indent=2))
 
-    context = "\n\n".join(blocks)
-
-    # Check for contradictions among retrieved memories
-    retrieved_ids = set(memory_ids)
-    contradictions = []
-    for mem in final:
-        contras = mem.get("contradicts", [])
-        for contra_id in contras:
-            if contra_id in retrieved_ids:
-                contradictions.append((mem.get("title", ""), contra_id))
-
-    if contradictions:
-        context += "\n\n\u26a0\ufe0f **Contradictions detected:** Some retrieved memories may conflict with each other. Review carefully."
-
-    l0_count = sum(1 for m in final if m.get("tier") == "L0")
-    l1_count = sum(1 for m in final if m.get("tier") == "L1")
-    l2_count = sum(1 for m in final if m.get("tier") in ("L2", "L3"))
-
-    return f"Context assembled: {len(final)} memories (L0:{l0_count} L1:{l1_count} searched:{l2_count})\n\n{context}"
+    result = "\n\n".join(sections) if sections else "No relevant memories found."
+    return f"Context: {len(foundation_mems)} foundation + {len(searched)} recalled + transcript logs\n\n{result}"
 
 
 @mcp.tool()
@@ -873,25 +941,47 @@ def memory_save(
 
 @mcp.tool()
 def memory_recall(query: str, scope_id: str = "default", limit: int = 10) -> str:
-    """Search memory by keyword. Returns matching memories with their content."""
+    """Search memory by keyword. Returns matching memories grouped by source,
+    with raw session logs attached when available."""
 
+    # Search project-specific memories (exclude starter packs from results)
     memories = _search_memories(query, scope_id=scope_id, limit=limit)
+    memories = [m for m in memories if m.get("source_type") != "starter_pack"]
 
-    if not memories:
+    # Also search raw transcripts
+    transcript_results = transcript_search(query, limit=3)
+
+    if not memories and ("No matching" in transcript_results or not transcript_results):
         return f"No memories found for: {query}"
 
-    lines = [f"Found {len(memories)} memories:\n"]
-    for mem in memories:
-        status = mem.get("promotion_status", "candidate")
-        confidence = float(mem.get("confidence", 0.5))
-        title = mem.get("title", "Untitled")
-        essence = mem.get("essence", "")
-        mem_id = mem.get("id", "")[:8]
-        lines.append(f"**[{mem_id}] {title}** ({status}, conf: {confidence:.1f})")
-        lines.append(f"  {essence[:200]}")
-        lines.append("")
+    sections = []
 
-    return "\n".join(lines)
+    if memories:
+        # Group by source type
+        by_source = {}
+        for m in memories:
+            src = m.get("source_type", "other")
+            by_source.setdefault(src, []).append(m)
+
+        lines = []
+        for src_label, src_key in [("From past sessions", "mined"),
+                                    ("From project knowledge", "auto_seed"),
+                                    ("Saved knowledge", "user"),
+                                    ("Imported", "import")]:
+            mems = by_source.get(src_key, [])
+            if mems:
+                lines.append(f"### {src_label}")
+                for m in mems:
+                    lines.append(_format_memory_as_bullet(m))
+                lines.append("")
+
+        sections.append("\n".join(lines))
+
+    # Attach raw session logs
+    if transcript_results and "No matching" not in transcript_results:
+        sections.append(f"### Related Session Logs\n\n{transcript_results}")
+
+    return "\n".join(sections) if sections else f"No memories found for: {query}"
 
 
 @mcp.tool()
@@ -1684,15 +1774,15 @@ def transcript_search(query: str, limit: int = 5) -> str:
 
     lines = []
     for score, pair, filename in top:
-        user_msg = pair["user_text"][:200]
-        asst_msg = pair["assistant_text"][:200]
+        user_msg = pair["user_text"][:300]
+        asst_msg = pair["assistant_text"][:500]
         lines.append(
-            f"[score: {score:.2f}] [{filename}]\n"
-            f"User: {user_msg}\n"
-            f"Assistant: {asst_msg}"
+            f"- **Q:** {user_msg}\n"
+            f"  **A:** {asst_msg}\n"
+            f"  *Session: {filename}*"
         )
 
-    return "\n\n---\n\n".join(lines)
+    return "\n\n".join(lines)
 
 
 # ─── Garbage Collection ──────────────────────────────────────────
