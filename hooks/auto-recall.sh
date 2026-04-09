@@ -38,8 +38,22 @@ find "$SESSION_MARKER_DIR" -type f -mtime +7 -delete 2>/dev/null || true
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SERVER="$SCRIPT_DIR/../cortex-mcp-server/server.py"
 
-# Call memory_recall with the user's prompt
-RESULT=$(python3 "$SERVER" --recall "$PROMPT" 2>/dev/null || echo "")
+# Use Haiku to rewrite the prompt into vector-DB-friendly search keywords
+SMART_QUERY=$(claude -p --model haiku --tools "" \
+  --system-prompt "You are a keyword extractor. Output ONLY search phrases, never full sentences or explanations." \
+  "TASK: Convert this into 3-5 search phrases for a coding knowledge database. Each phrase should be 3-6 words, keyword-rich. Include project names and technical terms mentioned or implied.
+
+NO markdown. NO explanations. Just the search phrases, one per line.
+
+User message: $PROMPT" 2>/dev/null || echo "$PROMPT")
+
+# Fallback to raw prompt if Haiku returned empty
+if [ -z "$SMART_QUERY" ]; then
+  SMART_QUERY="$PROMPT"
+fi
+
+# Call memory_recall with the smart query
+RESULT=$(python3 "$SERVER" --recall "$SMART_QUERY" 2>/dev/null || echo "")
 
 # If we got results, inject as additional context
 if [ -n "$RESULT" ] && [ "$RESULT" != "No query provided." ]; then

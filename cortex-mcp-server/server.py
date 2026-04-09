@@ -520,7 +520,6 @@ def _search_memories(query: str, scope_id: str | None = None, limit: int = 10) -
         return []
 
 
-
 # ─── MCP Tools ────────────────────────────────────────────────────
 
 mcp = FastMCP("cortex")
