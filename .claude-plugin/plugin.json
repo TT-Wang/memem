@@ -1,6 +1,6 @@
 {
   "name": "cortex",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Intelligent cross-session memory and context assembly for Claude Code",
   "author": {
     "name": "TT-Wang",
