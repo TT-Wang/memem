@@ -1079,6 +1079,10 @@ def memory_save(
 def memory_recall(query: str, scope_id: str = "default", limit: int = 10) -> str:
     """Search memory by keyword. Returns matching memories with their content."""
 
+    # Auto-seed if needed (in case context_assemble wasn't called first)
+    if not _was_seeded(scope_id):
+        _auto_seed_workspace(scope_id)
+
     memories = _search_memories(query, scope_id=scope_id, limit=limit)
 
     if not memories:
@@ -1101,6 +1105,10 @@ def memory_recall(query: str, scope_id: str = "default", limit: int = 10) -> str
 @mcp.tool()
 def memory_list(scope_id: str = "default") -> str:
     """List all memories in a scope."""
+
+    # Auto-seed if needed (in case context_assemble wasn't called first)
+    if not _was_seeded(scope_id):
+        _auto_seed_workspace(scope_id)
 
     memories = _all_memories(scope_id)
     if not memories:
