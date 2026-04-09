@@ -123,7 +123,7 @@ def _search_memories(query: str, scope_id: str | None = None, limit: int = 10) -
 
         # Confidence and promotion boosts
         confidence = float(mem.get("confidence", 0.5))
-        learned_boost = 1.3 if mem.get("promotion_status") == "learned" else 1.0
+        learned_boost = 1.1 if mem.get("promotion_status") == "learned" else 1.0
         impact = float(mem.get("impact_score", 0.0))
 
         # Recency boost: recently validated memories get a small boost
@@ -142,15 +142,16 @@ def _search_memories(query: str, scope_id: str | None = None, limit: int = 10) -
             except (ValueError, TypeError):
                 pass
 
-        # Combined score
+        # Combined score — vector-first like MemPalace (semantic similarity dominates)
         if use_vectors:
-            # Hybrid: 45% vector, 25% keyword, 10% confidence, 10% impact, 10% recency
-            combined = (0.45 * vector_score + 0.25 * keyword_score +
-                       0.1 * confidence + 0.1 * impact + 0.1 * recency_boost) * learned_boost
+            # Vector-dominant: semantic similarity is the primary signal
+            # Keyword acts as exact-match boost, not a gate
+            combined = (0.70 * vector_score + 0.15 * keyword_score +
+                       0.05 * confidence + 0.05 * impact + 0.05 * recency_boost) * learned_boost
         else:
-            # Keyword only: 55% keyword, 20% confidence, 15% impact, 10% recency
-            combined = (0.55 * keyword_score + 0.2 * confidence +
-                       0.15 * impact + 0.1 * recency_boost) * learned_boost
+            # Keyword only fallback (no vectors available)
+            combined = (0.55 * keyword_score + 0.20 * confidence +
+                       0.15 * impact + 0.10 * recency_boost) * learned_boost
 
         # Domain match boost (additive, not multiplicative — prevents excluding valid results)
         if query_domain and query_domain != "general":
