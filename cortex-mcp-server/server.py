@@ -118,6 +118,10 @@ def _save_memory(mem: dict, skip_obsidian: bool = False):
             meta["obsidian_file"] = mem["obsidian_file"]
             _collection.update(ids=[mem["id"]], metadatas=[meta])
 
+    # Update index
+    if not skip_obsidian and INDEX_PATH.exists():
+        _append_or_update_index_line(mem)
+
 
 def _write_obsidian_memory(mem: dict):
     """Write a memory as markdown to the Obsidian vault."""
@@ -141,14 +145,22 @@ def _write_obsidian_memory(mem: dict):
     if isinstance(tags, str):
         tags = [t for t in tags.split(",") if t]
 
+    who = _extract_project(mem)
+    why = _map_memory_type_to_why(
+        mem.get("memory_type", "knowledge"),
+        mem.get("source_type", ""),
+        mem.get("essence", "")
+    )
+    clean_title = re.sub(r'^\[[^\]]+\]\s*', '', mem.get("title", "Untitled"))
+
     frontmatter = f"""---
-id: {mem['id']}
-type: {mem.get('memory_type', 'knowledge')}
-confidence: {mem.get('confidence', 0.5)}
-source: {mem.get('source_type', 'unknown')}
-domain: {mem.get('domain', 'general')}
+title: {clean_title}
+who: {who}
+why: {why}
 tags: [{', '.join(tags)}]
+confidence: {mem.get('confidence', 0.5)}
 created: {mem.get('created_at', '')[:10]}
+related: []
 ---"""
 
     # Body
@@ -179,6 +191,7 @@ def _delete_memory(memory_id: str) -> bool:
                     obsidian_path.unlink()
 
         _collection.delete(ids=[memory_id])
+        _remove_index_line(memory_id)
         return True
     except Exception:
         return False
@@ -1058,6 +1071,263 @@ def garbage_collect() -> dict:
             "logs_cleaned": logs_cleaned, "remaining": len(_all_memories())}
 
 
+# ─── Index Generation ────────────────────────────────────────────
+
+INDEX_PATH = OBSIDIAN_VAULT / "cortex" / "_index.md"
+
+
+def _map_memory_type_to_why(memory_type: str, source_type: str, essence: str) -> str:
+    """Map old memory_type to new why: verb based on schema spec section 5."""
+    if source_type == "auto_seed":
+        return "discovered"
+
+    e = (essence or "").lower()
+
+    if memory_type == "lesson":
+        return "learned"
+    elif memory_type == "knowledge":
+        if any(w in e for w in ("decided", "chose", "went with")):
+            return "decided"
+        elif any(w in e for w in ("shipped", "added", "built")):
+            return "shipped"
+        elif any(w in e for w in ("found", "discovered")):
+            return "discovered"
+        elif any(w in e for w in ("designed", "architecture")):
+            return "designed"
+        else:
+            return "discovered"
+    elif memory_type == "convention":
+        return "convention"
+    elif memory_type == "preference":
+        return "prefers"
+    elif memory_type == "failure":
+        if any(w in e for w in ("blocked", "can't", "doesn't work")):
+            return "blocked-by"
+        else:
+            return "failed"
+    else:
+        return "discovered"
+
+
+def _extract_project(mem: dict) -> str:
+    """Extract project name from memory title prefix or domain_tags."""
+    title = mem.get("title") or ""
+    m = re.match(r'^\[([^\]]+)\]', title)
+    if m:
+        return m.group(1)
+
+    domain_tags = mem.get("domain_tags") or []
+    known_projects = {"cortex-plugin", "substrate", "forge", "vibereader", "obsidian-brain"}
+    for tag in domain_tags:
+        if tag in known_projects:
+            return tag
+
+    return "general"
+
+
+def _format_index_line(mem: dict) -> str:
+    """Format one memory as an index line: - [MM-DD] verb: description | #tag1 #tag2"""
+    created_at = mem.get("created_at") or ""
+    try:
+        dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        date_str = dt.strftime("%m-%d")
+    except Exception:
+        date_str = "00-00"
+
+    memory_type = mem.get("memory_type") or "knowledge"
+    source_type = mem.get("source_type") or ""
+    essence = mem.get("essence") or ""
+    verb = _map_memory_type_to_why(memory_type, source_type, essence)
+
+    title = mem.get("title") or essence[:60]
+    # Strip [project-name] prefix and ensure single-line
+    description = re.sub(r'^\[[^\]]+\]\s*', '', title)
+    description = description.split("\n")[0].strip()[:120]
+
+    domain_tags = mem.get("domain_tags") or []
+    tags_str = " ".join(f"#{t}" for t in domain_tags if t)
+
+    line = f"- [{date_str}] {verb}: {description}"
+    if tags_str:
+        line += f" | {tags_str}"
+    return line
+
+
+def _generate_index(scope_id: str = "default") -> str:
+    """Generate the full _index.md from all ChromaDB memories."""
+    memories = _all_memories(scope_id)
+
+    # Group by project
+    projects: dict[str, list[dict]] = {}
+    for mem in memories:
+        project = _extract_project(mem)
+        projects.setdefault(project, []).append(mem)
+
+    # Sort projects alphabetically, general last
+    sorted_projects = sorted(p for p in projects if p != "general")
+    if "general" in projects:
+        sorted_projects.append("general")
+
+    # Build markdown
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    total = len(memories)
+    lines = [
+        "# Cortex Memory Index",
+        f"Updated: {today} | Total: {total} memories",
+    ]
+
+    for project in sorted_projects:
+        mems = projects[project]
+        # Sort newest first
+        def _date_key(m):
+            try:
+                return datetime.fromisoformat((m.get("created_at") or "").replace("Z", "+00:00"))
+            except Exception:
+                return datetime.min.replace(tzinfo=timezone.utc)
+
+        mems_sorted = sorted(mems, key=_date_key, reverse=True)
+        lines.append("")
+        lines.append(f"## {project} ({len(mems_sorted)} memories)")
+        for mem in mems_sorted:
+            lines.append(_format_index_line(mem))
+
+    content = "\n".join(lines) + "\n"
+
+    # Write to obsidian vault
+    if OBSIDIAN_VAULT.exists():
+        INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
+        INDEX_PATH.write_text(content)
+
+    return content
+
+
+def _append_or_update_index_line(mem: dict):
+    """Append or update a memory's line in _index.md. No-op if index doesn't exist."""
+    if not INDEX_PATH.exists():
+        return
+    content = INDEX_PATH.read_text()
+    mem_id = mem["id"][:8]
+    line = _format_index_line(mem)
+    project = _extract_project(mem)
+
+    lines = content.split("\n")
+    # Remove existing line for this memory if present (match by id fragment)
+    new_lines = [l for l in lines if not (l.startswith("- [") and mem_id in l)]
+
+    # Find the right project section to append to
+    section_header = f"## {project} ("
+    inserted = False
+    for i, l in enumerate(new_lines):
+        if l.startswith(section_header):
+            new_lines.insert(i + 1, line)
+            inserted = True
+            break
+
+    if not inserted:
+        # Project section doesn't exist — add it before "## general" or at end
+        general_idx = None
+        for i, l in enumerate(new_lines):
+            if l.startswith("## general"):
+                general_idx = i
+                break
+        new_section = ["", f"## {project} (1 memories)", line]
+        if general_idx is not None:
+            for s in reversed(new_section):
+                new_lines.insert(general_idx, s)
+        else:
+            new_lines.extend(new_section)
+
+    # Recount total and update header line
+    total = sum(1 for l in new_lines if l.startswith("- ["))
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    for i, l in enumerate(new_lines):
+        if l.startswith("Updated:"):
+            new_lines[i] = f"Updated: {today} | Total: {total} memories"
+            break
+
+    INDEX_PATH.write_text("\n".join(new_lines))
+
+
+def _remove_index_line(memory_id: str):
+    """Remove a memory's line from _index.md. No-op if index doesn't exist."""
+    if not INDEX_PATH.exists():
+        return
+    mem_id = memory_id[:8]
+    content = INDEX_PATH.read_text()
+    lines = content.split("\n")
+    new_lines = [l for l in lines if not (l.startswith("- [") and mem_id in l)]
+    # Update total count
+    total = sum(1 for l in new_lines if l.startswith("- ["))
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    for i, l in enumerate(new_lines):
+        if l.startswith("Updated:"):
+            new_lines[i] = f"Updated: {today} | Total: {total} memories"
+            break
+    INDEX_PATH.write_text("\n".join(new_lines))
+
+
+def _migrate_memory_frontmatter(mem: dict) -> bool:
+    """Rewrite an existing Obsidian memory file with the new frontmatter schema (who, why fields)."""
+    obsidian_file = mem.get("obsidian_file")
+    if not obsidian_file:
+        return False
+    filepath = OBSIDIAN_MEMORIES_DIR / obsidian_file
+    if not filepath.exists():
+        return False
+
+    existing = filepath.read_text()
+
+    # Extract body: everything after the closing --- of old frontmatter
+    # If file starts with ---, find the second --- and take content after it
+    if existing.startswith("---"):
+        # Find closing ---
+        end_idx = existing.find("---", 3)
+        if end_idx != -1:
+            body = existing[end_idx + 3:]
+        else:
+            # Malformed frontmatter — treat entire file as body
+            body = existing
+    else:
+        # No frontmatter — treat entire file as body
+        body = existing
+
+    # Compute new frontmatter fields
+    who = _extract_project(mem)
+    why = _map_memory_type_to_why(
+        mem.get("memory_type", "knowledge"),
+        mem.get("source_type", ""),
+        mem.get("essence", "")
+    )
+
+    # Strip [project] prefix from title
+    raw_title = mem.get("title") or mem.get("essence", "")[:60]
+    title = re.sub(r'^\[[^\]]+\]\s*', '', raw_title)
+
+    tags = mem.get("domain_tags") or []
+    if isinstance(tags, str):
+        tags = [t for t in tags.split(",") if t]
+
+    confidence = mem.get("confidence", 0.8)
+
+    created_at = mem.get("created_at") or ""
+    created_date = created_at[:10] if created_at else ""
+
+    tags_str = ", ".join(tags)
+
+    new_frontmatter = f"""---
+title: {title}
+who: {who}
+why: {why}
+tags: [{tags_str}]
+confidence: {confidence}
+created: {created_date}
+related: []
+---"""
+
+    filepath.write_text(new_frontmatter + body)
+    return True
+
+
 # ─── CLI ─────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -1122,6 +1392,21 @@ if __name__ == "__main__":
             new_crontab = existing.rstrip("\n") + ("\n" if existing else "") + cron_entry + "\n"
             _sp.run(["crontab", "-"], input=new_crontab, text=True, check=True)
             print(f"Installed: {cron_entry}")
+    elif cmd == "--rebuild-index":
+        result = _generate_index()
+        print(f"Index rebuilt: {INDEX_PATH}")
+    elif cmd == "--migrate-schema":
+        memories = _all_memories("default")
+        migrated = 0
+        skipped = 0
+        for mem in memories:
+            if _migrate_memory_frontmatter(mem):
+                migrated += 1
+            else:
+                skipped += 1
+        # Rebuild index after migration
+        _generate_index("default")
+        print(json.dumps({"migrated": migrated, "skipped": skipped}))
     else:
         if not _was_seeded("default"):
             _auto_seed_workspace("default")
