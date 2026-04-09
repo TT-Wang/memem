@@ -1613,9 +1613,310 @@ def _import_json(content: str, filename: str, scope_id: str) -> int:
     return count
 
 
+# ─── Session Mining ──────────────────────────────────────────────
+
+MINED_SESSIONS_FILE = CORTEX_DIR / ".mined_sessions"
+
+# Pattern definitions: (regex_pattern, memory_type)
+_MINE_PATTERNS = [
+    # Decisions
+    (re.compile(r"[^.!?]*\b(we decided|chose|went with|the approach is)\b[^.!?]*[.!?]?", re.IGNORECASE), "knowledge"),
+    # Lessons
+    (re.compile(r"[^.!?]*\b(the issue was|fixed by|turns out|the problem was|root cause)\b[^.!?]*[.!?]?", re.IGNORECASE), "lesson"),
+    # Conventions
+    (re.compile(r"[^.!?]*\b(this project uses|always use|never use|the convention is)\b[^.!?]*[.!?]?", re.IGNORECASE), "convention"),
+    # Preferences
+    (re.compile(r"[^.!?]*\b(I prefer|do not do|stop doing|user wants|user prefers)\b[^.!?]*[.!?]?", re.IGNORECASE), "preference"),
+    # Knowledge/facts
+    (re.compile(r"[^.!?]*\b(depends on|requires|is configured at|stored in)\b[^.!?]*[.!?]?", re.IGNORECASE), "knowledge"),
+]
+
+# Patterns for explicit user preference signals
+_USER_PREF_PATTERNS = [
+    re.compile(r"[^.!?]*\b(don't do|i want|always do|never do|please don't|stop doing)\b[^.!?]*[.!?]?", re.IGNORECASE),
+]
+
+
+def _was_mined(session_id: str) -> bool:
+    """Check if a session has already been mined."""
+    if not MINED_SESSIONS_FILE.exists():
+        return False
+    for line in MINED_SESSIONS_FILE.read_text().splitlines():
+        if line.split("\t")[0].strip() == session_id:
+            return True
+    return False
+
+
+def _mark_mined(session_id: str):
+    """Append session_id + timestamp to the mined sessions file."""
+    with open(MINED_SESSIONS_FILE, "a") as f:
+        f.write(f"{session_id}\t{_now()}\n")
+
+
+def _extract_text_from_content(content, role: str) -> str:
+    """Extract plain text from a message content field (str or list)."""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type", "")
+            if btype == "text":
+                text = block.get("text", "")
+                if text:
+                    parts.append(text.strip())
+            elif btype == "tool_result":
+                # skip tool_result blocks in user messages
+                continue
+            # skip tool_use, thinking, etc.
+        return "\n".join(parts).strip()
+    return ""
+
+
+def _parse_jsonl_session(jsonl_path: str) -> list[dict]:
+    """Parse a JSONL session file and return a list of exchange pairs."""
+    messages = []
+    with open(jsonl_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            msg_type = obj.get("type")
+            if msg_type not in ("user", "assistant"):
+                continue
+            content = obj.get("message", {}).get("content", "")
+            text = _extract_text_from_content(content, msg_type)
+            if text:
+                messages.append({"role": msg_type, "text": text})
+
+    # Pair consecutive user + assistant messages
+    pairs = []
+    i = 0
+    while i < len(messages):
+        if messages[i]["role"] == "user":
+            user_text = messages[i]["text"]
+            # Look ahead for assistant response
+            if i + 1 < len(messages) and messages[i + 1]["role"] == "assistant":
+                assistant_text = messages[i + 1]["text"]
+                pairs.append({"user_text": user_text, "assistant_text": assistant_text})
+                i += 2
+            else:
+                i += 1
+        else:
+            i += 1
+    return pairs
+
+
+def _extract_insights_from_pair(pair: dict) -> list[dict]:
+    """Extract heuristic insights from an exchange pair using pattern matching."""
+    insights = []
+    assistant_text = pair["assistant_text"]
+    user_text = pair["user_text"]
+
+    # Scan assistant text for saveable insights
+    for pattern, memory_type in _MINE_PATTERNS:
+        for match in pattern.finditer(assistant_text):
+            snippet = match.group(0).strip()
+            if len(snippet) > 20:
+                insights.append({"content": snippet, "memory_type": memory_type})
+
+    # Check user text for explicit preference signals
+    for pattern in _USER_PREF_PATTERNS:
+        for match in pattern.finditer(user_text):
+            snippet = match.group(0).strip()
+            if len(snippet) > 10:
+                insights.append({"content": snippet, "memory_type": "preference"})
+
+    # Deduplicate by content
+    seen = set()
+    unique = []
+    for ins in insights:
+        key = ins["content"][:80]
+        if key not in seen:
+            seen.add(key)
+            unique.append(ins)
+    return unique
+
+
+def mine_session(jsonl_path: str) -> dict:
+    """Mine a single JSONL session file and save insights as Cortex memories."""
+    import sys as _sys
+
+    path = Path(jsonl_path)
+    if not path.exists():
+        return {"skipped": True, "reason": "file not found", "memories_saved": 0, "chunks_processed": 0}
+
+    # Extract session_id from filename (UUID before .jsonl)
+    session_id = path.stem  # e.g. "eeb998a8-2d76-45ce-b277-c1961844333d"
+
+    if _was_mined(session_id):
+        return {"skipped": True, "reason": "already mined"}
+
+    pairs = _parse_jsonl_session(jsonl_path)
+    memories_saved = 0
+
+    for pair in pairs:
+        insights = _extract_insights_from_pair(pair)
+        for ins in insights:
+            content = ins["content"]
+            memory_type = ins["memory_type"]
+            domain, room = _detect_domain_room(content)
+            mem = {
+                "id": str(uuid.uuid4()),
+                "essence": content[:2000],
+                "full_record": content[:2000],
+                "title": content[:80],
+                "memory_type": memory_type,
+                "scope_type": "project",
+                "scope_id": "default",
+                "confidence": 0.4,
+                "impact_score": 0.0,
+                "success_count": 0,
+                "failure_count": 0,
+                "retrieval_count": 0,
+                "promotion_status": "candidate",
+                "verified": False,
+                "human_approved": False,
+                "domain": domain,
+                "room": room,
+                "domain_tags": ["mined", session_id[:8]],
+                "associations": [],
+                "contradicts": [],
+                "source_type": "mined",
+                "created_at": _now(),
+                "last_retrieved_at": None,
+                "last_validated_at": None,
+            }
+            mem["tier"] = _assign_tier(mem)
+            _save_memory(mem)
+            memories_saved += 1
+
+    _mark_mined(session_id)
+    return {
+        "session_id": session_id,
+        "chunks_processed": len(pairs),
+        "memories_saved": memories_saved,
+        "skipped": False,
+    }
+
+
+def mine_all() -> dict:
+    """Discover and mine all unmined Claude Code JSONL session files."""
+    base_dir = Path.home() / ".claude" / "projects"
+    total_sessions = 0
+    newly_mined = 0
+    already_mined = 0
+    total_memories_saved = 0
+
+    if base_dir.exists():
+        for path in base_dir.rglob("*.jsonl"):
+            if "/subagents/" in str(path):
+                continue
+            total_sessions += 1
+            result = mine_session(str(path))
+            if result.get("skipped"):
+                already_mined += 1
+            else:
+                newly_mined += 1
+                total_memories_saved += result.get("memories_saved", 0)
+
+    return {
+        "total_sessions": total_sessions,
+        "newly_mined": newly_mined,
+        "already_mined": already_mined,
+        "total_memories_saved": total_memories_saved,
+    }
+
+
+# ─── Transcript Search ───────────────────────────────────────────
+
+@mcp.tool()
+def transcript_search(query: str, limit: int = 5) -> str:
+    """Search raw Claude Code JSONL session files still on disk.
+
+    Discovers all JSONL files in ~/.claude/projects/ (excluding subagents/ dirs)
+    and searches across user+assistant exchange pairs using keyword overlap scoring.
+
+    Returns the top matching exchanges showing the user message, assistant response,
+    session filename, and relevance score."""
+
+    base_dir = Path.home() / ".claude" / "projects"
+    if not base_dir.exists():
+        return "No matching transcripts found"
+
+    query_lower = query.lower()
+    query_words = set(query_lower.split())
+    if not query_words:
+        return "No matching transcripts found"
+
+    scored = []
+    for jsonl_path in base_dir.rglob("*.jsonl"):
+        if "/subagents/" in str(jsonl_path):
+            continue
+        try:
+            pairs = _parse_jsonl_session(str(jsonl_path))
+        except (OSError, Exception):
+            continue
+        for pair in pairs:
+            exchange_text = (pair["user_text"] + " " + pair["assistant_text"]).lower()
+            text_words = set(exchange_text.split())
+            score = len(query_words & text_words) / len(query_words)
+            if score > 0:
+                scored.append((score, pair, jsonl_path.name))
+
+    if not scored:
+        return "No matching transcripts found"
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top = scored[:limit]
+
+    lines = []
+    for score, pair, filename in top:
+        user_msg = pair["user_text"][:200]
+        asst_msg = pair["assistant_text"][:200]
+        lines.append(
+            f"[score: {score:.2f}] [{filename}]\n"
+            f"User: {user_msg}\n"
+            f"Assistant: {asst_msg}"
+        )
+
+    return "\n\n---\n\n".join(lines)
+
+
 # ─── Run ─────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    import sys as _sys
+
+    if len(_sys.argv) >= 3 and _sys.argv[1] == "--mine-session":
+        result = mine_session(_sys.argv[2])
+        print(json.dumps(result))
+        _sys.exit(0)
+
+    elif len(_sys.argv) >= 2 and _sys.argv[1] == "--mine-all":
+        result = mine_all()
+        print(json.dumps(result))
+        _sys.exit(0)
+
+    elif len(_sys.argv) >= 2 and _sys.argv[1] == "--install-cron":
+        import subprocess as _subprocess
+        _cron_entry = "0 * * * * bash /home/claude-user/cortex-plugin/cortex-mcp-server/mine-cron.sh"
+        _result = _subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+        _existing = _result.stdout if _result.returncode == 0 else ""
+        if "mine-cron.sh" in _existing:
+            print("Cron entry already present — no changes made.")
+        else:
+            _new_crontab = _existing.rstrip("\n") + ("\n" if _existing else "") + _cron_entry + "\n"
+            _subprocess.run(["crontab", "-"], input=_new_crontab, text=True, check=True)
+            print(f"Cron entry installed: {_cron_entry}")
+        _sys.exit(0)
+
     # Auto-seed on startup so starter packs are ready before any tool call
     if not _was_seeded("default"):
         _auto_seed_workspace("default")
