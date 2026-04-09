@@ -2,18 +2,16 @@
 """
 Cortex MCP Server — persistent memory for Claude Code.
 
-Three modules:
-  1. Generation: _make_memory, memory_save, mine_session, auto_seed
-  2. Retrieval:  _search_memories, _expand_query, transcript_search
-  3. Assembly:   _format_memory_as_bullet, memory_recall (formats output for LLM)
-
-MCP Tools:
-  - memory_recall: Search all memory sources (Haiku-expanded + vector + transcripts)
-  - memory_save: Save a piece of knowledge
-  - memory_list: List all memories with stats
-  - memory_feedback: Report whether recalled memories helped (also promotes)
-  - memory_import: Import from files/directories
-  - transcript_search: Search raw Claude Code JSONL session files
+Sections:
+  Storage:     JSON file CRUD (~/.cortex/memories/)
+  Generation:  _make_memory, domain detection, dedup
+  Auto-seed:   Scan workspace projects + load starter packs on first run
+  Retrieval:   Vector + keyword hybrid search, Haiku query expansion
+  MCP Tools:   memory_recall, memory_save, memory_list, memory_feedback, memory_import
+  Transcript:  Search raw Claude Code JSONL session files
+  Mining:      Parse JSONL sessions, extract insights, save as memories
+  GC:          Decay stale, merge duplicates, prune excess
+  CLI:         --mine-session, --mine-all, --gc, --purge-mined, --install-cron
 """
 
 import json
@@ -85,7 +83,7 @@ def _find_memory(memory_id: str) -> dict | None:
     return None
 
 
-# ─── Module 1: Generation ────────────────────────────────────────
+# ─── Generation ───────────────────────────────────────────────────
 
 DOMAIN_KEYWORDS = {
     "auth": ["auth", "login", "jwt", "token", "oauth", "session", "password", "credential", "permission", "rbac"],
@@ -373,7 +371,7 @@ def _auto_seed_workspace(scope_id: str) -> list[dict]:
     return all_seeded
 
 
-# ─── Module 2: Retrieval ─────────────────────────────────────────
+# ─── Retrieval ────────────────────────────────────────────────────
 
 def _search_memories(query: str, scope_id: str | None = None, limit: int = 10) -> list[dict]:
     """Hybrid search: vector similarity (70%) + keyword (15%) + metadata (15%)."""
@@ -458,7 +456,7 @@ def _expand_query(query: str) -> str:
     return query
 
 
-# ─── Module 3: Assembly (MCP Tools) ──────────────────────────────
+# ─── MCP Tools ────────────────────────────────────────────────────
 
 mcp = FastMCP("cortex")
 
