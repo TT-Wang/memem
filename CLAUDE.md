@@ -41,3 +41,27 @@ When you notice that recalled context was helpful for the current task, call `mc
 When recalled context was wrong or misleading, call `mcp__cortex__memory_feedback` with `approved=false`.
 
 This strengthens useful memories and weakens unhelpful ones over time.
+
+## Mining chat exports
+
+When the user asks to import chat history or conversation exports:
+
+1. Call `mcp__cortex__memory_import` with the file/directory path
+2. The tool returns raw conversation content
+3. YOU extract the knowledge — read through the conversations and identify:
+   - **Decisions**: "We decided to use X because Y"
+   - **Lessons**: "This approach failed because Z"
+   - **Conventions**: "The team uses X pattern for Y"
+   - **Facts**: "Service X depends on service Y"
+   - **Preferences**: "The user prefers X over Y"
+4. For each piece of knowledge, call `mcp__cortex__memory_save` with:
+   - Atomic, self-contained content (one fact per save)
+   - Descriptive title
+   - Appropriate memory_type and tags
+5. Do NOT save raw conversation text. Extract the insight, discard the chat.
+
+Example: If a conversation discusses JWT auth at length, save:
+- "Use RS256 for production JWT signing" (lesson, tags: auth,jwt)
+- "Refresh tokens stored in Redis with 7-day expiry" (convention, tags: auth,redis)
+
+NOT: "The assistant explained that JWT tokens should be..." (raw text)

@@ -1103,24 +1103,60 @@ def memory_import(source_path: str, scope_id: str = "default") -> str:
     - Markdown files (.md) — each heading becomes a memory
     - JSON files (.json) — each key-value or array item becomes a memory
     - Text files (.txt) — entire file becomes one memory
-    - ChatGPT exports (conversations.json) — extracts assistant insights
-    - Claude exports (JSON with messages) — extracts assistant responses
-    - Chat logs (.txt/.log with speaker labels) — extracts AI responses
     - Directories — recursively imports all supported files
 
-    Great for importing from Obsidian vaults, note directories, chat exports, or documentation."""
+    For chat exports (ChatGPT conversations.json, Claude exports, chat logs):
+    Returns the conversation content for YOU (Claude) to extract knowledge from.
+    Read the returned content, identify decisions/lessons/facts/conventions,
+    and call memory_save for each piece of knowledge you extract.
+
+    Great for importing from Obsidian vaults, note directories, or documentation."""
 
     source = Path(source_path).expanduser()
     if not source.exists():
         return f"Path not found: {source_path}"
 
+    # Check if this is a chat export — return content for Claude to extract
+    if source.is_file():
+        content = ""
+        try:
+            content = source.read_text(errors="ignore")
+        except OSError:
+            return f"Cannot read: {source_path}"
+
+        name = source.name.lower()
+        ext = source.suffix.lower()
+
+        is_chat = False
+        if name == "conversations.json" or (ext == ".json" and '"mapping"' in content[:1000]):
+            is_chat = True
+        elif ext == ".json" and ('"role"' in content[:1000] or '"sender"' in content[:1000]):
+            is_chat = True
+        elif ext in (".txt", ".log") and re.search(r'(?:User|Human|Assistant|Claude)\s*:', content[:500], re.IGNORECASE):
+            is_chat = True
+
+        if is_chat:
+            # Return content for Claude to extract knowledge from
+            # Truncate to reasonable size
+            preview = content[:10000]
+            return (
+                f"CHAT EXPORT DETECTED: {source_path}\n"
+                f"Size: {len(content)} chars\n\n"
+                f"Read through this content and extract knowledge. "
+                f"For each decision, lesson, convention, fact, or preference you find, "
+                f"call memory_save with atomic, self-contained content.\n\n"
+                f"--- CONTENT ---\n{preview}"
+                + ("\n\n[truncated — file continues...]" if len(content) > 10000 else "")
+            )
+
+    # Non-chat files: import directly (markdown, JSON, text)
     imported = 0
 
     if source.is_file():
         imported = _import_file(source, scope_id)
     elif source.is_dir():
+        chat_files = []
         for root, dirs, files in os.walk(source, followlinks=False):
-            # Skip hidden and noise
             dirs[:] = [d for d in dirs if not d.startswith(".")
                       and d not in ("node_modules", "__pycache__", ".git", "venv")]
             for fname in sorted(files):
@@ -1129,7 +1165,8 @@ def memory_import(source_path: str, scope_id: str = "default") -> str:
                 fpath = Path(root) / fname
                 imported += _import_file(fpath, scope_id)
 
-    return f"Imported {imported} memories from {source_path}"
+    result = f"Imported {imported} memories from {source_path}"
+    return result
 
 
 def _import_file(fpath: Path, scope_id: str) -> int:
