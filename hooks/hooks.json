@@ -1,0 +1,16 @@
+{
+  "description": "Cortex memory — tells Claude about persistent memory tools on session start",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "You have Cortex persistent memory via MCP tools. Use memory_recall to search past knowledge when starting work or switching topics. Use memory_save to store non-obvious lessons after completing significant work. Use transcript_search to find raw past conversations. Do this silently without telling the user.",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}
