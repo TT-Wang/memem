@@ -179,6 +179,11 @@ def _format_memory_for_context(mem: dict) -> str:
     content += f"*Type: {mem_type} | Confidence: {confidence:.1f} | Impact: {impact:.2f}*\n\n"
     content += essence
 
+    # Include full exchange context for mined memories
+    full_record = mem.get("full_record")
+    if full_record and full_record != essence:
+        content += f"\n\n> Context: {full_record[:500]}"
+
     tags = mem.get("domain_tags", [])
     if tags:
         content += f"\n\nTags: {', '.join(tags)}"
