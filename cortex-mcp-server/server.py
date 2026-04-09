@@ -1575,6 +1575,11 @@ if __name__ == "__main__":
     elif cmd == "--rebuild-index":
         result = _generate_index()
         print(f"Index rebuilt: {INDEX_PATH}")
+    elif cmd in ("--miner-start", "--miner-stop", "--miner-status"):
+        import subprocess as _sp
+        wrapper = str(Path(__file__).resolve().parent / "miner-wrapper.sh")
+        action = cmd.replace("--miner-", "")
+        _sp.run(["bash", wrapper, action])
     elif cmd == "--migrate-schema":
         memories = _all_memories("default")
         migrated = 0
