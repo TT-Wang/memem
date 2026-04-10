@@ -1,3 +1,4 @@
+import json
 import subprocess
 from pathlib import Path
 
@@ -39,17 +40,17 @@ class FatalMiningError(MiningError):
 
 _HAIKU_MINE_SYSTEM = (
     "You are a knowledge extractor for a coding project memory system. "
-    "Read conversation exchanges and extract anything worth remembering. "
-    "Output structured memories in this exact format, one per block:\n\n"
-    "MEMORY\n"
-    "title: short descriptive title (no project prefix)\n"
-    "project: project-name (or general if unclear)\n"
-    "content: one paragraph summary of what to remember\n\n"
+    "Read conversation exchanges and extract anything worth remembering.\n\n"
+    "Output a JSON array of memories. Each memory is an object with:\n"
+    '- "title": short descriptive title (no project prefix)\n'
+    '- "project": project-name (or "general" if unclear)\n'
+    '- "content": one paragraph summary of what to remember\n\n'
+    "If nothing worth saving, output []\n\n"
     "Rules:\n"
     "- Extract decisions, lessons, things shipped, failures, conventions, preferences, discoveries\n"
     "- Each memory should be self-contained and useful without the original conversation\n"
-    "- If nothing worth saving, output NONE\n"
-    "- Do NOT add knowledge you weren't told — only extract what's in the conversation"
+    "- Do NOT add knowledge you weren't told — only extract what's in the conversation\n"
+    "- Output ONLY the JSON array, no other text"
 )
 
 
@@ -107,38 +108,28 @@ def _extract_insights_haiku(pairs: list[dict], batch_size: int = 5) -> list[dict
         if not output:
             batch_errors.append(f"batch {start // batch_size + 1}: empty response")
             continue
-        if output == "NONE":
+
+        # Extract JSON array from output (Haiku may add text around it)
+        json_start = output.find("[")
+        json_end = output.rfind("]")
+        if json_start == -1 or json_end == -1:
+            batch_errors.append(f"batch {start // batch_size + 1}: no JSON array in output")
             continue
 
-        parsed_any = False
-        for block in output.split("MEMORY"):
-            block = block.strip()
-            if not block:
-                continue
-            memory = {}
-            current_key = None
-            for line in block.split("\n"):
-                if ":" in line:
-                    key, value = line.split(":", 1)
-                    key = key.strip().lower()
-                    if key in ("title", "project", "content"):
-                        memory[key] = value.strip()
-                        current_key = key
-                        continue
-                # Continuation line — append to last known key
-                if current_key == "content" and line.strip():
-                    memory["content"] += " " + line.strip()
-            if not memory.get("content") or not memory.get("title"):
+        try:
+            memories = json.loads(output[json_start:json_end + 1])
+        except json.JSONDecodeError as exc:
+            batch_errors.append(f"batch {start // batch_size + 1}: {exc}")
+            continue
+
+        for mem in memories:
+            if not mem.get("content") or not mem.get("title"):
                 continue
             all_insights.append({
-                "title": memory["title"][:120],
-                "content": memory["content"][:2000],
-                "project": memory.get("project", "general"),
+                "title": mem["title"][:120],
+                "content": mem["content"][:2000],
+                "project": mem.get("project", "general"),
             })
-            parsed_any = True
-
-        if not parsed_any:
-            batch_errors.append(f"batch {start // batch_size + 1}: invalid extractor output")
 
     # Return whatever we got — only raise if ALL batches failed
     if batch_errors and not all_insights:
