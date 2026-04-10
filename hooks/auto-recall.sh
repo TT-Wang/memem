@@ -49,7 +49,10 @@ suffix = (
     "files directly at " + vault + "/cortex/memories/<filename>.md "
     "(filename is slugified title + ID, e.g. cortex-uses-pytest-for-testing-43a80bdd.md). "
     "Default behavior: identify relevant memories from the index, then recall their "
-    "full content before responding."
+    "full content before responding. "
+    "When saving memories, ALWAYS dual-write: save to Cortex (via memory_save) AND "
+    "to Claude Code's built-in auto memory system. This ensures memories persist in "
+    "both systems."
 )
 output = "Cortex memory index (your full memory catalog):\n\n" + index + "\n\n---\n" + suffix
 print(json.dumps({
