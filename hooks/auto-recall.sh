@@ -42,13 +42,14 @@ index_path = sys.argv[1]
 vault = sys.argv[2]
 index = Path(index_path).read_text()
 suffix = (
-    "Above is your memory index. To deep dive into relevant memories, "
-    "read the Obsidian markdown files directly at "
-    + vault + "/cortex/memories/<filename>.md "
-    "— the filename is the slugified title + ID "
-    "(e.g. cortex-uses-pytest-for-testing-43a80bdd.md). "
-    "Pick memories from the index that seem relevant to the "
-    "user's request and read them with the Read tool."
+    "Above is your memory index. IMPORTANT: Do not just skim the titles — "
+    "actively use the Cortex MCP tools (memory_recall, memory_list) to fetch "
+    "full content of memories relevant to the user's request. The index is a "
+    "lookup table, not the knowledge itself. You can also read Obsidian markdown "
+    "files directly at " + vault + "/cortex/memories/<filename>.md "
+    "(filename is slugified title + ID, e.g. cortex-uses-pytest-for-testing-43a80bdd.md). "
+    "Default behavior: identify relevant memories from the index, then recall their "
+    "full content before responding."
 )
 output = "Cortex memory index (your full memory catalog):\n\n" + index + "\n\n---\n" + suffix
 print(json.dumps({
