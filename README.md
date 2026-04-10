@@ -70,12 +70,19 @@ Over time, the memory grows. The 50th session is dramatically better than the 1s
 | `memory_import` | Import from files, directories, or chat exports |
 | `transcript_search` | Search raw Claude Code session logs |
 
+## Configuration
+
+| Env var | Default | What |
+|---------|---------|------|
+| `CORTEX_OBSIDIAN_VAULT` | `~/obsidian-brain` | Path to your Obsidian vault |
+| `CORTEX_EXTRA_SESSION_DIRS` | (none) | Extra session dirs to mine, colon-separated |
+
 ## Requirements
 
 - Claude Code
 - Python 3.11+
 - `chromadb`, `sentence-transformers`
-- Obsidian vault (memories stored as markdown at `~/obsidian-brain/cortex/`)
+- Obsidian vault (default `~/obsidian-brain/`, configurable via env var)
 
 ## See Also
 

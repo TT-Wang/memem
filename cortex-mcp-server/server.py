@@ -39,7 +39,7 @@ CHROMADB_DIR = CORTEX_DIR / "chromadb"
 _chroma_client = chromadb.PersistentClient(path=str(CHROMADB_DIR))
 _collection = _chroma_client.get_or_create_collection("memories")
 
-OBSIDIAN_VAULT = Path.home() / "obsidian-brain"
+OBSIDIAN_VAULT = Path(os.environ.get("CORTEX_OBSIDIAN_VAULT", str(Path.home() / "obsidian-brain")))
 OBSIDIAN_MEMORIES_DIR = OBSIDIAN_VAULT / "cortex" / "memories"
 if OBSIDIAN_VAULT.exists():
     OBSIDIAN_MEMORIES_DIR.mkdir(parents=True, exist_ok=True)
@@ -788,7 +788,11 @@ def _import_file(fpath: Path, scope_id: str) -> int:
 @mcp.tool()
 def transcript_search(query: str, limit: int = 5) -> str:
     """Search raw Claude Code JSONL session files still on disk."""
-    base_dirs = [Path.home() / ".claude" / "projects", Path("/root/.claude/projects")]
+    base_dirs = [Path.home() / ".claude" / "projects"]
+    # Also scan additional session dirs (e.g. other users) via CORTEX_EXTRA_SESSION_DIRS env var
+    extra = os.environ.get("CORTEX_EXTRA_SESSION_DIRS", "")
+    if extra:
+        base_dirs.extend(Path(p) for p in extra.split(":") if p)
 
     query_words = set(query.lower().split())
     if not query_words:
@@ -1030,7 +1034,11 @@ def mine_session(jsonl_path: str) -> dict:
 
 
 def mine_all() -> dict:
-    base_dirs = [Path.home() / ".claude" / "projects", Path("/root/.claude/projects")]
+    base_dirs = [Path.home() / ".claude" / "projects"]
+    # Also scan additional session dirs (e.g. other users) via CORTEX_EXTRA_SESSION_DIRS env var
+    extra = os.environ.get("CORTEX_EXTRA_SESSION_DIRS", "")
+    if extra:
+        base_dirs.extend(Path(p) for p in extra.split(":") if p)
     total, newly_mined, already_mined, total_memories = 0, 0, 0, 0
 
     for base_dir in base_dirs:

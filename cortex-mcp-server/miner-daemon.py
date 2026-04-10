@@ -23,10 +23,11 @@ from datetime import datetime, timezone
 CORTEX_DIR = Path(os.environ.get("CORTEX_DIR", os.path.expanduser("~/.cortex")))
 PID_FILE = CORTEX_DIR / "miner.pid"
 LOG_FILE = CORTEX_DIR / "miner.log"
-SESSIONS_DIRS = [
-    Path.home() / ".claude" / "projects",
-    Path("/root/.claude/projects"),
-]
+SESSIONS_DIRS = [Path.home() / ".claude" / "projects"]
+# Also scan additional session dirs via CORTEX_EXTRA_SESSION_DIRS env var
+_extra = os.environ.get("CORTEX_EXTRA_SESSION_DIRS", "")
+if _extra:
+    SESSIONS_DIRS.extend(Path(p) for p in _extra.split(":") if p)
 
 # How long a file must be unchanged before we consider the session "ended"
 SETTLE_SECONDS = 300  # 5 minutes of no writes = session done
