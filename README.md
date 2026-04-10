@@ -23,10 +23,40 @@ Over time, the memory grows. The 50th session is dramatically better than the 1s
 ## How it works
 
 ```
-Storage:    ChromaDB (vector search) + Obsidian vault (human-readable markdown)
-Retrieval:  Hook injects memory index → Claude reads relevant Obsidian files directly
-Mining:     Background daemon watches for completed sessions → Haiku extracts insights
-Lifecycle:  Candidate → feedback strengthens/weakens → auto-promote to "learned"
+┌─────────────────────────────────────────────────────────────┐
+│                      Claude Code Session                     │
+│                                                              │
+│  ┌──────────────────┐       ┌─────────────────────────────┐ │
+│  │ UserPromptSubmit  │──────▶│ Hook injects _index.md      │ │
+│  │ hook (1st msg)    │       │ Claude picks relevant files  │ │
+│  └──────────────────┘       │ Reads ~/obsidian-brain/      │ │
+│                              │   cortex/memories/*.md       │ │
+│  ┌──────────────────┐       └─────────────────────────────┘ │
+│  │ During work       │                                       │
+│  │  memory_save() ───┼──┐                                    │
+│  │  memory_feedback()│  │                                    │
+│  └──────────────────┘  │                                    │
+└────────────────────────┼────────────────────────────────────┘
+                         │
+                         ▼
+          ┌──────────────────────────┐
+          │       Dual Write          │
+          │                           │
+          │  ChromaDB    Obsidian     │
+          │  ~/.cortex/  ~/obsidian-  │
+          │  chromadb/   brain/cortex/│
+          │  (vectors)   (markdown)   │
+          └──────────┬───────────────┘
+                     │
+                     │ _index.md updated
+                     ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    Miner Daemon (background)                  │
+│                                                              │
+│  Polls ~/.claude/projects/*/*.jsonl every 60s                │
+│  Session idle 5min → parse exchanges → Haiku extracts        │
+│  insights → dedup check → dual write to ChromaDB + Obsidian  │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ## MCP Tools
