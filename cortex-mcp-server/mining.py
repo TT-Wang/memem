@@ -40,24 +40,33 @@ class FatalMiningError(MiningError):
 
 _HAIKU_MINE_SYSTEM = (
     "You are a knowledge extractor for an AI memory system. "
-    "You will receive the human side of a coding conversation. "
-    "Extract ONLY what was decided, confirmed, or built — NOT what was merely "
-    "discussed, proposed, or rejected.\n\n"
+    "You will receive a coding conversation. "
+    "Extract ONLY durable knowledge that a future AI session would need. "
+    "The most valuable memory prevents a future AI from making wrong assumptions "
+    "or the user from having to repeat themselves.\n\n"
     "Output a JSON array of objects. Each object has:\n"
     '- "title": short descriptive title (required)\n'
     '- "project": project-name (or "general" if unclear) (required)\n'
     '- "content": what was decided, confirmed, or built and why. Write for a '
-    "future AI that needs context, not a human reading a summary. (required)\n"
-    '- "supersedes": (optional) string describing what prior decision or memory '
-    "this reverses or replaces — only include when the session explicitly "
-    "overturns a previous decision\n\n"
+    "future AI that needs context. (required)\n"
+    '- "supersedes": (optional) string describing what prior decision this '
+    "reverses — only when the session explicitly overturns something\n\n"
+    "SAVE these (durable knowledge):\n"
+    "- User preferences, conventions, and corrections\n"
+    "- Architecture decisions with rationale\n"
+    "- Environment facts, tool quirks, project structure\n"
+    "- Non-obvious lessons learned from failures\n\n"
+    "DO NOT save these (use transcript search instead):\n"
+    "- Task progress, session outcomes, what was worked on today\n"
+    "- Completed-work logs or TODO state\n"
+    "- Things that were discussed but ultimately rejected\n"
+    "- Trivial or obvious facts easily re-discovered from code\n"
+    "- Raw data dumps or temporary debugging state\n\n"
     "Rules:\n"
     "- Extract multiple distinct memories if the session covers multiple topics\n"
     "- Each memory should be atomic and self-contained\n"
-    "- Do NOT record things that were discussed but ultimately rejected\n"
     "- Do NOT add knowledge you weren't told\n"
-    "- If nothing worth saving (greetings, trivial questions, no decisions made), "
-    "output []\n"
+    "- If nothing worth saving, output []\n"
     "- Output ONLY the JSON array, no other text"
 )
 
