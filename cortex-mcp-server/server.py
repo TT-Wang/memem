@@ -788,30 +788,31 @@ def _import_file(fpath: Path, scope_id: str) -> int:
 @mcp.tool()
 def transcript_search(query: str, limit: int = 5) -> str:
     """Search raw Claude Code JSONL session files still on disk."""
-    base_dir = Path.home() / ".claude" / "projects"
-    if not base_dir.exists():
-        return "No matching transcripts found"
+    base_dirs = [Path.home() / ".claude" / "projects", Path("/root/.claude/projects")]
 
     query_words = set(query.lower().split())
     if not query_words:
         return "No matching transcripts found"
 
     scored = []
-    for jsonl_path in base_dir.rglob("*.jsonl"):
-        if "/subagents/" in str(jsonl_path):
+    for base_dir in base_dirs:
+        if not base_dir.exists():
             continue
-        # Skip tiny sessions (likely Haiku expansion calls)
-        try:
-            if jsonl_path.stat().st_size < 5000:
+        for jsonl_path in base_dir.rglob("*.jsonl"):
+            if "/subagents/" in str(jsonl_path):
                 continue
-            pairs = _parse_jsonl_session(str(jsonl_path))
-        except Exception:
-            continue
-        for pair in pairs:
-            text_words = set((pair["user_text"] + " " + pair["assistant_text"]).lower().split())
-            score = len(query_words & text_words) / len(query_words)
-            if score > 0:
-                scored.append((score, pair, jsonl_path.name))
+            # Skip tiny sessions (likely Haiku expansion calls)
+            try:
+                if jsonl_path.stat().st_size < 5000:
+                    continue
+                pairs = _parse_jsonl_session(str(jsonl_path))
+            except Exception:
+                continue
+            for pair in pairs:
+                text_words = set((pair["user_text"] + " " + pair["assistant_text"]).lower().split())
+                score = len(query_words & text_words) / len(query_words)
+                if score > 0:
+                    scored.append((score, pair, jsonl_path.name))
 
     if not scored:
         return "No matching transcripts found"
@@ -1029,10 +1030,12 @@ def mine_session(jsonl_path: str) -> dict:
 
 
 def mine_all() -> dict:
-    base_dir = Path.home() / ".claude" / "projects"
+    base_dirs = [Path.home() / ".claude" / "projects", Path("/root/.claude/projects")]
     total, newly_mined, already_mined, total_memories = 0, 0, 0, 0
 
-    if base_dir.exists():
+    for base_dir in base_dirs:
+        if not base_dir.exists():
+            continue
         for path in base_dir.rglob("*.jsonl"):
             if "/subagents/" in str(path):
                 continue

@@ -23,7 +23,10 @@ from datetime import datetime, timezone
 CORTEX_DIR = Path(os.environ.get("CORTEX_DIR", os.path.expanduser("~/.cortex")))
 PID_FILE = CORTEX_DIR / "miner.pid"
 LOG_FILE = CORTEX_DIR / "miner.log"
-SESSIONS_DIR = Path.home() / ".claude" / "projects"
+SESSIONS_DIRS = [
+    Path.home() / ".claude" / "projects",
+    Path("/root/.claude/projects"),
+]
 
 # How long a file must be unchanged before we consider the session "ended"
 SETTLE_SECONDS = 300  # 5 minutes of no writes = session done
@@ -125,25 +128,25 @@ def status_daemon():
 
 def _find_settled_sessions() -> list[Path]:
     """Find JSONL session files that haven't been modified recently."""
-    if not SESSIONS_DIR.exists():
-        return []
-
     now = time.time()
     settled = []
 
-    for jsonl in SESSIONS_DIR.rglob("*.jsonl"):
-        if "/subagents/" in str(jsonl):
+    for sessions_dir in SESSIONS_DIRS:
+        if not sessions_dir.exists():
             continue
-        # Skip tiny files
-        try:
-            stat = jsonl.stat()
-            if stat.st_size < 5000:
+        for jsonl in sessions_dir.rglob("*.jsonl"):
+            if "/subagents/" in str(jsonl):
                 continue
-            # Check if file has settled (no writes for SETTLE_SECONDS)
-            if (now - stat.st_mtime) > SETTLE_SECONDS:
-                settled.append(jsonl)
-        except OSError:
-            continue
+            # Skip tiny files
+            try:
+                stat = jsonl.stat()
+                if stat.st_size < 5000:
+                    continue
+                # Check if file has settled (no writes for SETTLE_SECONDS)
+                if (now - stat.st_mtime) > SETTLE_SECONDS:
+                    settled.append(jsonl)
+            except OSError:
+                continue
 
     return settled
 
