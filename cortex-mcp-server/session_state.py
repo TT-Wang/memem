@@ -1,11 +1,10 @@
 import json
 import os
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 
 from miner_protocol import MINER_STATE_VERSION, STATUS_COMPLETE
-from storage import CORTEX_DIR
+from storage import CORTEX_DIR, _now
 
 
 MINED_SESSIONS_FILE = CORTEX_DIR / ".mined_sessions"
@@ -15,10 +14,6 @@ if _extra:
     SESSIONS_DIRS.extend(Path(path) for path in _extra.split(":") if path)
 
 SETTLE_SECONDS = int(os.environ.get("CORTEX_MINER_SETTLE_SECONDS", "300"))
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def session_fingerprint(path: Path) -> dict:

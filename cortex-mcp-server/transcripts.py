@@ -1,7 +1,8 @@
 import json
-import os
 import re
 from pathlib import Path
+
+from session_state import SESSIONS_DIRS
 
 
 _SYSTEM_REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
@@ -163,17 +164,12 @@ def _parse_jsonl_session(jsonl_path: str) -> list[dict]:
 
 
 def transcript_search(query: str, limit: int = 5) -> str:
-    base_dirs = [Path.home() / ".claude" / "projects"]
-    extra = os.environ.get("CORTEX_EXTRA_SESSION_DIRS", "")
-    if extra:
-        base_dirs.extend(Path(path) for path in extra.split(":") if path)
-
     query_words = set(query.lower().split())
     if not query_words:
         return "No matching transcripts found"
 
     scored = []
-    for base_dir in base_dirs:
+    for base_dir in SESSIONS_DIRS:
         if not base_dir.exists():
             continue
         for jsonl_path in base_dir.rglob("*.jsonl"):

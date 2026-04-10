@@ -3,11 +3,7 @@ import os
 import re
 from pathlib import Path
 
-from storage import _is_duplicate, _make_memory, _save_memory
-
-
-def _normalize_scope_id(scope_id: str) -> str:
-    return "general" if not scope_id or scope_id == "default" else scope_id
+from storage import _is_duplicate, _make_memory, _normalize_scope_id, _save_memory
 
 
 def memory_save(content: str, title: str = "", scope_id: str = "default", tags: str = "") -> str:
@@ -46,6 +42,19 @@ def _import_file(file_path: Path, scope_id: str) -> int:
     project = _normalize_scope_id(scope_id)
 
     if ext in (".md", ".markdown"):
+        def _save_section(title: str, section_content: str) -> int:
+            trimmed = section_content.strip()[:2000]
+            if not _is_duplicate(trimmed, scope_id=scope_id):
+                _save_memory(_make_memory(
+                    content=trimmed,
+                    title=title,
+                    tags=["imported"],
+                    project=project,
+                    source_type="import",
+                ))
+                return 1
+            return 0
+
         sections = re.split(r"^(#{1,3}\s+.+)$", content, flags=re.MULTILINE)
         current_title = file_path.stem
         current_content = ""
@@ -55,31 +64,13 @@ def _import_file(file_path: Path, scope_id: str) -> int:
                 continue
             if re.match(r"^#{1,3}\s+", part):
                 if current_content.strip() and len(current_content.strip()) > 20:
-                    section_content = current_content.strip()[:2000]
-                    if not _is_duplicate(section_content, scope_id=scope_id):
-                        _save_memory(_make_memory(
-                            content=section_content,
-                            title=current_title,
-                            tags=["imported"],
-                            project=project,
-                            source_type="import",
-                        ))
-                        count += 1
+                    count += _save_section(current_title, current_content.strip())
                 current_title = part.lstrip("# ").strip()
                 current_content = ""
             else:
                 current_content += part + "\n"
         if current_content.strip() and len(current_content.strip()) > 20:
-            section_content = current_content.strip()[:2000]
-            if not _is_duplicate(section_content, scope_id=scope_id):
-                _save_memory(_make_memory(
-                    content=section_content,
-                    title=current_title,
-                    tags=["imported"],
-                    project=project,
-                    source_type="import",
-                ))
-                count += 1
+            count += _save_section(current_title, current_content.strip())
     elif ext == ".json":
         try:
             data = json.loads(content)

@@ -198,7 +198,7 @@ def _parse_obsidian_memory_file(md_file: Path) -> dict | None:
                     mem["created_at"] = value
 
     mem["essence"] = body
-    mem["full_record"] = body
+    mem["full_record"] = body  # read-time alias for essence — not stored in markdown
     if not mem["title"] or mem["title"] == md_file.stem:
         first_line = next((line.strip() for line in body.splitlines() if line.strip()), "")
         mem["title"] = first_line[:120] if first_line else mem["id"]
@@ -213,6 +213,10 @@ def _parse_obsidian_memory_file(md_file: Path) -> dict | None:
     return mem
 
 
+def _normalize_scope_id(scope_id: str) -> str:
+    return "general" if not scope_id or scope_id == "default" else scope_id
+
+
 def _obsidian_memories(scope_id: str | None = None) -> list[dict]:
     if not OBSIDIAN_MEMORIES_DIR.exists():
         return []
@@ -223,7 +227,8 @@ def _obsidian_memories(scope_id: str | None = None) -> list[dict]:
         if not mem:
             continue
         project = mem.get("project", "general")
-        if scope_id and scope_id != "default" and project != scope_id:
+        normalized = _normalize_scope_id(scope_id) if scope_id is not None else "general"
+        if normalized != "general" and project != normalized:
             continue
         memories.append(mem)
     return memories
@@ -252,7 +257,8 @@ def _is_duplicate(content: str, scope_id: str = "default", threshold: float = 0.
     if not content_words:
         return None if return_match else False
 
-    project = None if not scope_id or scope_id == "default" else scope_id
+    normalized = _normalize_scope_id(scope_id)
+    project = None if normalized == "general" else normalized
     best_score = 0.0
     best_mem = None
 
@@ -359,6 +365,30 @@ def _generate_index(scope_id: str = "default") -> str:
     return content
 
 
+def _recount_index_sections(lines: list[str]) -> list[str]:
+    """Recount section totals and update the Updated header in index lines."""
+    for idx, entry in enumerate(lines):
+        if entry.startswith("## ") and "(" in entry:
+            section_name = entry.split("(")[0].strip().removeprefix("## ").strip()
+            count = 0
+            for j in range(idx + 1, len(lines)):
+                if lines[j].startswith("## "):
+                    break
+                if lines[j].startswith("- "):
+                    count += 1
+            noun = "memory" if count == 1 else "memories"
+            lines[idx] = f"## {section_name} ({count} {noun})"
+
+    total = sum(1 for entry in lines if entry.startswith("- "))
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    for idx, entry in enumerate(lines):
+        if entry.startswith("Updated:"):
+            lines[idx] = f"Updated: {today} | Total: {total} memories"
+            break
+
+    return lines
+
+
 def _append_or_update_index_line(mem: dict):
     if not INDEX_PATH.exists():
         return
@@ -381,26 +411,7 @@ def _append_or_update_index_line(mem: dict):
     if not inserted:
         new_lines.extend(["", f"## {project} (1 memory)", line])
 
-    # Recount section totals
-    for idx, entry in enumerate(new_lines):
-        if entry.startswith("## ") and "(" in entry:
-            section_name = entry.split("(")[0].strip().removeprefix("## ").strip()
-            count = 0
-            for j in range(idx + 1, len(new_lines)):
-                if new_lines[j].startswith("## "):
-                    break
-                if new_lines[j].startswith("- "):
-                    count += 1
-            noun = "memory" if count == 1 else "memories"
-            new_lines[idx] = f"## {section_name} ({count} {noun})"
-
-    total = sum(1 for entry in new_lines if entry.startswith("- "))
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    for idx, entry in enumerate(new_lines):
-        if entry.startswith("Updated:"):
-            new_lines[idx] = f"Updated: {today} | Total: {total} memories"
-            break
-
+    new_lines = _recount_index_sections(new_lines)
     INDEX_PATH.write_text("\n".join(new_lines))
 
 
@@ -412,25 +423,7 @@ def _remove_index_line(memory_id: str):
     lines = INDEX_PATH.read_text().split("\n")
     new_lines = [entry for entry in lines if not (entry.startswith("- ") and f"({mem_id})" in entry)]
 
-    # Recount section totals
-    for idx, entry in enumerate(new_lines):
-        if entry.startswith("## ") and "(" in entry:
-            section_name = entry.split("(")[0].strip().removeprefix("## ").strip()
-            count = 0
-            for j in range(idx + 1, len(new_lines)):
-                if new_lines[j].startswith("## "):
-                    break
-                if new_lines[j].startswith("- "):
-                    count += 1
-            noun = "memory" if count == 1 else "memories"
-            new_lines[idx] = f"## {section_name} ({count} {noun})"
-
-    total = sum(1 for entry in new_lines if entry.startswith("- "))
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    for idx, entry in enumerate(new_lines):
-        if entry.startswith("Updated:"):
-            new_lines[idx] = f"Updated: {today} | Total: {total} memories"
-            break
+    new_lines = _recount_index_sections(new_lines)
     INDEX_PATH.write_text("\n".join(new_lines))
 
 

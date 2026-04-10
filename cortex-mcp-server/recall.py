@@ -1,5 +1,6 @@
 import re
 import subprocess
+from collections import Counter
 
 from storage import INDEX_PATH, _load_obsidian_memories, _obsidian_memories, _word_set
 from transcripts import transcript_search
@@ -67,8 +68,6 @@ def memory_list(scope_id: str = "default") -> str:
 
     memories.sort(key=lambda mem: mem.get("created_at", ""), reverse=True)
 
-    from collections import Counter
-
     sources = Counter(mem.get("source_type", "?") for mem in memories)
     lines = [
         f"**{len(memories)} memories**",
@@ -82,7 +81,14 @@ def memory_list(scope_id: str = "default") -> str:
     return "\n".join(lines)
 
 
-def _smart_recall(prompt: str, scope_id: str = "default") -> str:
+def smart_recall(prompt: str, scope_id: str = "default") -> str:
+    """Use Claude Haiku to intelligently select relevant memories from the index.
+
+    Unlike `memory_recall` which performs keyword search, this function sends the
+    full memory index to Haiku and asks it to pick relevant memory IDs based on
+    semantic understanding of the prompt. Falls back to `memory_recall` when the
+    index is unavailable or Haiku returns no results.
+    """
     if not INDEX_PATH.exists():
         return memory_recall(prompt, scope_id=scope_id, limit=10)
 

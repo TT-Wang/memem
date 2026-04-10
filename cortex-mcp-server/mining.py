@@ -58,14 +58,6 @@ _HAIKU_MINE_SYSTEM = (
 )
 
 
-def _current_state(path: Path) -> dict | None:
-    return load_mined_session_state().get(path.stem)
-
-
-def _was_mined(path: Path) -> bool:
-    return session_is_complete(path, _current_state(path))
-
-
 def _mark_session(path: Path, status: str, message: str = "") -> None:
     update_session_state(path, status=status, message=message)
 
@@ -172,7 +164,7 @@ def mine_session(jsonl_path: str) -> dict:
         return {"skipped": True, "reason": "file not found"}
 
     session_id = path.stem
-    if _was_mined(path):
+    if session_is_complete(path, load_mined_session_state().get(path.stem)):
         return {"skipped": True, "reason": "already mined"}
 
     _mark_session(path, STATUS_IN_PROGRESS)

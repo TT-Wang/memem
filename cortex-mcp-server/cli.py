@@ -5,7 +5,7 @@ from pathlib import Path
 
 from miner_protocol import FATAL_EXIT_CODE, TRANSIENT_EXIT_CODE
 from mining import FatalMiningError, MiningError, mine_all, mine_session
-from recall import _smart_recall, memory_recall
+from recall import smart_recall, memory_recall
 from storage import INDEX_PATH, _register_server_pid, purge_mined_memories, _generate_index
 from session_state import MINED_SESSIONS_FILE
 
@@ -15,7 +15,7 @@ def dispatch_cli(argv: list[str], mcp) -> None:
 
     if cmd == "--recall-smart":
         query = " ".join(argv[2:]) if len(argv) >= 3 else ""
-        print(_smart_recall(query) if query else "No query provided.")
+        print(smart_recall(query) if query else "No query provided.")
         return
 
     if cmd == "--recall":
