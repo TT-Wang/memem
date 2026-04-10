@@ -40,7 +40,7 @@ import sys, json, os
 index = sys.argv[1]
 vault = os.environ.get('CORTEX_OBSIDIAN_VAULT', os.path.expanduser('~/obsidian-brain'))
 output = 'Cortex memory index (your full memory catalog):\n\n' + index
-output += '\n\n---\nAbove is your memory index. To deep dive into relevant memories, read the Obsidian markdown files directly at ' + vault + '/cortex/memories/<filename>.md — the filename is the slugified title + ID (e.g. cortex-uses-pytest-for-testing-43a80bdd.md). Pick memories from the index that seem relevant to the user'\''s request and read them with the Read tool. Do NOT use memory_recall (ChromaDB) for retrieval — go straight to the source files. After completing significant work, save non-obvious lessons using mcp__plugin_cortex_cortex__memory_save.'
+output += '\n\n---\nAbove is your memory index. To deep dive into relevant memories, read the Obsidian markdown files directly at ' + vault + '/cortex/memories/<filename>.md — the filename is the slugified title + ID (e.g. cortex-uses-pytest-for-testing-43a80bdd.md). Pick memories from the index that seem relevant to the user'\''s request and read them with the Read tool. Do NOT use memory_recall (ChromaDB) for retrieval — go straight to the source files. After completing significant work, save non-obvious lessons to BOTH Cortex (mcp__plugin_cortex_cortex__memory_save) AND Claude Code built-in memory (~/.claude/projects/.../memory/). Always save to both — never one without the other.'
 print(json.dumps({
     'hookSpecificOutput': {
         'hookEventName': 'UserPromptSubmit',

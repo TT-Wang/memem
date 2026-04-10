@@ -155,22 +155,18 @@ def _write_obsidian_memory(mem: dict):
 
     frontmatter = f"""---
 title: {clean_title}
-who: {who}
-why: {why}
+project: {who}
 tags: [{', '.join(tags)}]
-confidence: {mem.get('confidence', 0.5)}
 created: {mem.get('created_at', '')[:10]}
-related: []
 ---"""
 
-    # Body
+    # Body — just the content
     essence = mem.get("essence", "")
     body = f"\n\n{essence}"
 
-    # Full record as blockquote
     full_record = mem.get("full_record")
     if full_record and full_record != essence:
-        body += f"\n\n> {full_record[:500]}"
+        body += f"\n\n{full_record}"
 
     filepath = OBSIDIAN_MEMORIES_DIR / filename
     filepath.write_text(frontmatter + body)
@@ -883,12 +879,6 @@ _HAIKU_MINE_SYSTEM = (
     "Rules:\n"
     "- Extract decisions, lessons, things shipped, failures, conventions, preferences, discoveries\n"
     "- Each memory should be self-contained and useful without the original conversation\n"
-    "- The title must be a clear descriptive sentence, not a markdown heading or fragment\n"
-    "- The content must be a distilled insight, NOT a verbatim quote from the user or assistant\n"
-    "- Skip trivial exchanges (greetings, simple file reads, routine git commands)\n"
-    "- Skip raw user requests (e.g. 'i want X', 'build me Y') — only save if there's a decision or lesson\n"
-    "- Skip markdown fragments, code snippets, or headings that aren't self-contained insights\n"
-    "- Do NOT extract duplicate or near-duplicate insights — if two exchanges say the same thing, extract once\n"
     "- If nothing worth saving, output NONE\n"
     "- Do NOT add knowledge you weren't told — only extract what's in the conversation"
 )
@@ -925,7 +915,68 @@ def _extract_text_from_content(content, role: str) -> str:
 
 
 def _parse_jsonl_session(jsonl_path: str) -> list[dict]:
-    messages = []
+    """Parse JSONL session into user/assistant exchange pairs.
+
+    Includes all content: text, tool calls, tool results, errors.
+    Groups consecutive messages by role, flushes on role switch."""
+    user_texts = []
+    assistant_texts = []
+    pairs = []
+
+    def _flush():
+        if user_texts and assistant_texts:
+            pairs.append({
+                "user_text": "\n".join(user_texts),
+                "assistant_text": "\n".join(assistant_texts),
+            })
+        user_texts.clear()
+        assistant_texts.clear()
+
+    def _extract_all_content(content) -> str:
+        """Extract all meaningful content from a message, including tool calls/results."""
+        if isinstance(content, str):
+            return content.strip()
+        if not isinstance(content, list):
+            return ""
+        parts = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type", "")
+            if btype == "text":
+                t = block.get("text", "").strip()
+                if t:
+                    parts.append(t)
+            elif btype == "tool_use":
+                name = block.get("name", "")
+                inp = block.get("input", {})
+                # Summarize tool call — include key args but truncate large content
+                if name in ("Read", "Glob", "Grep"):
+                    parts.append(f"[Tool: {name} {inp.get('file_path', inp.get('pattern', ''))}]")
+                elif name in ("Edit", "Write"):
+                    path = inp.get("file_path", "")
+                    parts.append(f"[Tool: {name} {path}]")
+                elif name == "Bash":
+                    cmd = inp.get("command", "")[:200]
+                    parts.append(f"[Tool: Bash] {cmd}")
+                else:
+                    parts.append(f"[Tool: {name}]")
+            elif btype == "tool_result":
+                result_content = block.get("content", "")
+                error = block.get("is_error", False)
+                if error:
+                    result_text = result_content if isinstance(result_content, str) else str(result_content)
+                    parts.append(f"[Error] {result_text[:500]}")
+                elif isinstance(result_content, str) and result_content.strip():
+                    parts.append(f"[Result] {result_content[:500]}")
+                elif isinstance(result_content, list):
+                    for sub in result_content:
+                        if isinstance(sub, dict) and sub.get("type") == "text":
+                            t = sub.get("text", "").strip()
+                            if t:
+                                parts.append(f"[Result] {t[:500]}")
+        return "\n".join(parts)
+
     with open(jsonl_path) as f:
         for line in f:
             line = line.strip()
@@ -938,21 +989,23 @@ def _parse_jsonl_session(jsonl_path: str) -> list[dict]:
             msg_type = obj.get("type")
             if msg_type not in ("user", "assistant"):
                 continue
-            text = _extract_text_from_content(obj.get("message", {}).get("content", ""), msg_type)
-            if text:
-                messages.append({"role": msg_type, "text": text})
 
-    pairs = []
-    i = 0
-    while i < len(messages):
-        if messages[i]["role"] == "user":
-            if i + 1 < len(messages) and messages[i + 1]["role"] == "assistant":
-                pairs.append({"user_text": messages[i]["text"], "assistant_text": messages[i + 1]["text"]})
-                i += 2
+            content = obj.get("message", {}).get("content", "")
+            text = _extract_all_content(content)
+
+            if not text:
+                continue
+
+            # When role switches from assistant→user, flush the previous exchange
+            if msg_type == "user" and assistant_texts:
+                _flush()
+
+            if msg_type == "user":
+                user_texts.append(text)
             else:
-                i += 1
-        else:
-            i += 1
+                assistant_texts.append(text)
+
+    _flush()  # final exchange
     return pairs
 
 
@@ -1222,31 +1275,18 @@ def _extract_project(mem: dict) -> str:
 
 
 def _format_index_line(mem: dict) -> str:
-    """Format one memory as an index line: - [MM-DD] verb: description | #tag1 #tag2"""
-    created_at = mem.get("created_at") or ""
-    try:
-        dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-        date_str = dt.strftime("%m-%d")
-    except Exception:
-        date_str = "00-00"
-
-    memory_type = mem.get("memory_type") or "knowledge"
-    source_type = mem.get("source_type") or ""
-    essence = mem.get("essence") or ""
-    verb = _map_memory_type_to_why(memory_type, source_type, essence)
-
-    title = mem.get("title") or essence[:60]
-    # Strip [project-name] prefix and ensure single-line
-    description = re.sub(r'^\[[^\]]+\]\s*', '', title)
-    description = description.split("\n")[0].strip()[:120]
+    """Format one memory as an index line: - Title (id) #tag1 #tag2"""
+    title = mem.get("title") or mem.get("essence", "")[:60]
+    title = re.sub(r'^\[[^\]]+\]\s*', '', title)
+    title = title.split("\n")[0].strip()[:120]
 
     domain_tags = mem.get("domain_tags") or []
     tags_str = " ".join(f"#{t}" for t in domain_tags if t)
 
     mem_id = mem.get("id", "")[:8]
-    line = f"- [{date_str}] {verb}: {description} ({mem_id})"
+    line = f"- {title} ({mem_id})"
     if tags_str:
-        line += f" | {tags_str}"
+        line += f" {tags_str}"
     return line
 
 
