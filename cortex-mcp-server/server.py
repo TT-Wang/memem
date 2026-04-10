@@ -9,7 +9,7 @@ Sections:
   Generation:  _make_memory, domain detection, dedup
   Auto-seed:   Scan workspace projects + load starter packs on first run
   Retrieval:   Vector similarity search via ChromaDB
-  MCP Tools:   memory_recall, memory_save, memory_list, memory_feedback, memory_import
+  MCP Tools:   memory_recall, memory_save, memory_list, memory_import
   Transcript:  Search raw Claude Code JSONL session files
   Mining:      Parse JSONL sessions, extract insights, save as memories
   GC:          Decay stale, merge duplicates, prune excess
@@ -25,7 +25,6 @@ from pathlib import Path
 
 import chromadb
 from mcp.server.fastmcp import FastMCP
-from starter_packs import detect_packs, get_pack_memories
 
 # ─── Storage ──────────────────────────────────────────────────────
 
@@ -57,11 +56,8 @@ def _reconstruct_memory(result: dict, idx: int) -> dict:
     meta = result["metadatas"][idx]
     for k, v in meta.items():
         # Restore lists from comma-separated strings
-        if k in ("domain_tags", "contradicts"):
+        if k == "domain_tags":
             mem[k] = [x for x in v.split(",") if x] if v else []
-        # Restore bools
-        elif k in ("verified",):
-            mem[k] = v == "true" if isinstance(v, str) else bool(v)
         # Restore None from empty string
         elif v == "":
             mem[k] = None
@@ -81,7 +77,8 @@ def _load_memory(memory_id: str) -> dict | None:
 
 
 def _flatten_meta(mem: dict) -> dict:
-    """Flatten memory dict to ChromaDB-compatible metadata (str/int/float/bool only)."""
+    """Flatten memory dict to ChromaDB-compatible metadata (str/int/float/bool only).
+    Schema fields: title, domain_tags, project, source_type, created_at."""
     meta = {}
     for k, v in mem.items():
         if k in ("id", "essence"):
@@ -90,8 +87,6 @@ def _flatten_meta(mem: dict) -> dict:
             meta[k] = ""
         elif isinstance(v, list):
             meta[k] = ",".join(str(x) for x in v)
-        elif isinstance(v, bool):
-            meta[k] = str(v).lower()
         elif isinstance(v, (str, int, float)):
             meta[k] = v
         else:
@@ -145,17 +140,12 @@ def _write_obsidian_memory(mem: dict):
     if isinstance(tags, str):
         tags = [t for t in tags.split(",") if t]
 
-    who = _extract_project(mem)
-    why = _map_memory_type_to_why(
-        mem.get("memory_type", "knowledge"),
-        mem.get("source_type", ""),
-        mem.get("essence", "")
-    )
     clean_title = re.sub(r'^\[[^\]]+\]\s*', '', mem.get("title", "Untitled"))
+    project = mem.get("project", "general")
 
     frontmatter = f"""---
 title: {clean_title}
-project: {who}
+project: {project}
 tags: [{', '.join(tags)}]
 created: {mem.get('created_at', '')[:10]}
 ---"""
@@ -163,10 +153,6 @@ created: {mem.get('created_at', '')[:10]}
     # Body — just the content
     essence = mem.get("essence", "")
     body = f"\n\n{essence}"
-
-    full_record = mem.get("full_record")
-    if full_record and full_record != essence:
-        body += f"\n\n{full_record}"
 
     filepath = OBSIDIAN_MEMORIES_DIR / filename
     filepath.write_text(frontmatter + body)
@@ -224,46 +210,6 @@ def _find_memory(memory_id: str) -> dict | None:
 
 # ─── Generation ───────────────────────────────────────────────────
 
-DOMAIN_KEYWORDS = {
-    "auth": ["auth", "login", "jwt", "token", "oauth", "session", "password", "credential", "permission", "rbac"],
-    "database": ["database", "sql", "query", "migration", "schema", "orm", "postgres", "mysql", "redis", "mongo", "table", "index"],
-    "testing": ["test", "pytest", "jest", "mock", "assert", "fixture", "coverage", "spec", "unit test", "integration"],
-    "api": ["api", "endpoint", "rest", "graphql", "http", "request", "response", "route", "middleware", "cors"],
-    "deployment": ["deploy", "docker", "kubernetes", "ci", "cd", "pipeline", "container", "nginx", "aws", "cloud"],
-    "frontend": ["react", "vue", "angular", "css", "html", "component", "dom", "browser", "ui", "ux"],
-    "security": ["security", "vulnerability", "xss", "csrf", "injection", "encrypt", "hash", "ssl", "tls", "cert"],
-    "performance": ["performance", "cache", "optimize", "latency", "throughput", "memory", "cpu", "profil", "benchmark"],
-    "architecture": ["architecture", "pattern", "design", "refactor", "modular", "monolith", "microservice", "layer"],
-    "git": ["git", "commit", "branch", "merge", "rebase", "pull request", "pr", "version control"],
-    "config": ["config", "environment", "env", "settings", "variable", "secret", "dotenv"],
-    "error-handling": ["error", "exception", "try", "catch", "throw", "handle", "retry", "fallback", "debug"],
-}
-
-
-def _detect_domain_room(content: str, title: str = "", tags: list[str] | None = None) -> tuple[str, str]:
-    """Auto-detect domain and room from content."""
-    text = f"{title} {content} {' '.join(tags or [])}".lower()
-
-    def _kw_in_text(kw: str, txt: str) -> bool:
-        if " " in kw:
-            return kw in txt
-        return bool(re.search(r'\b' + re.escape(kw) + r'\b', txt))
-
-    domain_scores = {}
-    for domain, keywords in DOMAIN_KEYWORDS.items():
-        score = sum(1 for kw in keywords if _kw_in_text(kw, text))
-        if score > 0:
-            domain_scores[domain] = score
-
-    if not domain_scores:
-        return ("general", "")
-
-    domain = max(domain_scores, key=domain_scores.get)
-    room_keywords = DOMAIN_KEYWORDS[domain]
-    matched = [kw for kw in room_keywords if _kw_in_text(kw, text)]
-    room = matched[0] if matched else ""
-    return (domain, room)
-
 
 def _is_duplicate(content: str, scope_id: str = "default", threshold: float = 0.3, return_match: bool = False):
     """Check if content is too similar to an existing memory using ChromaDB similarity.
@@ -286,230 +232,18 @@ def _is_duplicate(content: str, scope_id: str = "default", threshold: float = 0.
     return None if return_match else False
 
 
-def _make_memory(content: str, title: str, memory_type: str = "knowledge",
-                 scope_id: str = "default", tags: list[str] | None = None,
-                 source_type: str = "auto_seed", confidence: float = 0.6,
-                 promotion_status: str = "candidate", verified: bool = False,
-                 source_session_id: str | None = None,
-                 full_record: str | None = None) -> dict:
-    """Create a memory dict. Single schema builder for all creation paths."""
-    domain, room = _detect_domain_room(content, title, tags)
-    effective_full_record = None if (full_record is None or full_record == content) else full_record
+def _make_memory(content: str, title: str, tags: list[str] | None = None,
+                 project: str = "general", source_type: str = "user") -> dict:
+    """Create a memory dict — minimal AI-native schema."""
     return {
         "id": str(uuid.uuid4()),
-        "essence": content,
-        "full_record": effective_full_record,
         "title": title,
-        "memory_type": memory_type,
-        "scope_id": scope_id,
-        "confidence": confidence,
-        "impact_score": 0.0,
-        "success_count": 0,
-        "failure_count": 0,
-        "retrieval_count": 0,
-        "promotion_status": promotion_status,
-        "verified": verified,
-        "domain": domain,
-        "room": room,
+        "essence": content,
         "domain_tags": tags or [],
-        "contradicts": [],
+        "project": project,
         "source_type": source_type,
-        "source_session_id": source_session_id,
         "created_at": _now(),
-        "last_retrieved_at": None,
-        "last_validated_at": None,
     }
-
-
-# ─── Auto-seed ───────────────────────────────────────────────────
-
-SEED_MARKER_FILE = CORTEX_DIR / ".seeded_scopes"
-
-_PROJECT_INDICATORS = {
-    ".git", "pyproject.toml", "package.json", "Cargo.toml", "go.mod",
-    "Gemfile", "pom.xml", "build.gradle", "requirements.txt",
-    "composer.json", "Makefile", "CMakeLists.txt",
-}
-
-_SKIP_DIRS = {
-    "node_modules", "__pycache__", "venv", ".venv", "dist", "build",
-    ".cache", ".local", ".config", ".ssh", ".gnupg", ".claude",
-    ".cortex", ".npm", ".cargo", ".rustup",
-}
-
-
-def _was_seeded(scope_id: str) -> bool:
-    if not SEED_MARKER_FILE.exists():
-        return False
-    return scope_id in set(s for s in SEED_MARKER_FILE.read_text().strip().split("\n") if s)
-
-
-def _mark_seeded(scope_id: str):
-    existing = ""
-    if SEED_MARKER_FILE.exists():
-        existing = SEED_MARKER_FILE.read_text().strip()
-    seeded = set(s for s in existing.split("\n") if s) if existing else set()
-    seeded.add(scope_id)
-    tmp = SEED_MARKER_FILE.with_suffix(".tmp")
-    tmp.write_text("\n".join(sorted(seeded)))
-    tmp.replace(SEED_MARKER_FILE)
-
-
-def _detect_workspace_projects(workspace: str | None = None) -> list[str]:
-    workspace = workspace or os.environ.get("HOME", os.path.expanduser("~"))
-    if not os.path.isdir(workspace):
-        return []
-    projects = []
-    try:
-        for entry in sorted(os.listdir(workspace)):
-            if entry.startswith(".") or entry in _SKIP_DIRS:
-                continue
-            full_path = os.path.join(workspace, entry)
-            if not os.path.isdir(full_path):
-                continue
-            try:
-                contents = set(os.listdir(full_path))
-            except OSError:
-                continue
-            if contents & _PROJECT_INDICATORS:
-                projects.append(full_path)
-    except OSError:
-        pass
-    return projects
-
-
-def _auto_seed_project(scope_id: str, project_dir: str) -> list[dict]:
-    """Seed memories from a single project directory."""
-    cwd = project_dir
-    if not os.path.isdir(cwd):
-        return []
-
-    name = os.path.basename(cwd)
-    memories = []
-
-    # README / CLAUDE.md
-    for doc_name in ["CLAUDE.md", "README.md", "readme.md"]:
-        doc_path = os.path.join(cwd, doc_name)
-        if os.path.exists(doc_path):
-            try:
-                content = open(doc_path).read()[:2000]
-                lines = content.split("\n")
-                title_line = next((l for l in lines if l.startswith("# ")), "")
-                title = title_line.lstrip("# ").strip() or doc_name
-                paragraphs = re.split(r'\n\n+', content)
-                desc = next((p for p in paragraphs if len(p.strip()) > 20 and not p.startswith("#")), "")
-                if desc:
-                    memories.append(_make_memory(
-                        content=f"Project: {title}. {desc.strip()[:500]}",
-                        title=f"[{name}] Project overview: {title}",
-                        tags=["project", "overview", name],
-                    ))
-            except OSError:
-                pass
-
-    # Tech stack
-    tech_detectors = [
-        ("pyproject.toml", "Python"), ("package.json", "JavaScript/Node.js"),
-        ("Cargo.toml", "Rust"), ("go.mod", "Go"), ("requirements.txt", "Python"),
-    ]
-    detected = [lang for fn, lang in tech_detectors if os.path.exists(os.path.join(cwd, fn))]
-    if detected:
-        stack_str = ", ".join(set(detected))
-        memories.append(_make_memory(
-            content=f"[{name}] Tech stack: {stack_str}",
-            title=f"[{name}] Tech stack: {stack_str}",
-            tags=["tech-stack", name] + [s.lower().split("/")[0] for s in detected],
-        ))
-
-    # Dependencies
-    for cfg, parser in [("pyproject.toml", lambda c: re.findall(r'"([a-zA-Z][a-zA-Z0-9_-]+)', c)),
-                         ("package.json", lambda c: list(json.loads(c).get("dependencies", {}).keys()) +
-                          list(json.loads(c).get("devDependencies", {}).keys()))]:
-        cfg_path = os.path.join(cwd, cfg)
-        if os.path.exists(cfg_path):
-            try:
-                deps = [d for d in set(parser(open(cfg_path).read())) if len(d) > 2][:15]
-                if deps:
-                    memories.append(_make_memory(
-                        content=f"[{name}] Key dependencies: {', '.join(sorted(deps))}",
-                        title=f"[{name}] Project dependencies",
-                        tags=["dependencies", name],
-                    ))
-            except (OSError, json.JSONDecodeError):
-                pass
-
-    # Directory structure
-    try:
-        top_dirs = [e for e in sorted(os.listdir(cwd))
-                    if os.path.isdir(os.path.join(cwd, e)) and not e.startswith(".")
-                    and e not in ("node_modules", "__pycache__", "venv", ".venv", "dist", "build", ".git")]
-        if top_dirs:
-            memories.append(_make_memory(
-                content=f"[{name}] Project structure: {', '.join(top_dirs[:15])}",
-                title=f"[{name}] Directory structure",
-                tags=["architecture", "structure", name],
-            ))
-    except OSError:
-        pass
-
-    # Git history
-    try:
-        import subprocess
-        result = subprocess.run(["git", "log", "--oneline", "-10", "--no-decorate"],
-                                capture_output=True, text=True, cwd=cwd, timeout=5)
-        if result.returncode == 0 and result.stdout.strip():
-            memories.append(_make_memory(
-                content=f"[{name}] Recent git history:\n{result.stdout.strip()}",
-                title=f"[{name}] Recent development activity",
-                tags=["git", "history", name],
-            ))
-    except (OSError, subprocess.TimeoutExpired):
-        pass
-
-    # Test framework
-    if os.path.exists(os.path.join(cwd, "pyproject.toml")):
-        try:
-            if "pytest" in open(os.path.join(cwd, "pyproject.toml")).read():
-                memories.append(_make_memory(
-                    content=f"[{name}] Test framework: pytest",
-                    title=f"[{name}] Uses pytest for testing",
-                    memory_type="convention", tags=["testing", "pytest", name],
-                ))
-        except OSError:
-            pass
-
-    for mem in memories:
-        _save_memory(mem)
-    return memories
-
-
-def _auto_seed_workspace(scope_id: str) -> list[dict]:
-    """Scan workspace projects and load starter packs."""
-    if _was_seeded(scope_id):
-        return []
-
-    projects = _detect_workspace_projects()
-    if not projects:
-        return []
-
-    all_packs = set()
-    all_seeded = []
-    for project_dir in projects:
-        all_packs.update(detect_packs(project_dir))
-        all_seeded.extend(_auto_seed_project(scope_id, project_dir))
-
-    # Starter packs — once across all projects
-    for title, content, mem_type, tags in get_pack_memories(list(all_packs)):
-        mem = _make_memory(content=content, title=title, memory_type=mem_type,
-                           scope_id=scope_id, tags=tags + ["starter-pack"],
-                           source_type="starter_pack", confidence=0.7,
-                           promotion_status="learned", verified=True)
-        _save_memory(mem)
-        all_seeded.append(mem)
-
-    if all_seeded:
-        _mark_seeded(scope_id)
-    return all_seeded
 
 
 # ─── Retrieval ────────────────────────────────────────────────────
@@ -533,7 +267,7 @@ def _search_memories(query: str, scope_id: str | None = None, limit: int = 10) -
         # Parse frontmatter and body
         title = ""
         tags = []
-        who = ""
+        project = ""
         body = content
         if content.startswith("---"):
             parts = content.split("---", 2)
@@ -545,12 +279,12 @@ def _search_memories(query: str, scope_id: str | None = None, limit: int = 10) -
                         title = line.split(":", 1)[1].strip()
                     elif line.startswith("tags:"):
                         tags_str = line.split(":", 1)[1].strip().strip("[]")
-                        tags = [t.strip() for t in tags_str.split(",")]
-                    elif line.startswith("who:"):
-                        who = line.split(":", 1)[1].strip()
+                        tags = [t.strip() for t in tags_str.split(",") if t.strip()]
+                    elif line.startswith("project:"):
+                        project = line.split(":", 1)[1].strip()
 
         # Scope filter
-        if scope_id and scope_id != "default" and who and who != scope_id:
+        if scope_id and scope_id != "default" and project and project != scope_id:
             continue
 
         # Score by keyword overlap across title + tags + body
@@ -612,9 +346,8 @@ def memory_recall(query: str, scope_id: str = "default", limit: int = 10) -> str
             by_source.setdefault(m.get("source_type", "other"), []).append(m)
 
         lines = []
-        for label, key in [("From past sessions", "mined"), ("Project knowledge", "auto_seed"),
-                           ("Saved knowledge", "user"), ("Best practices", "starter_pack"),
-                           ("Imported", "import")]:
+        for label, key in [("From past sessions", "mined"),
+                           ("Saved knowledge", "user"), ("Imported", "import")]:
             mems = by_source.get(key, [])
             if mems:
                 lines.append(f"### {label}")
@@ -640,8 +373,8 @@ def memory_save(content: str, title: str = "", memory_type: str = "lesson",
     if existing:
         return f"Memory already exists (similar to: \"{existing.get('title', '')[:60]}\"). Not saved."
 
-    mem = _make_memory(content=content, title=effective_title, memory_type=memory_type,
-                       scope_id=scope_id, tags=domain_tags, source_type="user", confidence=0.5)
+    mem = _make_memory(content=content, title=effective_title, tags=domain_tags,
+                       project=scope_id or "general", source_type="user")
     _save_memory(mem)
 
     return f"Memory saved: {mem['id'][:8]}... \"{effective_title}\""
@@ -654,65 +387,24 @@ def memory_list(scope_id: str = "default") -> str:
     if not memories:
         return f"No memories in scope: {scope_id}"
 
-    memories.sort(key=lambda m: float(m.get("confidence", 0)), reverse=True)
+    memories.sort(key=lambda m: m.get("created_at", ""), reverse=True)
 
     from collections import Counter
     sources = Counter(m.get("source_type", "?") for m in memories)
-    learned = sum(1 for m in memories if m.get("promotion_status") == "learned")
-    total_retrievals = sum(m.get("retrieval_count", 0) for m in memories)
 
     lines = [
-        f"**{len(memories)} memories** ({learned} learned) | {total_retrievals} total retrievals",
+        f"**{len(memories)} memories**",
         f"Sources: {', '.join(f'{k}:{v}' for k, v in sources.most_common())}",
         "",
     ]
     for mem in memories:
-        conf = float(mem.get("confidence", 0.5))
-        ret = mem.get("retrieval_count", 0)
         mid = mem.get("id", "")[:8]
         title = mem.get("title", "Untitled")[:50]
-        lines.append(f"- [{mid}] {title} | conf:{conf:.1f} | ret:{ret}x")
+        project = mem.get("project", "general")
+        lines.append(f"- [{mid}] {title} | project:{project}")
 
     return "\n".join(lines)
 
-
-@mcp.tool()
-def memory_feedback(memory_ids: str, approved: bool, promote: bool = False) -> str:
-    """Report whether recalled memories were useful.
-    memory_ids: comma-separated IDs (8+ chars). promote=true forces learned status."""
-    ids = [mid.strip() for mid in memory_ids.split(",") if mid.strip()]
-    updated = 0
-
-    for target_id in ids:
-        mem = _find_memory(target_id)
-        if not mem:
-            continue
-
-        if promote:
-            mem["promotion_status"] = "learned"
-            mem["confidence"] = max(float(mem.get("confidence", 0.5)), 0.7)
-        elif approved:
-            mem["confidence"] = min(1.0, float(mem.get("confidence", 0.5)) + 0.05)
-            mem["success_count"] = mem.get("success_count", 0) + 1
-        else:
-            mem["confidence"] = max(0.0, float(mem.get("confidence", 0.5)) - 0.1)
-            mem["failure_count"] = mem.get("failure_count", 0) + 1
-
-        s = mem.get("success_count", 0)
-        f = mem.get("failure_count", 0)
-        mem["impact_score"] = s / max(1, s + f)
-        mem["last_validated_at"] = _now()
-
-        # Auto-promote
-        if (mem.get("promotion_status") == "candidate"
-                and mem.get("retrieval_count", 0) >= 5
-                and mem.get("impact_score", 0) > 0.7):
-            mem["promotion_status"] = "learned"
-
-        _save_memory(mem)
-        updated += 1
-
-    return f"Updated {updated} memories (approved={approved}, promote={promote})"
 
 
 @mcp.tool()
@@ -785,7 +477,7 @@ def _import_file(fpath: Path, scope_id: str) -> int:
             if re.match(r'^#{1,3}\s+', part):
                 if current_content.strip() and len(current_content.strip()) > 20:
                     _save_memory(_make_memory(content=current_content.strip()[:2000], title=current_title,
-                                              scope_id=scope_id, tags=["imported"], source_type="import"))
+                                              tags=["imported"], project=scope_id or "general", source_type="import"))
                     count += 1
                 current_title = part.lstrip("# ").strip()
                 current_content = ""
@@ -793,7 +485,7 @@ def _import_file(fpath: Path, scope_id: str) -> int:
                 current_content += part + "\n"
         if current_content.strip() and len(current_content.strip()) > 20:
             _save_memory(_make_memory(content=current_content.strip()[:2000], title=current_title,
-                                      scope_id=scope_id, tags=["imported"], source_type="import"))
+                                      tags=["imported"], project=scope_id or "general", source_type="import"))
             count += 1
     elif ext == ".json":
         try:
@@ -803,13 +495,13 @@ def _import_file(fpath: Path, scope_id: str) -> int:
                 text = f"{key}: {json.dumps(value)}" if not isinstance(value, str) else f"{key}: {value}"
                 if len(text) > 20:
                     _save_memory(_make_memory(content=text[:2000], title=str(key)[:60],
-                                              scope_id=scope_id, tags=["imported"], source_type="import"))
+                                              tags=["imported"], project=scope_id or "general", source_type="import"))
                     count += 1
         except json.JSONDecodeError:
             pass
     elif ext in (".txt", ".text", ".rst"):
         _save_memory(_make_memory(content=content.strip()[:2000], title=fpath.stem,
-                                  scope_id=scope_id, tags=["imported"], source_type="import"))
+                                  tags=["imported"], project=scope_id or "general", source_type="import"))
         count = 1
 
     return count
@@ -1108,11 +800,9 @@ def mine_session(jsonl_path: str) -> dict:
         mem = _make_memory(
             content=ins["content"][:2000],
             title=ins["title"],
-            memory_type=ins["memory_type"],
-            source_type="mined",
-            confidence=0.5,
             tags=tags,
-            source_session_id=session_id,
+            project=ins["who"] if ins["who"] != "general" else "general",
+            source_type="mined",
         )
         _save_memory(mem)
         memories_saved += 1
@@ -1148,114 +838,11 @@ def mine_all() -> dict:
             "already_mined": already_mined, "total_memories_saved": total_memories}
 
 
-# ─── Garbage Collection ──────────────────────────────────────────
-
-def garbage_collect() -> dict:
-    decayed = merged = pruned = 0
-    deleted_ids: set[str] = set()
-    thirty_days_ago = datetime.now(timezone.utc).timestamp() - 30 * 86400
-
-    # Decay: low confidence + never retrieved + old
-    for mem in _all_memories():
-        if float(mem.get("confidence", 0.5)) < 0.3 and int(mem.get("retrieval_count", 0)) == 0:
-            try:
-                if datetime.fromisoformat(mem.get("created_at", "")).timestamp() < thirty_days_ago:
-                    if _delete_memory(mem["id"]):
-                        deleted_ids.add(mem["id"])
-                        decayed += 1
-            except (ValueError, TypeError):
-                pass
-
-    # Merge: find near-duplicates via ChromaDB similarity search
-    remaining = [m for m in _all_memories() if m["id"] not in deleted_ids]
-    for mem in remaining:
-        if mem["id"] in deleted_ids:
-            continue
-        try:
-            result = _collection.query(query_texts=[mem.get("essence", "")], n_results=2,
-                                       include=["documents", "metadatas", "distances"])
-            if not result["ids"] or len(result["ids"][0]) < 2:
-                continue
-            # First result is self, second is nearest neighbor
-            neighbor_id = result["ids"][0][1]
-            distance = result["distances"][0][1]
-            if distance < 0.1 and neighbor_id not in deleted_ids:  # very similar
-                neighbor = _load_memory(neighbor_id)
-                if not neighbor:
-                    continue
-                # Keep higher confidence
-                if float(mem.get("confidence", 0)) >= float(neighbor.get("confidence", 0)):
-                    loser_id = neighbor_id
-                else:
-                    loser_id = mem["id"]
-                if _delete_memory(loser_id):
-                    deleted_ids.add(loser_id)
-                    merged += 1
-        except Exception:
-            continue
-
-    # Prune: cap at 500
-    remaining = [m for m in _all_memories() if m["id"] not in deleted_ids]
-    if len(remaining) > 500:
-        pruneable = sorted(
-            [m for m in remaining if m.get("promotion_status") != "learned"],
-            key=lambda m: float(m.get("confidence", 0.5)) * 0.5 + float(m.get("impact_score", 0)) * 0.3 +
-                          min(int(m.get("retrieval_count", 0)) / 10, 0.2))
-        for mem in pruneable[:len(remaining) - 500]:
-            if _delete_memory(mem["id"]):
-                deleted_ids.add(mem["id"])
-                pruned += 1
-
-    # Clean up old retrieval logs (>30 days)
-    logs_cleaned = 0
-    for log_file in LOGS_DIR.glob("retrieval-*.json"):
-        try:
-            if log_file.stat().st_mtime < thirty_days_ago:
-                log_file.unlink()
-                logs_cleaned += 1
-        except OSError:
-            pass
-
-    return {"decayed": decayed, "merged": merged, "pruned": pruned,
-            "logs_cleaned": logs_cleaned, "remaining": len(_all_memories())}
-
 
 # ─── Index Generation ────────────────────────────────────────────
 
 INDEX_PATH = OBSIDIAN_VAULT / "cortex" / "_index.md"
 
-
-def _map_memory_type_to_why(memory_type: str, source_type: str, essence: str) -> str:
-    """Map old memory_type to new why: verb based on schema spec section 5."""
-    if source_type == "auto_seed":
-        return "discovered"
-
-    e = (essence or "").lower()
-
-    if memory_type == "lesson":
-        return "learned"
-    elif memory_type == "knowledge":
-        if any(w in e for w in ("decided", "chose", "went with")):
-            return "decided"
-        elif any(w in e for w in ("shipped", "added", "built")):
-            return "shipped"
-        elif any(w in e for w in ("found", "discovered")):
-            return "discovered"
-        elif any(w in e for w in ("designed", "architecture")):
-            return "designed"
-        else:
-            return "discovered"
-    elif memory_type == "convention":
-        return "convention"
-    elif memory_type == "preference":
-        return "prefers"
-    elif memory_type == "failure":
-        if any(w in e for w in ("blocked", "can't", "doesn't work")):
-            return "blocked-by"
-        else:
-            return "failed"
-    else:
-        return "discovered"
 
 
 def _extract_project(mem: dict) -> str:
@@ -1403,67 +990,6 @@ def _remove_index_line(memory_id: str):
     INDEX_PATH.write_text("\n".join(new_lines))
 
 
-def _migrate_memory_frontmatter(mem: dict) -> bool:
-    """Rewrite an existing Obsidian memory file with the new frontmatter schema (who, why fields)."""
-    obsidian_file = mem.get("obsidian_file")
-    if not obsidian_file:
-        return False
-    filepath = OBSIDIAN_MEMORIES_DIR / obsidian_file
-    if not filepath.exists():
-        return False
-
-    existing = filepath.read_text()
-
-    # Extract body: everything after the closing --- of old frontmatter
-    # If file starts with ---, find the second --- and take content after it
-    if existing.startswith("---"):
-        # Find closing ---
-        end_idx = existing.find("---", 3)
-        if end_idx != -1:
-            body = existing[end_idx + 3:]
-        else:
-            # Malformed frontmatter — treat entire file as body
-            body = existing
-    else:
-        # No frontmatter — treat entire file as body
-        body = existing
-
-    # Compute new frontmatter fields
-    who = _extract_project(mem)
-    why = _map_memory_type_to_why(
-        mem.get("memory_type", "knowledge"),
-        mem.get("source_type", ""),
-        mem.get("essence", "")
-    )
-
-    # Strip [project] prefix from title
-    raw_title = mem.get("title") or mem.get("essence", "")[:60]
-    title = re.sub(r'^\[[^\]]+\]\s*', '', raw_title)
-
-    tags = mem.get("domain_tags") or []
-    if isinstance(tags, str):
-        tags = [t for t in tags.split(",") if t]
-
-    confidence = mem.get("confidence", 0.8)
-
-    created_at = mem.get("created_at") or ""
-    created_date = created_at[:10] if created_at else ""
-
-    tags_str = ", ".join(tags)
-
-    new_frontmatter = f"""---
-title: {title}
-who: {who}
-why: {why}
-tags: [{tags_str}]
-confidence: {confidence}
-created: {created_date}
-related: []
----"""
-
-    filepath.write_text(new_frontmatter + body)
-    return True
-
 
 # ─── Smart Recall (LLM-based index scanning) ────────────────────
 
@@ -1489,7 +1015,7 @@ def _load_obsidian_memories(picked_ids: list[str]) -> list[dict]:
         try:
             content = filepath.read_text()
             # Parse frontmatter
-            meta = {"title": "Untitled", "who": "general", "why": "discovered", "body": ""}
+            meta = {"title": "Untitled", "project": "general", "why": "discovered", "body": ""}
             if content.startswith("---"):
                 parts = content.split("---", 2)
                 if len(parts) >= 3:
@@ -1500,7 +1026,7 @@ def _load_obsidian_memories(picked_ids: list[str]) -> list[dict]:
                             key, val = line.split(":", 1)
                             key = key.strip()
                             val = val.strip()
-                            if key in ("title", "who", "why"):
+                            if key in ("title", "project", "why"):
                                 meta[key] = val
                     meta["body"] = body
             else:
@@ -1568,18 +1094,18 @@ def _smart_recall(prompt: str, scope_id: str = "default") -> str:
     # Format output grouped by project
     by_project = {}
     for mem in picked_files:
-        by_project.setdefault(mem["who"], []).append(mem)
+        by_project.setdefault(mem["project"], []).append(mem)
 
     sections = []
     sorted_projects = sorted(p for p in by_project if p != "general")
     if "general" in by_project:
         sorted_projects.append("general")
 
-    for project in sorted_projects:
-        mems = by_project[project]
-        lines = [f"### {project}"]
+    for proj in sorted_projects:
+        mems = by_project[proj]
+        lines = [f"### {proj}"]
         for m in mems:
-            entry = f"- **{m['title']}** ({m['why']})"
+            entry = f"- **{m['title']}**"
             if m["body"]:
                 entry += f"\n  {m['body'][:500]}"
             lines.append(entry)
@@ -1617,8 +1143,6 @@ if __name__ == "__main__":
         print(json.dumps(mine_session(_sys.argv[2])))
     elif cmd == "--mine-all":
         print(json.dumps(mine_all()))
-    elif cmd == "--gc":
-        print(json.dumps(garbage_collect()))
     elif cmd == "--purge-mined":
         deleted = 0
         try:
@@ -1671,19 +1195,5 @@ if __name__ == "__main__":
         wrapper = str(Path(__file__).resolve().parent / "miner-wrapper.sh")
         action = cmd.replace("--miner-", "")
         _sp.run(["bash", wrapper, action])
-    elif cmd == "--migrate-schema":
-        memories = _all_memories("default")
-        migrated = 0
-        skipped = 0
-        for mem in memories:
-            if _migrate_memory_frontmatter(mem):
-                migrated += 1
-            else:
-                skipped += 1
-        # Rebuild index after migration
-        _generate_index("default")
-        print(json.dumps({"migrated": migrated, "skipped": skipped}))
     else:
-        if not _was_seeded("default"):
-            _auto_seed_workspace("default")
         mcp.run(transport="stdio")
