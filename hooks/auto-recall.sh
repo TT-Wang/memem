@@ -38,7 +38,7 @@ if [ -f "$INDEX" ]; then
 import sys, json
 index = sys.argv[1]
 output = 'Cortex memory index (your full memory catalog):\n\n' + index
-output += '\n\n---\nAbove is your memory index. Use mcp__plugin_cortex_cortex__memory_recall to read full content of any memory that seems relevant to the user'\''s request. After completing significant work, save non-obvious lessons using mcp__plugin_cortex_cortex__memory_save.'
+output += '\n\n---\nAbove is your memory index. To deep dive into relevant memories, read the Obsidian markdown files directly at ~/obsidian-brain/cortex/memories/<filename>.md — the filename is the slugified title + ID (e.g. cortex-uses-pytest-for-testing-43a80bdd.md). Pick memories from the index that seem relevant to the user'\''s request and read them with the Read tool. Do NOT use memory_recall (ChromaDB) for retrieval — go straight to the source files. After completing significant work, save non-obvious lessons using mcp__plugin_cortex_cortex__memory_save.'
 print(json.dumps({
     'hookSpecificOutput': {
         'hookEventName': 'UserPromptSubmit',
