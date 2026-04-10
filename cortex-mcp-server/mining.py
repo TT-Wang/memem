@@ -41,20 +41,24 @@ class FatalMiningError(MiningError):
 _HAIKU_MINE_SYSTEM = (
     "You are a knowledge extractor for an AI memory system. "
     "You will receive the human side of a coding conversation. "
-    "Summarize what a future AI session would need to know.\n\n"
-    "Output a JSON object with:\n"
-    '- "title": short descriptive title for this session\n'
-    '- "project": project-name (or "general" if unclear)\n'
-    '- "content": what was decided, what preferences were expressed, '
-    "what was built or changed, and why. Focus on decisions and context, "
-    "not the back-and-forth.\n\n"
-    "If the conversation has nothing worth remembering (greetings, trivial "
-    "questions), output {}\n\n"
+    "Extract ONLY what was decided, confirmed, or built — NOT what was merely "
+    "discussed, proposed, or rejected.\n\n"
+    "Output a JSON array of objects. Each object has:\n"
+    '- "title": short descriptive title (required)\n'
+    '- "project": project-name (or "general" if unclear) (required)\n'
+    '- "content": what was decided, confirmed, or built and why. Write for a '
+    "future AI that needs context, not a human reading a summary. (required)\n"
+    '- "supersedes": (optional) string describing what prior decision or memory '
+    "this reverses or replaces — only include when the session explicitly "
+    "overturns a previous decision\n\n"
     "Rules:\n"
-    "- Write for a future AI that needs context, not a human reading a summary\n"
-    "- Focus on decisions, preferences, conventions, and what exists now\n"
+    "- Extract multiple distinct memories if the session covers multiple topics\n"
+    "- Each memory should be atomic and self-contained\n"
+    "- Do NOT record things that were discussed but ultimately rejected\n"
     "- Do NOT add knowledge you weren't told\n"
-    "- Output ONLY the JSON object, no other text"
+    "- If nothing worth saving (greetings, trivial questions, no decisions made), "
+    "output []\n"
+    "- Output ONLY the JSON array, no other text"
 )
 
 
@@ -65,8 +69,48 @@ def _mark_session(path: Path, status: str, message: str = "") -> None:
 _MAX_PROMPT_CHARS = 50000
 
 
-def _summarize_session_haiku(messages: list[str]) -> dict | None:
-    """One Haiku call to summarize the whole session into a single memory."""
+def _extract_json_string(output: str) -> str | None:
+    """Extract a JSON array or object from raw output using bracket-depth matching.
+
+    Prefers arrays (`[`), falls back to objects (`{`). Returns the extracted
+    JSON string, or None if no opener is found.
+    """
+    # Try array first, then object
+    for opener, closer in [("[", "]"), ("{", "}")]:
+        start = output.find(opener)
+        if start == -1:
+            continue
+        depth = 0
+        end = -1
+        for i in range(start, len(output)):
+            if output[i] == opener:
+                depth += 1
+            elif output[i] == closer:
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        if end != -1:
+            return output[start:end + 1]
+    return None
+
+
+def _repair_json(s: str) -> str:
+    """Attempt to close any unclosed brackets/braces in a JSON string."""
+    stack = []
+    matching = {"{": "}", "[": "]"}
+    for ch in s:
+        if ch in matching:
+            stack.append(matching[ch])
+        elif ch in ("}", "]"):
+            if stack and stack[-1] == ch:
+                stack.pop()
+    # Append missing closers in reverse order
+    return s + "".join(reversed(stack))
+
+
+def _summarize_session_haiku(messages: list[str]) -> list[dict] | None:
+    """One Haiku call to summarize the whole session into one or more memories."""
     # Truncate at message boundary, not mid-message
     combined_parts = []
     total = 0
@@ -102,38 +146,46 @@ def _summarize_session_haiku(messages: list[str]) -> dict | None:
     if not output:
         return None
 
-    # Extract JSON object from output (Haiku may add text around it)
-    json_start = output.find("{")
-    if json_start == -1:
+    # Extract JSON array (preferred) or object from output
+    json_str = _extract_json_string(output)
+    if json_str is None:
         return None
 
-    # Find matching closing brace by counting depth
-    depth = 0
-    json_end = -1
-    for i in range(json_start, len(output)):
-        if output[i] == "{":
-            depth += 1
-        elif output[i] == "}":
-            depth -= 1
-            if depth == 0:
-                json_end = i
-                break
-    if json_end == -1:
-        return None
-
+    # Parse with repair fallback
+    parsed = None
     try:
-        memory = json.loads(output[json_start:json_end + 1])
+        parsed = json.loads(json_str)
     except json.JSONDecodeError:
-        raise TransientMiningError("invalid JSON from Haiku")
+        repaired = _repair_json(json_str)
+        try:
+            parsed = json.loads(repaired)
+        except json.JSONDecodeError:
+            raise TransientMiningError("invalid JSON from Haiku (repair failed)")
 
-    if not memory.get("content") or not memory.get("title"):
+    # Normalise to a list
+    if isinstance(parsed, dict):
+        parsed = [parsed] if parsed else []
+    elif not isinstance(parsed, list):
         return None
 
-    return {
-        "title": memory["title"][:120],
-        "content": memory["content"][:2000],
-        "project": memory.get("project", "general"),
-    }
+    # Validate and cap each item
+    valid_items: list[dict] = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        if not item.get("title") or not item.get("content"):
+            continue
+        entry: dict = {
+            "title": item["title"][:120],
+            "content": item["content"][:2000],
+            "project": item.get("project", "general") or "general",
+        }
+        supersedes = item.get("supersedes")
+        if supersedes and isinstance(supersedes, str) and supersedes.strip():
+            entry["supersedes"] = supersedes.strip()
+        valid_items.append(entry)
+
+    return valid_items if valid_items else None
 
 
 def _is_agent_session(messages: list[str]) -> bool:
@@ -188,8 +240,8 @@ def mine_session(jsonl_path: str) -> dict:
                 "status": STATUS_COMPLETE,
             }
 
-        insight = _summarize_session_haiku(messages)
-        if not insight:
+        insights = _summarize_session_haiku(messages)
+        if not insights:
             _mark_session(path, STATUS_COMPLETE, "nothing worth saving")
             return {
                 "session_id": session_id,
@@ -198,44 +250,43 @@ def mine_session(jsonl_path: str) -> dict:
                 "status": STATUS_COMPLETE,
             }
 
-        project = insight["project"]
-        content = insight["content"]
+        memories_saved = 0
+        for insight in insights:
+            project = insight["project"]
+            content = insight["content"]
 
-        if _is_duplicate(content, scope_id=project, threshold=0.6):
-            _mark_session(path, STATUS_COMPLETE, "duplicate")
-            return {
-                "session_id": session_id,
-                "memories_saved": 0,
-                "skipped": False,
-                "status": STATUS_COMPLETE,
-            }
+            if _is_duplicate(content, scope_id=project, threshold=0.6):
+                continue
 
-        try:
-            tags = ["mined", session_id[:8]]
-            if project != "general":
-                tags.append(project)
-            mem = _make_memory(
-                content=content,
-                title=insight["title"],
-                tags=tags,
-                project=project,
-                source_type="mined",
-            )
-            mem["id"] = _stable_mined_memory_id(session_id, insight["title"], content)
-            _save_memory(mem)
-        except ObsidianUnavailableError as exc:
-            raise FatalMiningError(str(exc)) from exc
-        except Exception as exc:
-            raise FatalMiningError(f"storage write failed: {exc}") from exc
+            try:
+                tags = ["mined", session_id[:8]]
+                if project != "general":
+                    tags.append(project)
+                mem = _make_memory(
+                    content=content,
+                    title=insight["title"],
+                    tags=tags,
+                    project=project,
+                    source_type="mined",
+                )
+                mem["id"] = _stable_mined_memory_id(session_id, insight["title"], content)
+                if insight.get("supersedes"):
+                    mem["supersedes"] = insight["supersedes"]
+                _save_memory(mem)
+                memories_saved += 1
+            except ObsidianUnavailableError as exc:
+                raise FatalMiningError(str(exc)) from exc
+            except Exception as exc:
+                raise FatalMiningError(f"storage write failed: {exc}") from exc
 
         _mark_session(
             path,
             STATUS_COMPLETE,
-            f"saved=1 version={MINER_STATE_VERSION}",
+            f"saved={memories_saved} version={MINER_STATE_VERSION}",
         )
         return {
             "session_id": session_id,
-            "memories_saved": 1,
+            "memories_saved": memories_saved,
             "skipped": False,
             "status": STATUS_COMPLETE,
         }

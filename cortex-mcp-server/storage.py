@@ -306,12 +306,27 @@ def _word_set(text: str) -> set[str]:
     return set(re.findall(r"[a-z0-9]+", text.lower()))
 
 
+def _ngram_set(text: str, n: int) -> set:
+    tokens = re.findall(r"[a-z0-9]+", text.lower())
+    return set(tuple(tokens[i:i + n]) for i in range(len(tokens) - n + 1))
+
+
+def _jaccard(a: set, b: set) -> float:
+    if not a or not b:
+        return 0.0
+    union = len(a | b)
+    return len(a & b) / union if union else 0.0
+
+
 def _is_duplicate(content: str, scope_id: str = "default", threshold: float = 0.7,
                   return_match: bool = False) -> dict | bool | None:
-    """Check for duplicate via word overlap against Obsidian memories."""
+    """Check for duplicate via blended word/bigram/trigram overlap against Obsidian memories."""
     content_words = _word_set(content)
     if not content_words:
         return None if return_match else False
+
+    content_bigrams = _ngram_set(content, 2)
+    content_trigrams = _ngram_set(content, 3)
 
     normalized = _normalize_scope_id(scope_id)
     project = None if normalized == "general" else normalized
@@ -319,12 +334,14 @@ def _is_duplicate(content: str, scope_id: str = "default", threshold: float = 0.
     best_mem = None
 
     for mem in _obsidian_memories(project):
-        mem_words = _word_set(mem.get("essence", "") + " " + mem.get("title", ""))
+        mem_text = mem.get("essence", "") + " " + mem.get("title", "")
+        mem_words = _word_set(mem_text)
         if not mem_words:
             continue
-        overlap = len(content_words & mem_words)
-        union = len(content_words | mem_words)
-        score = overlap / union if union else 0
+        word_j = _jaccard(content_words, mem_words)
+        bigram_j = _jaccard(content_bigrams, _ngram_set(mem_text, 2))
+        trigram_j = _jaccard(content_trigrams, _ngram_set(mem_text, 3))
+        score = 0.5 * word_j + 0.3 * bigram_j + 0.2 * trigram_j
         if score > best_score:
             best_score = score
             best_mem = mem
