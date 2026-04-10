@@ -61,7 +61,7 @@ def memory_recall(query: str, scope_id: str = "default", limit: int = 10) -> str
 
 
 def memory_list(scope_id: str = "default") -> str:
-    memories = _obsidian_memories(scope_id if scope_id != "default" else None)
+    memories = _obsidian_memories(scope_id)
     if not memories:
         return f"No memories in scope: {scope_id}"
 

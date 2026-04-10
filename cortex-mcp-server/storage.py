@@ -1,9 +1,12 @@
 import atexit
+import logging
 import os
 import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+log = logging.getLogger("cortex-storage")
 
 
 CORTEX_DIR = Path(os.environ.get("CORTEX_DIR", os.path.expanduser("~/.cortex")))
@@ -158,7 +161,8 @@ def _parse_obsidian_tags(raw: str) -> list[str]:
 def _parse_obsidian_memory_file(md_file: Path) -> dict | None:
     try:
         content = md_file.read_text(errors="ignore")
-    except OSError:
+    except OSError as exc:
+        log.warning("Failed to read memory file %s: %s", md_file, exc)
         return None
 
     body = content.strip()
@@ -439,7 +443,6 @@ def _load_obsidian_memories(picked_ids: list[str]) -> list[dict]:
         results.append({
             "title": mem.get("title", "Untitled"),
             "project": mem.get("project", "general"),
-            "why": "discovered",
             "body": mem.get("full_record", mem.get("essence", "")),
         })
     return results

@@ -23,7 +23,7 @@ from storage import (
     _save_memory,
     _stable_mined_memory_id,
 )
-from transcripts import _extract_conversation, _parse_jsonl_session
+from transcripts import _extract_conversation
 
 
 class MiningError(RuntimeError):
@@ -75,9 +75,15 @@ _MAX_PROMPT_CHARS = 50000
 
 def _summarize_session_haiku(messages: list[str]) -> dict | None:
     """One Haiku call to summarize the whole session into a single memory."""
-    combined = "\n\n".join(messages)
-    if len(combined) > _MAX_PROMPT_CHARS:
-        combined = combined[:_MAX_PROMPT_CHARS]
+    # Truncate at message boundary, not mid-message
+    combined_parts = []
+    total = 0
+    for msg in messages:
+        if total + len(msg) + 2 > _MAX_PROMPT_CHARS:
+            break
+        combined_parts.append(msg)
+        total += len(msg) + 2
+    combined = "\n\n".join(combined_parts)
 
     prompt = (
         "Below is a coding conversation (human messages and assistant prose, "
@@ -106,8 +112,21 @@ def _summarize_session_haiku(messages: list[str]) -> dict | None:
 
     # Extract JSON object from output (Haiku may add text around it)
     json_start = output.find("{")
-    json_end = output.rfind("}")
-    if json_start == -1 or json_end == -1:
+    if json_start == -1:
+        return None
+
+    # Find matching closing brace by counting depth
+    depth = 0
+    json_end = -1
+    for i in range(json_start, len(output)):
+        if output[i] == "{":
+            depth += 1
+        elif output[i] == "}":
+            depth -= 1
+            if depth == 0:
+                json_end = i
+                break
+    if json_end == -1:
         return None
 
     try:

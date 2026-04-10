@@ -31,40 +31,24 @@ def session_fingerprint(path: Path) -> dict:
 
 def _parse_state_line(line: str) -> dict | None:
     raw = line.strip()
-    if not raw:
+    if not raw or not raw.startswith("{"):
         return None
 
-    if raw.startswith("{"):
-        try:
-            state = json.loads(raw)
-        except json.JSONDecodeError:
-            return None
-        session_id = str(state.get("session_id", "")).strip()
-        if not session_id:
-            return None
-        return {
-            "session_id": session_id,
-            "status": str(state.get("status", STATUS_COMPLETE)),
-            "mtime_ns": state.get("mtime_ns"),
-            "size": state.get("size"),
-            "version": str(state.get("version", MINER_STATE_VERSION)),
-            "updated_at": str(state.get("updated_at", "")),
-            "message": str(state.get("message", "")),
-        }
-
-    parts = raw.split("\t")
-    session_id = parts[0].strip()
+    try:
+        state = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    session_id = str(state.get("session_id", "")).strip()
     if not session_id:
         return None
-    updated_at = parts[1].strip() if len(parts) >= 2 else ""
     return {
         "session_id": session_id,
-        "status": STATUS_COMPLETE,
-        "mtime_ns": None,
-        "size": None,
-        "version": "legacy",
-        "updated_at": updated_at,
-        "message": "",
+        "status": str(state.get("status", STATUS_COMPLETE)),
+        "mtime_ns": state.get("mtime_ns"),
+        "size": state.get("size"),
+        "version": str(state.get("version", MINER_STATE_VERSION)),
+        "updated_at": str(state.get("updated_at", "")),
+        "message": str(state.get("message", "")),
     }
 
 

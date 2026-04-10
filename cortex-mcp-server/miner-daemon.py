@@ -12,6 +12,7 @@ Usage:
 
 import json
 import logging
+import logging.handlers
 import os
 import signal
 import subprocess
@@ -28,12 +29,13 @@ PID_FILE = CORTEX_DIR / "miner.pid"
 LOG_FILE = CORTEX_DIR / "miner.log"
 POLL_INTERVAL = 60
 
-logging.basicConfig(
-    filename=str(LOG_FILE),
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
+_handler = logging.handlers.RotatingFileHandler(
+    str(LOG_FILE), maxBytes=5 * 1024 * 1024, backupCount=2,
 )
+_handler.setFormatter(logging.Formatter(
+    "%(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S",
+))
+logging.basicConfig(level=logging.INFO, handlers=[_handler])
 log = logging.getLogger("cortex-miner")
 
 

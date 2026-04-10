@@ -124,7 +124,7 @@ def _import_file(file_path: Path, scope_id: str) -> int:
 
 def memory_import(source_path: str, scope_id: str = "default") -> str:
     source = Path(source_path).expanduser().resolve()
-    if not str(source).startswith(str(Path.home().resolve())):
+    if not source.is_relative_to(Path.home().resolve()):
         return "Access denied: can only import from within home directory"
     if not source.exists():
         return f"Path not found: {source_path}"
