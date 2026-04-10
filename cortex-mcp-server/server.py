@@ -519,18 +519,60 @@ def _auto_seed_workspace(scope_id: str) -> list[dict]:
 # ─── Retrieval ────────────────────────────────────────────────────
 
 def _search_memories(query: str, scope_id: str | None = None, limit: int = 10) -> list[dict]:
-    """Search memories using ChromaDB native vector similarity."""
-    try:
-        kwargs = {"query_texts": [query], "n_results": limit, "include": ["documents", "metadatas", "distances"]}
-        if scope_id:
-            kwargs["where"] = {"scope_id": scope_id}
-        result = _collection.query(**kwargs)
-        if not result["ids"] or not result["ids"][0]:
-            return []
-        flat = {"ids": result["ids"][0], "documents": result["documents"][0], "metadatas": result["metadatas"][0]}
-        return [_reconstruct_memory(flat, i) for i in range(len(flat["ids"]))]
-    except Exception:
+    """Search memories by scanning Obsidian markdown files with keyword matching."""
+    if not OBSIDIAN_MEMORIES_DIR.exists():
         return []
+
+    query_words = set(query.lower().split())
+    if not query_words:
+        return []
+
+    scored = []
+    for md_file in OBSIDIAN_MEMORIES_DIR.glob("*.md"):
+        try:
+            content = md_file.read_text(errors="ignore")
+        except OSError:
+            continue
+
+        # Parse frontmatter and body
+        title = ""
+        tags = []
+        who = ""
+        body = content
+        if content.startswith("---"):
+            parts = content.split("---", 2)
+            if len(parts) >= 3:
+                frontmatter = parts[1]
+                body = parts[2].strip()
+                for line in frontmatter.splitlines():
+                    if line.startswith("title:"):
+                        title = line.split(":", 1)[1].strip()
+                    elif line.startswith("tags:"):
+                        tags_str = line.split(":", 1)[1].strip().strip("[]")
+                        tags = [t.strip() for t in tags_str.split(",")]
+                    elif line.startswith("who:"):
+                        who = line.split(":", 1)[1].strip()
+
+        # Scope filter
+        if scope_id and scope_id != "default" and who and who != scope_id:
+            continue
+
+        # Score by keyword overlap across title + tags + body
+        text_words = set((title + " " + " ".join(tags) + " " + body).lower().split())
+        score = len(query_words & text_words) / len(query_words)
+        if score > 0:
+            mem_id = md_file.stem.rsplit("-", 1)[-1] if "-" in md_file.stem else md_file.stem
+            scored.append((score, {
+                "id": mem_id,
+                "title": title,
+                "essence": body[:300],
+                "full_record": body,
+                "source_type": "mined" if any("mined" in t for t in tags) else "user",
+                "file": str(md_file),
+            }))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [mem for _, mem in scored[:limit]]
 
 
 # ─── MCP Tools ────────────────────────────────────────────────────
@@ -558,7 +600,7 @@ def _format_memory_as_bullet(mem: dict) -> str:
 def memory_recall(query: str, scope_id: str = "default", limit: int = 10) -> str:
     """Search all memory sources for a query. Returns structured markdown.
 
-    Pipeline: ChromaDB vector search -> raw transcript search -> format as markdown."""
+    Pipeline: Obsidian file keyword search -> raw transcript search -> format as markdown."""
 
     memories = _search_memories(query, scope_id=scope_id, limit=limit)
     transcript_results = transcript_search(query, limit=3)
@@ -587,12 +629,6 @@ def memory_recall(query: str, scope_id: str = "default", limit: int = 10) -> str
 
     if transcript_results and "No matching" not in transcript_results:
         sections.append(f"### Related Session Logs\n\n{transcript_results}")
-
-    # Update retrieval counts (skip Obsidian rewrite — just metadata update)
-    for mem in memories:
-        mem["retrieval_count"] = mem.get("retrieval_count", 0) + 1
-        mem["last_retrieved_at"] = _now()
-        _save_memory(mem, skip_obsidian=True)
 
     return "\n".join(sections) if sections else f"No memories found for: {query}"
 
