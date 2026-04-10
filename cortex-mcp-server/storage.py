@@ -329,12 +329,23 @@ def _jaccard(a: set, b: set) -> float:
     return len(a & b) / union if union else 0.0
 
 
+def _containment(a: set, b: set) -> float:
+    """What fraction of the smaller set is contained in the larger."""
+    if not a or not b:
+        return 0.0
+    overlap = len(a & b)
+    smaller = min(len(a), len(b))
+    return overlap / smaller if smaller else 0.0
+
+
 def _find_best_match(content: str, scope_id: str = "default") -> tuple[dict | None, float]:
     """Return (best_mem, best_score) for the closest existing memory to content.
 
-    Uses a blended word/bigram/trigram Jaccard score. Returns (None, 0.0) when
-    content has no words or no memories exist. The caller is responsible for
-    interpreting the score (e.g. <0.3 new, 0.3-0.6 merge candidate, >0.6 duplicate).
+    Uses a blended containment score (overlap / smaller set) instead of Jaccard
+    to handle length asymmetry — a short new insight fully contained in a longer
+    existing memory should score high. Returns (None, 0.0) when content has no
+    words or no memories exist. The caller interprets the score:
+    <0.3 = new, 0.3-0.6 = merge candidate, >0.6 = duplicate.
     """
     content_words = _word_set(content)
     if not content_words:
@@ -353,10 +364,10 @@ def _find_best_match(content: str, scope_id: str = "default") -> tuple[dict | No
         mem_words = _word_set(mem_text)
         if not mem_words:
             continue
-        word_j = _jaccard(content_words, mem_words)
-        bigram_j = _jaccard(content_bigrams, _ngram_set(mem_text, 2))
-        trigram_j = _jaccard(content_trigrams, _ngram_set(mem_text, 3))
-        score = 0.5 * word_j + 0.3 * bigram_j + 0.2 * trigram_j
+        word_c = _containment(content_words, mem_words)
+        bigram_c = _containment(content_bigrams, _ngram_set(mem_text, 2))
+        trigram_c = _containment(content_trigrams, _ngram_set(mem_text, 3))
+        score = 0.5 * word_c + 0.3 * bigram_c + 0.2 * trigram_c
         if score > best_score:
             best_score = score
             best_mem = mem
@@ -385,10 +396,10 @@ def _find_related(content: str, exclude_id: str, scope_id: str = "default", limi
         mem_words = _word_set(mem_text)
         if not mem_words:
             continue
-        word_j = _jaccard(content_words, mem_words)
-        bigram_j = _jaccard(content_bigrams, _ngram_set(mem_text, 2))
-        trigram_j = _jaccard(content_trigrams, _ngram_set(mem_text, 3))
-        score = 0.5 * word_j + 0.3 * bigram_j + 0.2 * trigram_j
+        word_c = _containment(content_words, mem_words)
+        bigram_c = _containment(content_bigrams, _ngram_set(mem_text, 2))
+        trigram_c = _containment(content_trigrams, _ngram_set(mem_text, 3))
+        score = 0.5 * word_c + 0.3 * bigram_c + 0.2 * trigram_c
         if score > 0.2:
             scored.append((score, mid[:8]))
 
