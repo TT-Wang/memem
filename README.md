@@ -45,6 +45,7 @@ Lifecycle:  Candidate → feedback strengthens/weakens → auto-promote to "lear
 - Claude Code
 - Python 3.11+
 - `chromadb`, `sentence-transformers`
+- Obsidian vault (memories stored as markdown at `~/obsidian-brain/cortex/`)
 
 ## See Also
 
