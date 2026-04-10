@@ -20,9 +20,13 @@ def _strip_system_noise(text: str) -> str:
     return text.strip()
 
 
-def _extract_human_messages(jsonl_path: str) -> list[str]:
-    """Extract only human-typed messages from a session, stripped of noise."""
-    messages = []
+def _extract_conversation(jsonl_path: str) -> list[str]:
+    """Extract human messages and assistant prose from a session, stripped of noise.
+
+    Returns a list of lines like "User: ..." and "Assistant: ..." with tool
+    calls, tool results, and system reminders stripped out.
+    """
+    lines = []
 
     with open(jsonl_path) as handle:
         for line in handle:
@@ -34,23 +38,27 @@ def _extract_human_messages(jsonl_path: str) -> list[str]:
             except json.JSONDecodeError:
                 continue
 
-            if obj.get("type") != "user":
+            msg_type = obj.get("type")
+            if msg_type not in ("user", "assistant"):
                 continue
 
             content = obj.get("message", {}).get("content", "")
-            text = _extract_user_text(content)
+            text = _extract_text_only(content)
             if not text:
                 continue
 
-            cleaned = _strip_system_noise(text)
-            if cleaned:
-                messages.append(cleaned)
+            if msg_type == "user":
+                cleaned = _strip_system_noise(text)
+                if cleaned:
+                    lines.append(f"User: {cleaned}")
+            else:
+                lines.append(f"Assistant: {text}")
 
-    return messages
+    return lines
 
 
-def _extract_user_text(content) -> str:
-    """Extract only text blocks from user content, skip tool results."""
+def _extract_text_only(content) -> str:
+    """Extract only text blocks from content, skip tool calls and tool results."""
     if isinstance(content, str):
         return content.strip()
     if not isinstance(content, list):
