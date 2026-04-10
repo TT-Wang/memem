@@ -16,6 +16,7 @@ Sections:
   CLI:         --mine-session, --mine-all, --gc, --purge-mined, --migrate, --install-cron
 """
 
+import atexit
 import json
 import os
 import re
@@ -31,6 +32,8 @@ from mcp.server.fastmcp import FastMCP
 CORTEX_DIR = Path(os.environ.get("CORTEX_DIR", os.path.expanduser("~/.cortex")))
 MEMORIES_DIR = CORTEX_DIR / "memories"  # kept for migration
 LOGS_DIR = CORTEX_DIR / "logs"
+SERVER_PID_FILE = CORTEX_DIR / "mcp-server.pid"
+MINER_PID_FILE = CORTEX_DIR / "miner.pid"
 
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -42,6 +45,66 @@ OBSIDIAN_VAULT = Path(os.environ.get("CORTEX_OBSIDIAN_VAULT", str(Path.home() / 
 OBSIDIAN_MEMORIES_DIR = OBSIDIAN_VAULT / "cortex" / "memories"
 if OBSIDIAN_VAULT.exists():
     OBSIDIAN_MEMORIES_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _pid_is_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _read_pid_file(path: Path) -> int | None:
+    try:
+        pid = int(path.read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+    if _pid_is_running(pid):
+        return pid
+
+    path.unlink(missing_ok=True)
+    return None
+
+
+def _register_server_pid():
+    SERVER_PID_FILE.write_text(str(os.getpid()))
+
+    def _cleanup():
+        try:
+            if SERVER_PID_FILE.read_text().strip() == str(os.getpid()):
+                SERVER_PID_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    atexit.register(_cleanup)
+
+
+def _allowed_writer_pids() -> set[int]:
+    raw = os.environ.get("CORTEX_ALLOWED_WRITER_PIDS", "")
+    allowed = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            allowed.add(int(part))
+        except ValueError:
+            continue
+    return allowed
+
+
+def _require_exclusive_writer(operation: str):
+    allowed = _allowed_writer_pids()
+    for role, path in (("mcp-server", SERVER_PID_FILE), ("miner", MINER_PID_FILE)):
+        pid = _read_pid_file(path)
+        if pid and pid not in allowed and pid != os.getpid():
+            raise RuntimeError(
+                f"Refusing {operation}: active {role} process {pid} is already using {CHROMADB_DIR}"
+            )
 
 
 def _slugify(text: str, max_len: int = 60) -> str:
@@ -92,6 +155,11 @@ def _flatten_meta(mem: dict) -> dict:
         else:
             meta[k] = str(v)
     return meta
+
+
+def _stable_mined_memory_id(session_id: str, title: str, content: str) -> str:
+    seed = f"{session_id}\n{title.strip()}\n{content.strip()}"
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
 
 
 def _save_memory(mem: dict, skip_obsidian: bool = False):
@@ -804,6 +872,7 @@ def mine_session(jsonl_path: str) -> dict:
             project=ins["who"] if ins["who"] != "general" else "general",
             source_type="mined",
         )
+        mem["id"] = _stable_mined_memory_id(session_id, ins["title"], ins["content"][:2000])
         _save_memory(mem)
         memories_saved += 1
 
@@ -1140,10 +1209,13 @@ if __name__ == "__main__":
         else:
             print("No query provided.")
     elif cmd == "--mine-session" and len(_sys.argv) >= 3:
+        _require_exclusive_writer("mine session")
         print(json.dumps(mine_session(_sys.argv[2])))
     elif cmd == "--mine-all":
+        _require_exclusive_writer("mine all sessions")
         print(json.dumps(mine_all()))
     elif cmd == "--purge-mined":
+        _require_exclusive_writer("purge mined memories")
         deleted = 0
         try:
             result = _collection.get(where={"source_type": "mined"}, include=["metadatas"])
@@ -1163,6 +1235,7 @@ if __name__ == "__main__":
             MINED_SESSIONS_FILE.write_text("")
         print(json.dumps({"deleted": deleted}))
     elif cmd == "--migrate":
+        _require_exclusive_writer("migrate memories")
         migrated = 0
         errors = 0
         json_dir = MEMORIES_DIR
@@ -1188,6 +1261,7 @@ if __name__ == "__main__":
             _sp.run(["crontab", "-"], input=new_crontab, text=True, check=True)
             print(f"Installed: {cron_entry}")
     elif cmd == "--rebuild-index":
+        _require_exclusive_writer("rebuild index")
         result = _generate_index()
         print(f"Index rebuilt: {INDEX_PATH}")
     elif cmd in ("--miner-start", "--miner-stop", "--miner-status"):
@@ -1195,5 +1269,9 @@ if __name__ == "__main__":
         wrapper = str(Path(__file__).resolve().parent / "miner-wrapper.sh")
         action = cmd.replace("--miner-", "")
         _sp.run(["bash", wrapper, action])
-    else:
+    elif cmd is None:
+        _require_exclusive_writer("start MCP server")
+        _register_server_pid()
         mcp.run(transport="stdio")
+    else:
+        raise SystemExit(f"Unknown command: {cmd}")

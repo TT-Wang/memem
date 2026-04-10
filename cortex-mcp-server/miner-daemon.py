@@ -15,6 +15,8 @@ import sys
 import time
 import signal
 import logging
+import json
+import subprocess
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -34,6 +36,7 @@ SETTLE_SECONDS = 300  # 5 minutes of no writes = session done
 
 # How often to check for new sessions
 POLL_INTERVAL = 60  # check every 60 seconds
+FATAL_EXIT_CODE = 75
 
 # ─── Logging ─────────────────────────────────────────────────────
 
@@ -44,6 +47,10 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger("cortex-miner")
+
+
+class FatalMinerError(RuntimeError):
+    """Raised when storage state is unsafe and the miner must stop."""
 
 
 # ─── Daemon lifecycle ────────────────────────────────────────────
@@ -152,33 +159,52 @@ def _find_settled_sessions() -> list[Path]:
     return settled
 
 
+def _run_server_command(args: list[str], expect_json: bool = True):
+    env = os.environ.copy()
+    env["CORTEX_ALLOWED_WRITER_PIDS"] = str(os.getpid())
+    server_path = str(Path(__file__).parent / "server.py")
+    result = subprocess.run(
+        [sys.executable, server_path, *args],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        env=env,
+    )
+    stdout = result.stdout.strip()
+    stderr = result.stderr.strip()
+    if result.returncode != 0:
+        detail = stderr or stdout or f"command failed with exit code {result.returncode}"
+        raise FatalMinerError(detail)
+    if not expect_json or not stdout:
+        return stdout
+    try:
+        return json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise FatalMinerError(f"invalid JSON from server.py {' '.join(args)}: {exc}") from exc
+
+
 def _mine_and_index(jsonl_path: Path):
     """Mine a single session and rebuild index."""
-    # Import here to avoid loading ChromaDB at daemon start
-    sys.path.insert(0, str(Path(__file__).parent))
-    from server import mine_session, _generate_index
-
     log.info("Mining session: %s", jsonl_path.stem[:12])
 
     try:
-        result = mine_session(str(jsonl_path))
+        result = _run_server_command(["--mine-session", str(jsonl_path)])
         if result.get("skipped"):
             return
         saved = result.get("memories_saved", 0)
         if saved > 0:
             log.info("  → %d memories extracted, rebuilding index", saved)
-            _generate_index()
+            _run_server_command(["--rebuild-index"], expect_json=False)
         else:
             log.info("  → no new memories found")
+    except FatalMinerError:
+        raise
     except Exception as e:
         log.error("  → mining failed: %s", e)
 
 
 def _run_loop():
     """Main polling loop — find settled sessions, mine them."""
-    # Import server module once
-    sys.path.insert(0, str(Path(__file__).parent))
-
     log.info("Starting mining loop (poll=%ds, settle=%ds)", POLL_INTERVAL, SETTLE_SECONDS)
 
     while True:
@@ -186,6 +212,9 @@ def _run_loop():
             sessions = _find_settled_sessions()
             for jsonl in sessions:
                 _mine_and_index(jsonl)
+        except FatalMinerError as e:
+            log.error("Stopping miner after fatal storage error: %s", e)
+            raise SystemExit(FATAL_EXIT_CODE)
         except Exception as e:
             log.error("Loop error: %s", e)
 

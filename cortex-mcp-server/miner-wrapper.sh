@@ -57,6 +57,11 @@ run_loop() {
         # Run miner in foreground — wrapper manages the lifecycle
         python3 "$DAEMON" run 2>> "$LOG_FILE"
         EXIT_CODE=$?
+        if [ "$EXIT_CODE" -eq 0 ] || [ "$EXIT_CODE" -eq 75 ]; then
+            echo "$(date '+%Y-%m-%d %H:%M:%S') WARN Wrapper: miner exited permanently (code $EXIT_CODE), not restarting."
+            rm -f "$WRAPPER_PID_FILE"
+            break
+        fi
         echo "$(date '+%Y-%m-%d %H:%M:%S') WARN Wrapper: miner exited (code $EXIT_CODE), restarting in 10s..."
         sleep 10
     done
