@@ -25,6 +25,8 @@ def memory_save(content: str, title: str = "", scope_id: str = "default", tags: 
         )
         _save_memory(mem)
         return f'Memory saved: {mem["id"][:8]}... "{effective_title}"'
+    except ValueError as exc:
+        return f"Memory rejected: {exc}"
     except RuntimeError as exc:
         return str(exc)
 
