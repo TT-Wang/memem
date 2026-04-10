@@ -41,6 +41,21 @@ from pathlib import Path
 index_path = sys.argv[1]
 vault = sys.argv[2]
 index = Path(index_path).read_text()
+
+# Inject project playbooks if they exist
+playbook_dir = Path(vault) / "cortex" / "playbooks"
+playbook_text = ""
+if playbook_dir.exists():
+    for pb_file in sorted(playbook_dir.glob("*.md")):
+        content = pb_file.read_text().strip()
+        if content:
+            # Strip the hash comment at the end
+            lines = content.split("\n")
+            if lines and lines[-1].strip().startswith("<!-- cortex-hash:"):
+                content = "\n".join(lines[:-1]).strip()
+            project_name = pb_file.stem
+            playbook_text += f"\n## Project Playbook: {project_name}\n\n{content}\n\n"
+
 suffix = (
     "Above is your memory index. IMPORTANT: Do not just skim the titles — "
     "actively use the Cortex MCP tools (memory_recall, memory_list) to fetch "
@@ -54,7 +69,12 @@ suffix = (
     "to Claude Code's built-in auto memory system. This ensures memories persist in "
     "both systems."
 )
-output = "Cortex memory index (your full memory catalog):\n\n" + index + "\n\n---\n" + suffix
+
+parts = []
+if playbook_text:
+    parts.append("Cortex project playbooks (curated knowledge):\n" + playbook_text + "---\n")
+parts.append("Cortex memory index (your full memory catalog):\n\n" + index + "\n\n---\n" + suffix)
+output = "\n".join(parts)
 print(json.dumps({
     "hookSpecificOutput": {
         "hookEventName": "UserPromptSubmit",

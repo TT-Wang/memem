@@ -15,14 +15,22 @@ from session_state import (
     session_is_complete,
     update_session_state,
 )
+import logging
+
 from storage import (
     ObsidianUnavailableError,
+    _find_best_match,
+    _find_memory,
     _generate_index,
-    _is_duplicate,
+    _generate_playbook,
     _make_memory,
+    _obsidian_memories,
     _save_memory,
     _stable_mined_memory_id,
+    _update_memory,
 )
+
+log = logging.getLogger("cortex-miner")
 from transcripts import _extract_conversation
 
 
@@ -69,6 +77,38 @@ _HAIKU_MINE_SYSTEM = (
     "- If nothing worth saving, output []\n"
     "- Output ONLY the JSON array, no other text"
 )
+
+
+_HAIKU_MERGE_SYSTEM = (
+    "Merge two memory entries about the same topic into one. "
+    "Keep all unique information. Prefer newer phrasing when they conflict. "
+    "Output only the merged text, no JSON, no explanation."
+)
+
+
+def _merge_memories(existing_content: str, new_content: str) -> str:
+    """One Haiku call to merge two memory entries into one. Returns merged string capped at 2000 chars."""
+    prompt = f"EXISTING:\n{existing_content}\n\nNEW:\n{new_content}"
+    try:
+        result = subprocess.run(
+            ["claude", "-p", "--model", "haiku", "--tools", "", "--system-prompt", _HAIKU_MERGE_SYSTEM],
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except Exception as exc:
+        raise TransientMiningError(str(exc))
+
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
+        raise TransientMiningError(detail)
+
+    merged = result.stdout.strip()
+    if not merged:
+        raise TransientMiningError("empty response from Haiku during merge")
+
+    return merged[:2000]
 
 
 def _mark_session(path: Path, status: str, message: str = "") -> None:
@@ -260,17 +300,38 @@ def mine_session(jsonl_path: str) -> dict:
             }
 
         memories_saved = 0
+        memories_merged = 0
+        duplicates_skipped = 0
         for insight in insights:
             project = insight["project"]
             content = insight["content"]
 
-            if _is_duplicate(content, scope_id=project, threshold=0.6):
+            existing, score = _find_best_match(content, scope_id=project)
+
+            if score > 0.6:
+                # True duplicate — skip
+                duplicates_skipped += 1
                 continue
 
+            if score >= 0.3 and existing:
+                # Merge candidate — combine with existing memory
+                try:
+                    merged = _merge_memories(existing.get("essence", ""), content)
+                    _update_memory(existing["id"], merged, insight["title"])
+                    memories_merged += 1
+                except (TransientMiningError, ValueError) as exc:
+                    # If merge fails, fall through to save as new
+                    pass
+                else:
+                    continue
+
+            # Score < 0.3 or merge failed — save as new
             try:
                 tags = ["mined", session_id[:8]]
                 if project != "general":
                     tags.append(project)
+                if insight.get("supersedes"):
+                    tags.append(f"supersedes:{insight['supersedes']}")
                 mem = _make_memory(
                     content=content,
                     title=insight["title"],
@@ -279,8 +340,6 @@ def mine_session(jsonl_path: str) -> dict:
                     source_type="mined",
                 )
                 mem["id"] = _stable_mined_memory_id(session_id, insight["title"], content)
-                if insight.get("supersedes"):
-                    mem["supersedes"] = insight["supersedes"]
                 _save_memory(mem)
                 memories_saved += 1
             except ObsidianUnavailableError as exc:
@@ -291,11 +350,13 @@ def mine_session(jsonl_path: str) -> dict:
         _mark_session(
             path,
             STATUS_COMPLETE,
-            f"saved={memories_saved} version={MINER_STATE_VERSION}",
+            f"saved={memories_saved} merged={memories_merged} skipped={duplicates_skipped} version={MINER_STATE_VERSION}",
         )
         return {
             "session_id": session_id,
             "memories_saved": memories_saved,
+            "memories_merged": memories_merged,
+            "duplicates_skipped": duplicates_skipped,
             "skipped": False,
             "status": STATUS_COMPLETE,
         }
@@ -328,6 +389,16 @@ def mine_all() -> dict:
 
     if newly_mined > 0:
         _generate_index()
+        # Regenerate playbooks for all projects (hash-skip handles unchanged ones)
+        try:
+            seen_projects = set()
+            for mem in _obsidian_memories():
+                project = mem.get("project", "general")
+                if project not in seen_projects:
+                    seen_projects.add(project)
+                    _generate_playbook(project)
+        except Exception as exc:
+            log.warning("Playbook generation failed: %s", exc)
 
     return {
         "total_sessions": total,

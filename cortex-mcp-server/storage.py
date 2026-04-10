@@ -1,7 +1,9 @@
 import atexit
+import hashlib
 import logging
 import os
 import re
+import subprocess
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,6 +16,7 @@ SERVER_PID_FILE = CORTEX_DIR / "mcp-server.pid"
 OBSIDIAN_VAULT = Path(os.environ.get("CORTEX_OBSIDIAN_VAULT", str(Path.home() / "obsidian-brain")))
 OBSIDIAN_MEMORIES_DIR = OBSIDIAN_VAULT / "cortex" / "memories"
 INDEX_PATH = OBSIDIAN_VAULT / "cortex" / "_index.md"
+PLAYBOOK_DIR = OBSIDIAN_VAULT / "cortex" / "playbooks"
 
 
 def _pid_is_running(pid: int) -> bool:
@@ -186,12 +189,18 @@ def _write_obsidian_memory(mem: dict):
     clean_title = re.sub(r"^\[[^\]]+\]\s*", "", mem.get("title", "Untitled"))
     project = mem.get("project", "general")
 
+    related = mem.get("related")
+    related_line = ""
+    if related and isinstance(related, list) and len(related) > 0:
+        related_line = f"related: [{', '.join(related)}]\n"
+
     frontmatter = (
         f"---\n"
         f"id: {mem['id']}\n"
         f"title: {_yaml_escape(clean_title)}\n"
         f"project: {project}\n"
         f"tags: [{', '.join(tags)}]\n"
+        f"{related_line}"
         f"created: {mem.get('created_at', '')[:10]}\n"
         f"---"
     )
@@ -250,6 +259,8 @@ def _parse_obsidian_memory_file(md_file: Path) -> dict | None:
                     mem["project"] = value
                 elif key == "tags":
                     mem["domain_tags"] = _parse_obsidian_tags(value)
+                elif key == "related":
+                    mem["related"] = _parse_obsidian_tags(value)
                 elif key == "created":
                     mem["created_at"] = value
 
@@ -318,12 +329,16 @@ def _jaccard(a: set, b: set) -> float:
     return len(a & b) / union if union else 0.0
 
 
-def _is_duplicate(content: str, scope_id: str = "default", threshold: float = 0.7,
-                  return_match: bool = False) -> dict | bool | None:
-    """Check for duplicate via blended word/bigram/trigram overlap against Obsidian memories."""
+def _find_best_match(content: str, scope_id: str = "default") -> tuple[dict | None, float]:
+    """Return (best_mem, best_score) for the closest existing memory to content.
+
+    Uses a blended word/bigram/trigram Jaccard score. Returns (None, 0.0) when
+    content has no words or no memories exist. The caller is responsible for
+    interpreting the score (e.g. <0.3 new, 0.3-0.6 merge candidate, >0.6 duplicate).
+    """
     content_words = _word_set(content)
     if not content_words:
-        return None if return_match else False
+        return None, 0.0
 
     content_bigrams = _ngram_set(content, 2)
     content_trigrams = _ngram_set(content, 3)
@@ -346,6 +361,50 @@ def _is_duplicate(content: str, scope_id: str = "default", threshold: float = 0.
             best_score = score
             best_mem = mem
 
+    return best_mem, best_score
+
+
+def _find_related(content: str, exclude_id: str, scope_id: str = "default", limit: int = 3) -> list[str]:
+    """Return up to `limit` memory IDs (8-char prefix) related to content, excluding exclude_id."""
+    content_words = _word_set(content)
+    if not content_words:
+        return []
+
+    content_bigrams = _ngram_set(content, 2)
+    content_trigrams = _ngram_set(content, 3)
+
+    normalized = _normalize_scope_id(scope_id)
+    project = None if normalized == "general" else normalized
+
+    scored = []
+    for mem in _obsidian_memories(project):
+        mid = mem.get("id", "")
+        if mid == exclude_id or mid.startswith(exclude_id) or exclude_id.startswith(mid[:8]):
+            continue
+        mem_text = mem.get("essence", "") + " " + mem.get("title", "")
+        mem_words = _word_set(mem_text)
+        if not mem_words:
+            continue
+        word_j = _jaccard(content_words, mem_words)
+        bigram_j = _jaccard(content_bigrams, _ngram_set(mem_text, 2))
+        trigram_j = _jaccard(content_trigrams, _ngram_set(mem_text, 3))
+        score = 0.5 * word_j + 0.3 * bigram_j + 0.2 * trigram_j
+        if score > 0.2:
+            scored.append((score, mid[:8]))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [mid for _, mid in scored[:limit]]
+
+
+def _is_duplicate(content: str, scope_id: str = "default", threshold: float = 0.7,
+                  return_match: bool = False) -> dict | bool | None:
+    """Check for duplicate via blended word/bigram/trigram overlap against Obsidian memories."""
+    content_words = _word_set(content)
+    if not content_words:
+        return None if return_match else False
+
+    best_mem, best_score = _find_best_match(content, scope_id)
+
     if best_score >= threshold:
         return best_mem if return_match else True
     return None if return_match else False
@@ -357,6 +416,15 @@ def _save_memory(mem: dict):
     _write_obsidian_memory(mem)
     if INDEX_PATH.exists():
         _append_or_update_index_line(mem)
+
+    # Compute and store related memory links
+    content = mem.get("essence", "")
+    mem_id = mem.get("id", "")
+    if content and mem_id:
+        related = _find_related(content, exclude_id=mem_id, scope_id=mem.get("project", "default"))
+        if related:
+            mem["related"] = related
+            _write_obsidian_memory(mem)  # Rewrite with related field
 
 
 def _delete_memory(memory_id: str) -> bool:
@@ -514,6 +582,18 @@ def _load_obsidian_memories(picked_ids: list[str]) -> list[dict]:
     return results
 
 
+def _update_memory(memory_id: str, new_content: str, new_title: str = "") -> None:
+    """Update an existing memory's content and optionally its title."""
+    mem = _find_memory(memory_id)
+    if mem is None:
+        raise ValueError(f"Memory not found: {memory_id}")
+    mem["essence"] = new_content
+    if new_title:
+        mem["title"] = new_title
+    _write_obsidian_memory(mem)
+    _append_or_update_index_line(mem)
+
+
 def purge_mined_memories(mined_sessions_file: Path) -> dict:
     deleted = 0
     for mem in _obsidian_memories():
@@ -526,3 +606,84 @@ def purge_mined_memories(mined_sessions_file: Path) -> dict:
     if mined_sessions_file.exists():
         mined_sessions_file.write_text("")
     return {"deleted": deleted}
+
+
+_PLAYBOOK_SYSTEM_PROMPT = (
+    "You are creating a project knowledge playbook from individual memory entries. "
+    "Organize into coherent sections by topic. Remove redundancy. Resolve contradictions "
+    "(prefer entries with more recent created dates). Output a concise markdown document "
+    "a future AI session can use as a project briefing. No JSON — output markdown directly."
+)
+
+_PLAYBOOK_HASH_PREFIX = "<!-- cortex-hash:"
+
+
+def _generate_playbook(project: str) -> str:
+    """Generate a synthesized playbook for the given project using Haiku.
+
+    Returns the playbook markdown content, or "" if no memories exist or on error.
+    """
+    normalized = _normalize_scope_id(project)
+    memories = _obsidian_memories(normalized)
+    if not memories:
+        return ""
+
+    # Concatenate memory essences (cap at 50K chars)
+    parts = []
+    total = 0
+    for mem in memories:
+        title = mem.get("title", "Untitled")
+        essence = mem.get("essence", "")
+        created = mem.get("created_at", "")
+        entry = f"### {title}\ncreated: {created}\n\n{essence}\n"
+        if total + len(entry) > 50_000:
+            break
+        parts.append(entry)
+        total += len(entry)
+
+    combined = "\n".join(parts)
+
+    # Compute hash of combined content
+    hexdigest = hashlib.sha256(combined.encode("utf-8")).hexdigest()
+
+    # Check existing playbook for matching hash
+    PLAYBOOK_DIR.mkdir(parents=True, exist_ok=True)
+    playbook_file = PLAYBOOK_DIR / f"{normalized}.md"
+    if playbook_file.exists():
+        try:
+            existing = playbook_file.read_text()
+            last_line = existing.rstrip().rsplit("\n", 1)[-1]
+            if last_line.startswith(_PLAYBOOK_HASH_PREFIX) and last_line.rstrip().endswith("-->"):
+                existing_hash = last_line[len(_PLAYBOOK_HASH_PREFIX):].rstrip().removesuffix("-->").strip()
+                if existing_hash == hexdigest:
+                    # Strip trailing hash comment and return content
+                    content_end = existing.rfind(_PLAYBOOK_HASH_PREFIX)
+                    return existing[:content_end].rstrip() if content_end != -1 else existing
+        except OSError:
+            pass
+
+    # Call Haiku via subprocess
+    try:
+        result = subprocess.run(
+            ["claude", "-p", "--model", "haiku", "--tools", "", "--system-prompt", _PLAYBOOK_SYSTEM_PROMPT],
+            input=combined,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            log.warning("Haiku playbook call failed (rc=%d): %s", result.returncode, result.stderr[:200])
+            return ""
+        playbook_content = result.stdout.strip()
+    except Exception as exc:
+        log.warning("Haiku playbook call raised exception: %s", exc)
+        return ""
+
+    # Write playbook with hash comment
+    file_content = f"{playbook_content}\n\n{_PLAYBOOK_HASH_PREFIX}{hexdigest} -->\n"
+    try:
+        playbook_file.write_text(file_content)
+    except OSError as exc:
+        log.warning("Failed to write playbook file %s: %s", playbook_file, exc)
+
+    return playbook_content

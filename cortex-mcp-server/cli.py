@@ -63,6 +63,21 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         print(f"Index rebuilt: {INDEX_PATH}")
         return
 
+    if cmd == "--rebuild-playbooks":
+        from storage import _obsidian_memories, _generate_playbook
+        seen = set()
+        count = 0
+        for mem in _obsidian_memories():
+            project = mem.get("project", "general")
+            if project not in seen:
+                seen.add(project)
+                result = _generate_playbook(project)
+                if result:
+                    count += 1
+                    print(f"  Generated: {project}")
+        print(f"Rebuilt {count} playbooks")
+        return
+
     if cmd in ("--miner-start", "--miner-stop", "--miner-status"):
         wrapper = str(Path(__file__).resolve().parent / "miner-wrapper.sh")
         action = cmd.replace("--miner-", "")

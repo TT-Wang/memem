@@ -2,7 +2,7 @@ import re
 import subprocess
 from collections import Counter
 
-from storage import INDEX_PATH, _load_obsidian_memories, _obsidian_memories, _word_set
+from storage import INDEX_PATH, _find_memory, _load_obsidian_memories, _obsidian_memories, _word_set
 from transcripts import transcript_search
 
 
@@ -27,7 +27,22 @@ def _search_memories(query: str, scope_id: str | None = None, limit: int = 10) -
             scored.append((score, result))
 
     scored.sort(key=lambda item: item[0], reverse=True)
-    return [mem for _, mem in scored[:limit]]
+    primary = [mem for _, mem in scored[:limit]]
+
+    # Expand linked memories
+    seen_ids = {mem.get("id", "")[:8] for mem in primary}
+    linked = []
+    for mem in primary:
+        for related_id in mem.get("related", []):
+            if related_id in seen_ids:
+                continue
+            seen_ids.add(related_id)
+            related_mem = _find_memory(related_id)
+            if related_mem:
+                linked.append(related_mem)
+
+    max_total = limit * 2
+    return (primary + linked)[:max_total]
 
 
 def _format_memory_as_bullet(mem: dict) -> str:
