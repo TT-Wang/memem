@@ -43,8 +43,7 @@ _HAIKU_MINE_SYSTEM = (
     "Output structured memories in this exact format, one per block:\n\n"
     "MEMORY\n"
     "title: short descriptive title (no project prefix)\n"
-    "who: project-name (or general if unclear)\n"
-    "why: decided|learned|shipped|failed|convention|prefers|discovered|designed|blocked-by\n"
+    "project: project-name (or general if unclear)\n"
     "content: one paragraph summary of what to remember\n\n"
     "Rules:\n"
     "- Extract decisions, lessons, things shipped, failures, conventions, preferences, discoveries\n"
@@ -67,18 +66,6 @@ def _mark_session(path: Path, status: str, message: str = "") -> None:
 
 
 def _extract_insights_haiku(pairs: list[dict], batch_size: int = 5) -> list[dict]:
-    why_to_type = {
-        "decided": "knowledge",
-        "learned": "lesson",
-        "shipped": "knowledge",
-        "failed": "failure",
-        "convention": "convention",
-        "prefers": "preference",
-        "discovered": "knowledge",
-        "designed": "knowledge",
-        "blocked-by": "failure",
-    }
-
     all_insights = []
     batch_errors = []
     for start in range(0, len(pairs), batch_size):
@@ -134,7 +121,7 @@ def _extract_insights_haiku(pairs: list[dict], batch_size: int = 5) -> list[dict
                 if ":" in line:
                     key, value = line.split(":", 1)
                     key = key.strip().lower()
-                    if key in ("title", "who", "why", "content"):
+                    if key in ("title", "project", "content"):
                         memory[key] = value.strip()
                         current_key = key
                         continue
@@ -143,15 +130,10 @@ def _extract_insights_haiku(pairs: list[dict], batch_size: int = 5) -> list[dict
                     memory["content"] += " " + line.strip()
             if not memory.get("content") or not memory.get("title"):
                 continue
-            why = memory.get("why", "discovered")
-            if why not in why_to_type:
-                why = "discovered"
             all_insights.append({
                 "title": memory["title"][:120],
                 "content": memory["content"][:2000],
-                "who": memory.get("who", "general"),
-                "why": why,
-                "memory_type": why_to_type[why],
+                "project": memory.get("project", "general"),
             })
             parsed_any = True
 
@@ -219,15 +201,15 @@ def mine_session(jsonl_path: str) -> dict:
 
         try:
             for insight in insights:
-                project = insight["who"]
+                project = insight["project"]
                 content = insight["content"][:2000]
                 if _is_duplicate(content, scope_id=project, threshold=0.6):
                     duplicates_skipped += 1
                     continue
 
                 tags = ["mined", session_id[:8]]
-                if insight["who"] != "general":
-                    tags.append(insight["who"])
+                if project != "general":
+                    tags.append(project)
                 mem = _make_memory(
                     content=content,
                     title=insight["title"],
