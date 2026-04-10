@@ -10,8 +10,6 @@ The UserPromptSubmit hook automatically injects the memory index on your first m
 
 ## Auto-save
 
-When saving memories, ALWAYS dual-write: save to both Cortex (via `memory_save`) AND Claude's built-in memory system (via Write to `~/.claude/projects/` memory files). This ensures memories are available through both systems.
-
 When you complete significant work, save non-obvious lessons:
 
 Call `mcp__plugin_cortex_cortex__memory_save` with:
