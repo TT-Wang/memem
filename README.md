@@ -2,11 +2,19 @@
 
 Persistent memory for Claude Code. Remembers across sessions, gets smarter over time.
 
+## Install
+
 ```bash
 # Add the marketplace
-/plugin marketplace add TT-Wang/cortex-plugin
+claude plugin marketplace add TT-Wang/cortex-plugin
 
-# Install the plugin
+# Install
+claude plugin install cortex@cortex-marketplace
+```
+
+Or from the Claude Code prompt:
+```
+/plugin marketplace add TT-Wang/cortex-plugin
 /plugin install cortex@cortex-marketplace
 ```
 
@@ -20,17 +28,17 @@ Over time, the memory grows. The 50th session is dramatically better than the 1s
 
 ```
 Memory Generation                Memory Retrieval
-  ├── auto-seed (first run)        └── memory_recall
-  ├── memory_save (Claude saves)         ├── ChromaDB vector search
-  ├── JSONL mining (hourly cron)         ├── transcript search (live JSONL)
-  └── memory_import (files/dirs)         └── structured markdown output
-          │                                        │
-          ▼                                        ▼
-   ChromaDB (search index)                  Claude reads results
+  ├── auto-seed (first run)        ├── Hook injects Obsidian index
+  ├── memory_save (Claude saves)   └── Claude reads Obsidian markdown files
+  ├── Haiku-powered mining              directly via Read tool
+  └── memory_import (files/dirs)
+          │
+          ▼
+   ChromaDB (search index)
    Obsidian vault (human-readable)
 ```
 
-**Dual-write storage**: every memory is saved to both ChromaDB (for fast vector search) and your Obsidian vault (for human browsing).
+**Dual-write storage**: every memory is saved to both ChromaDB (for vector search) and your Obsidian vault (for human browsing). Retrieval goes through Obsidian files directly — Claude reads the source markdown, not ChromaDB results.
 
 ## First use
 
@@ -59,25 +67,20 @@ No LLM calls in the search pipeline. Zero API cost. ~50ms latency.
 
 ## Conversation mining
 
-Cortex automatically mines Claude Code session logs to extract insights:
+A persistent Haiku-powered miner daemon runs in the background, watching for completed Claude Code sessions and extracting insights:
 
 ```
 ~/.claude/projects/*/*.jsonl  (30-day TTL)
-  → hourly cron runs --mine-all
+  → miner daemon polls every 60s for settled sessions (5min idle)
   → parse JSONL → extract exchange pairs
-  → heuristic pattern matching (decisions, lessons, conventions, preferences)
-  → dedup against existing memories
+  → Haiku extracts structured insights (decisions, lessons, conventions)
+  → dedup against existing memories (ChromaDB similarity check)
   → save to ChromaDB + Obsidian
 ```
 
 Raw session logs stay in `~/.claude/` (auto-deleted after 30 days). Extracted insights persist forever as memories.
 
-CLI commands:
-```bash
-python3 server.py --mine-session <path.jsonl>   # mine one session
-python3 server.py --mine-all                     # mine all unmined sessions
-python3 server.py --install-cron                 # set up hourly auto-mining
-```
+The miner scans both user and root session directories.
 
 ## Memory lifecycle
 
