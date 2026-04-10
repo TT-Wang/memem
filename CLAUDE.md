@@ -6,9 +6,11 @@ Storage: Obsidian vault at `~/obsidian-brain/cortex/memories/` (markdown files, 
 
 ## Auto-recall
 
-The UserPromptSubmit hook automatically injects the memory index on your first message. Read the relevant Obsidian memory files directly when you need deeper context.
+The UserPromptSubmit hook automatically injects the memory index on your first message. IMPORTANT: Do not just skim the index titles — use Cortex MCP tools (memory_recall, memory_list) to fetch full content of memories relevant to the user's request before responding. The index is a lookup table, not the knowledge itself. You can also read Obsidian markdown files directly when needed.
 
 ## Auto-save
+
+When saving memories, ALWAYS dual-write: save to both Cortex (via `memory_save`) AND Claude's built-in memory system (via Write to `~/.claude/projects/` memory files). This ensures memories are available through both systems.
 
 When you complete significant work, save non-obvious lessons:
 
