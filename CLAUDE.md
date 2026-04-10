@@ -2,6 +2,8 @@
 
 You have access to a persistent memory system via Cortex. This memory persists across sessions and gets smarter over time.
 
+Storage: Obsidian vault at `~/obsidian-brain/cortex/memories/` (markdown files, single source of truth).
+
 ## Auto-recall
 
 The UserPromptSubmit hook automatically injects the memory index on your first message. Read the relevant Obsidian memory files directly when you need deeper context.

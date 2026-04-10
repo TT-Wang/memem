@@ -10,35 +10,23 @@ Usage:
     python3 miner-daemon.py run      # run in foreground (for debugging)
 """
 
+import json
+import logging
 import os
+import signal
+import subprocess
 import sys
 import time
-import signal
-import logging
-import json
-import subprocess
 from pathlib import Path
-from datetime import datetime, timezone
 
-# ─── Config ──────────────────────────────────────────────────────
+from miner_protocol import FATAL_EXIT_CODE, TRANSIENT_EXIT_CODE
+from session_state import MINED_SESSIONS_FILE, SETTLE_SECONDS, find_settled_sessions, load_mined_session_state
+from storage import CORTEX_DIR
 
-CORTEX_DIR = Path(os.environ.get("CORTEX_DIR", os.path.expanduser("~/.cortex")))
+
 PID_FILE = CORTEX_DIR / "miner.pid"
 LOG_FILE = CORTEX_DIR / "miner.log"
-SESSIONS_DIRS = [Path.home() / ".claude" / "projects"]
-# Also scan additional session dirs via CORTEX_EXTRA_SESSION_DIRS env var
-_extra = os.environ.get("CORTEX_EXTRA_SESSION_DIRS", "")
-if _extra:
-    SESSIONS_DIRS.extend(Path(p) for p in _extra.split(":") if p)
-
-# How long a file must be unchanged before we consider the session "ended"
-SETTLE_SECONDS = 300  # 5 minutes of no writes = session done
-
-# How often to check for new sessions
-POLL_INTERVAL = 60  # check every 60 seconds
-FATAL_EXIT_CODE = 75
-
-# ─── Logging ─────────────────────────────────────────────────────
+POLL_INTERVAL = 60
 
 logging.basicConfig(
     filename=str(LOG_FILE),
@@ -53,7 +41,9 @@ class FatalMinerError(RuntimeError):
     """Raised when storage state is unsafe and the miner must stop."""
 
 
-# ─── Daemon lifecycle ────────────────────────────────────────────
+class RetryableMinerError(RuntimeError):
+    """Raised for transient per-session failures."""
+
 
 def _write_pid():
     PID_FILE.write_text(str(os.getpid()))
@@ -64,7 +54,6 @@ def _read_pid() -> int | None:
         return None
     try:
         pid = int(PID_FILE.read_text().strip())
-        # Check if process actually exists
         os.kill(pid, 0)
         return pid
     except (ValueError, ProcessLookupError, PermissionError):
@@ -84,10 +73,9 @@ def start_daemon():
         print(f"Miner daemon already running (PID {existing})")
         return
 
-    # Fork to background
+    # First fork — detach from parent
     pid = os.fork()
     if pid > 0:
-        # Parent — wait briefly then confirm
         time.sleep(0.5)
         child_pid = _read_pid()
         if child_pid:
@@ -96,12 +84,19 @@ def start_daemon():
             print("Failed to start daemon — check ~/.cortex/miner.log")
         return
 
-    # Child — detach
     os.setsid()
-    # Redirect stdio
-    sys.stdin = open(os.devnull, "r")
-    sys.stdout = open(os.devnull, "w")
-    sys.stderr = open(os.devnull, "w")
+
+    # Second fork — prevent acquiring a controlling terminal
+    pid = os.fork()
+    if pid > 0:
+        os._exit(0)
+
+    # Redirect std file descriptors
+    devnull_r = open(os.devnull, "r")
+    devnull_w = open(os.devnull, "w")
+    os.dup2(devnull_r.fileno(), sys.stdin.fileno())
+    os.dup2(devnull_w.fileno(), sys.stdout.fileno())
+    os.dup2(devnull_w.fileno(), sys.stderr.fileno())
 
     _write_pid()
     signal.signal(signal.SIGTERM, _cleanup)
@@ -132,96 +127,84 @@ def status_daemon():
         print("Miner daemon not running")
 
 
-# ─── Mining loop ─────────────────────────────────────────────────
-
-def _find_settled_sessions() -> list[Path]:
-    """Find JSONL session files that haven't been modified recently."""
-    now = time.time()
-    settled = []
-
-    for sessions_dir in SESSIONS_DIRS:
-        if not sessions_dir.exists():
-            continue
-        for jsonl in sessions_dir.rglob("*.jsonl"):
-            if "/subagents/" in str(jsonl):
-                continue
-            # Skip tiny files
-            try:
-                stat = jsonl.stat()
-                if stat.st_size < 5000:
-                    continue
-                # Check if file has settled (no writes for SETTLE_SECONDS)
-                if (now - stat.st_mtime) > SETTLE_SECONDS:
-                    settled.append(jsonl)
-            except OSError:
-                continue
-
-    return settled
-
-
 def _run_server_command(args: list[str], expect_json: bool = True):
-    env = os.environ.copy()
-    env["CORTEX_ALLOWED_WRITER_PIDS"] = str(os.getpid())
     server_path = str(Path(__file__).parent / "server.py")
     result = subprocess.run(
         [sys.executable, server_path, *args],
         capture_output=True,
         text=True,
         timeout=300,
-        env=env,
+        env=os.environ.copy(),
     )
     stdout = result.stdout.strip()
     stderr = result.stderr.strip()
     if result.returncode != 0:
         detail = stderr or stdout or f"command failed with exit code {result.returncode}"
-        raise FatalMinerError(detail)
+        if result.returncode == FATAL_EXIT_CODE:
+            raise FatalMinerError(detail)
+        raise RetryableMinerError(detail)
     if not expect_json or not stdout:
         return stdout
     try:
         return json.loads(stdout)
     except json.JSONDecodeError as exc:
-        raise FatalMinerError(f"invalid JSON from server.py {' '.join(args)}: {exc}") from exc
+        raise RetryableMinerError(
+            f"invalid JSON from server.py {' '.join(args)}: {exc}"
+        ) from exc
 
 
-def _mine_and_index(jsonl_path: Path):
-    """Mine a single session and rebuild index."""
+def _mine_session(jsonl_path: Path) -> tuple[int, bool]:
     log.info("Mining session: %s", jsonl_path.stem[:12])
 
     try:
         result = _run_server_command(["--mine-session", str(jsonl_path)])
         if result.get("skipped"):
-            return
+            log.info("  -> skipped (%s)", result.get("reason", "unknown"))
+            return 0, False
         saved = result.get("memories_saved", 0)
         if saved > 0:
-            log.info("  → %d memories extracted, rebuilding index", saved)
-            _run_server_command(["--rebuild-index"], expect_json=False)
+            log.info("  -> %d memories extracted", saved)
         else:
-            log.info("  → no new memories found")
-    except FatalMinerError:
-        raise
-    except Exception as e:
-        log.error("  → mining failed: %s", e)
+            log.info("  -> no new memories found")
+        return saved, True
+    except RetryableMinerError as exc:
+        log.error("  -> retryable mining failure: %s", exc)
+        return 0, False
 
 
 def _run_loop():
-    """Main polling loop — find settled sessions, mine them."""
-    log.info("Starting mining loop (poll=%ds, settle=%ds)", POLL_INTERVAL, SETTLE_SECONDS)
+    log.info(
+        "Starting mining loop (poll=%ds, settle=%ds, state=%s)",
+        POLL_INTERVAL,
+        SETTLE_SECONDS,
+        MINED_SESSIONS_FILE,
+    )
 
     while True:
         try:
-            sessions = _find_settled_sessions()
-            for jsonl in sessions:
-                _mine_and_index(jsonl)
-        except FatalMinerError as e:
-            log.error("Stopping miner after fatal storage error: %s", e)
+            states = load_mined_session_state()
+            sessions = find_settled_sessions(states)
+            total_saved = 0
+            processed = 0
+            for jsonl_path in sessions:
+                saved, completed = _mine_session(jsonl_path)
+                total_saved += saved
+                if completed:
+                    processed += 1
+            if processed > 0:
+                log.info("Rebuilding index after %d completed sessions", processed)
+                try:
+                    _run_server_command(["--rebuild-index"], expect_json=False)
+                except RetryableMinerError as exc:
+                    log.error("Index rebuild failed: %s", exc)
+        except FatalMinerError as exc:
+            log.error("Stopping miner after fatal storage error: %s", exc)
             raise SystemExit(FATAL_EXIT_CODE)
-        except Exception as e:
-            log.error("Loop error: %s", e)
+        except Exception as exc:
+            log.error("Loop error: %s", exc)
 
         time.sleep(POLL_INTERVAL)
 
-
-# ─── CLI ─────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     CORTEX_DIR.mkdir(parents=True, exist_ok=True)
@@ -235,7 +218,6 @@ if __name__ == "__main__":
     elif cmd == "status":
         status_daemon()
     elif cmd == "run":
-        # Foreground mode for debugging
         _write_pid()
         signal.signal(signal.SIGTERM, _cleanup)
         signal.signal(signal.SIGINT, _cleanup)
@@ -244,3 +226,4 @@ if __name__ == "__main__":
         _run_loop()
     else:
         print(f"Usage: {sys.argv[0]} start|stop|status|run")
+        raise SystemExit(TRANSIENT_EXIT_CODE)
