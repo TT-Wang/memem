@@ -841,9 +841,13 @@ _HAIKU_MINE_SYSTEM = (
     "content: one paragraph summary of what to remember\n\n"
     "Rules:\n"
     "- Extract decisions, lessons, things shipped, failures, conventions, preferences, discoveries\n"
-    "- Be generous — if in doubt, extract it\n"
     "- Each memory should be self-contained and useful without the original conversation\n"
+    "- The title must be a clear descriptive sentence, not a markdown heading or fragment\n"
+    "- The content must be a distilled insight, NOT a verbatim quote from the user or assistant\n"
     "- Skip trivial exchanges (greetings, simple file reads, routine git commands)\n"
+    "- Skip raw user requests (e.g. 'i want X', 'build me Y') — only save if there's a decision or lesson\n"
+    "- Skip markdown fragments, code snippets, or headings that aren't self-contained insights\n"
+    "- Do NOT extract duplicate or near-duplicate insights — if two exchanges say the same thing, extract once\n"
     "- If nothing worth saving, output NONE\n"
     "- Do NOT add knowledge you weren't told — only extract what's in the conversation"
 )
@@ -1000,7 +1004,7 @@ def mine_session(jsonl_path: str) -> dict:
     duplicates_skipped = 0
 
     for ins in insights:
-        if _is_duplicate(ins["content"][:2000]):
+        if _is_duplicate(ins["content"][:2000], threshold=0.5):
             duplicates_skipped += 1
             continue
         # Use who as project tag
