@@ -1,6 +1,70 @@
 import json
 import os
+import re
 from pathlib import Path
+
+
+_SYSTEM_REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
+_COMMAND_TAGS_RE = re.compile(
+    r"<(?:local-command-caveat|command-name|command-message|command-args|"
+    r"local-command-stdout)>.*?</(?:local-command-caveat|command-name|"
+    r"command-message|command-args|local-command-stdout)>",
+    re.DOTALL,
+)
+
+
+def _strip_system_noise(text: str) -> str:
+    """Remove system-reminder tags and hook-injected content from text."""
+    text = _SYSTEM_REMINDER_RE.sub("", text)
+    text = _COMMAND_TAGS_RE.sub("", text)
+    return text.strip()
+
+
+def _extract_human_messages(jsonl_path: str) -> list[str]:
+    """Extract only human-typed messages from a session, stripped of noise."""
+    messages = []
+
+    with open(jsonl_path) as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            if obj.get("type") != "user":
+                continue
+
+            content = obj.get("message", {}).get("content", "")
+            text = _extract_user_text(content)
+            if not text:
+                continue
+
+            cleaned = _strip_system_noise(text)
+            if cleaned:
+                messages.append(cleaned)
+
+    return messages
+
+
+def _extract_user_text(content) -> str:
+    """Extract only text blocks from user content, skip tool results."""
+    if isinstance(content, str):
+        return content.strip()
+    if not isinstance(content, list):
+        return ""
+
+    parts = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "text":
+            text = block.get("text", "").strip()
+            if text:
+                parts.append(text)
+    return "\n".join(parts)
 
 
 def _parse_jsonl_session(jsonl_path: str) -> list[dict]:
