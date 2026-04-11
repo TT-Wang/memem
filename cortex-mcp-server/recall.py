@@ -7,7 +7,73 @@ from storage import INDEX_PATH, _find_memory, _get_telemetry, _load_obsidian_mem
 from transcripts import transcript_search
 
 
+def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 10) -> list[dict]:
+    """FTS5-first search: query SQLite index, load full memories from Obsidian."""
+    try:
+        from storage import _search_fts
+        fts_ids = _search_fts(query, scope_id or "default", limit * 2)
+        if not fts_ids:
+            return []
+
+        results = []
+        for mid in fts_ids:
+            mem = _find_memory(mid)
+            if mem and mem.get("status", "active") != "deprecated":
+                results.append(mem)
+
+        # Apply temporal + importance weighting
+        tel_scored = []
+        for mem in results:
+            tel = _get_telemetry(mem.get("id", ""))
+            last_touch = tel.get("last_accessed") or mem.get("updated_at") or mem.get("created_at", "")
+            try:
+                if last_touch:
+                    dt = datetime.fromisoformat(last_touch.replace("Z", "+00:00"))
+                    hours_old = max(0, (datetime.now(timezone.utc) - dt).total_seconds() / 3600)
+                    recency = 0.995 ** hours_old
+                else:
+                    recency = 0.5
+            except (ValueError, TypeError):
+                recency = 0.5
+
+            access_boost = min(tel.get("access_count", 0) / 10.0, 1.0)
+            importance = mem.get("importance", 3) / 5.0
+
+            # FTS already ranked by relevance, add temporal/importance boost
+            fts_rank = 1.0 - (fts_ids.index(mem.get("id", "")) / len(fts_ids))  # 1.0 for top, 0.0 for bottom
+            score = 0.5 * fts_rank + 0.15 * recency + 0.15 * access_boost + 0.2 * importance
+            tel_scored.append((score, mem))
+
+        tel_scored.sort(key=lambda x: x[0], reverse=True)
+        return [mem for _, mem in tel_scored[:limit]]
+    except Exception:
+        return []  # Fallback: caller will use file scan
+
+
 def _search_memories(query: str, scope_id: str | None = None, limit: int = 10, record_access: bool = True) -> list[dict]:
+    # Try FTS-first path
+    fts_results = _search_memories_fts(query, scope_id, limit)
+    if fts_results:
+        # Expand linked memories
+        seen_ids = {mem.get("id", "")[:8] for mem in fts_results}
+        linked = []
+        for mem in fts_results:
+            for related_id in mem.get("related", []):
+                if related_id in seen_ids:
+                    continue
+                seen_ids.add(related_id)
+                related_mem = _find_memory(related_id)
+                if related_mem:
+                    linked.append(related_mem)
+        results = (fts_results + linked)[:limit * 2]
+        if record_access:
+            for mem in results:
+                mem_id = mem.get("id", "")
+                if mem_id:
+                    _record_access(mem_id)
+        return results
+
+    # Fallback to file scan (existing code continues below)
     query_words = _word_set(query)
     if not query_words:
         return []
@@ -40,7 +106,10 @@ def _search_memories(query: str, scope_id: str | None = None, limit: int = 10, r
             access_count = tel.get("access_count", 0)
             access_boost = min(access_count / 10.0, 1.0)
 
-            score = 0.6 * keyword_score + 0.2 * recency + 0.2 * access_boost
+            importance = mem.get("importance", 3)
+            importance_score = importance / 5.0
+
+            score = 0.5 * keyword_score + 0.15 * recency + 0.15 * access_boost + 0.2 * importance_score
 
             result = dict(mem)
             scored.append((score, result))

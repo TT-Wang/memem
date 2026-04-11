@@ -25,6 +25,7 @@ from storage import (
     _find_best_match,
     _find_memory,
     _generate_index,
+    _log_event,
     _playbook_append,
     _playbook_refine,
     _make_memory,
@@ -63,6 +64,9 @@ _HAIKU_MINE_SYSTEM = (
     "future AI that needs context. (required)\n"
     '- "supersedes": (optional) string describing what prior decision this '
     "reverses — only when the session explicitly overturns something\n\n"
+    '- "importance": integer 1-5 rating how important this is for a future AI session. '
+    "1=trivial fact, 2=useful info, 3=convention/pattern, 4=architecture decision, "
+    "5=critical user preference or correction (required)\n\n"
     "SAVE these (durable knowledge):\n"
     "- User preferences, conventions, and corrections\n"
     "- Architecture decisions with rationale\n"
@@ -239,6 +243,10 @@ def _summarize_session_haiku(messages: list[str]) -> list[dict] | None:
         supersedes = item.get("supersedes")
         if supersedes and isinstance(supersedes, str) and supersedes.strip():
             entry["supersedes"] = supersedes.strip()
+        importance = item.get("importance", 3)
+        if not isinstance(importance, int) or importance < 1 or importance > 5:
+            importance = 3
+        entry["importance"] = importance
         valid_items.append(entry)
 
     return valid_items if valid_items else None
@@ -327,6 +335,7 @@ def mine_session(jsonl_path: str) -> dict:
                     merged = _merge_memories(existing.get("essence", ""), content)
                     _update_memory(existing["id"], merged, insight["title"])
                     memories_merged += 1
+                    _log_event("merge", existing["id"], merged_with=insight["title"])
                     _playbook_append(project, {"title": insight["title"], "essence": merged})
                 except (TransientMiningError, ValueError) as exc:
                     # Merge failed — skip this insight entirely, don't duplicate
@@ -352,6 +361,8 @@ def mine_session(jsonl_path: str) -> dict:
                 _save_memory(mem)
                 memories_saved += 1
                 _playbook_append(project, mem)
+                if mem.get("contradicts"):
+                    log.warning("Memory %s contradicts: %s", mem["id"][:8], mem["contradicts"])
             except ObsidianUnavailableError as exc:
                 raise FatalMiningError(str(exc)) from exc
             except Exception as exc:

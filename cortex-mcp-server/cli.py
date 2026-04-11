@@ -77,9 +77,37 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         print(f"Refined {count} playbooks")
         return
 
+    if cmd == "--rebuild-search-index":
+        from storage import _rebuild_search_index
+        count = _rebuild_search_index()
+        print(f"Search index rebuilt: {count} memories indexed")
+        return
+
     if cmd == "--eval":
         from eval import run_eval
         run_eval()
+        return
+
+    if cmd == "--events":
+        from storage import EVENT_LOG
+        if not EVENT_LOG.exists():
+            print("No events yet.")
+            return
+        lines = EVENT_LOG.read_text().splitlines()
+        for line in lines[-20:]:  # Last 20 events
+            try:
+                import json as _json
+                event = _json.loads(line)
+                ts = event.get("timestamp", "?")[:19]
+                op = event.get("op", "?")
+                mid = event.get("memory_id", "")[:8]
+                detail = ""
+                for k, v in event.items():
+                    if k not in ("op", "memory_id", "timestamp"):
+                        detail += f" {k}={v}"
+                print(f"  [{ts}] {op:10} {mid}{detail}")
+            except Exception:
+                print(f"  {line[:80]}")
         return
 
     if cmd == "--assemble-context":

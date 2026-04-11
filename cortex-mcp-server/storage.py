@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import subprocess
 import uuid
 from datetime import datetime, timezone
@@ -15,6 +16,8 @@ log = logging.getLogger("cortex-storage")
 
 CORTEX_DIR = Path(os.environ.get("CORTEX_DIR", os.path.expanduser("~/.cortex")))
 TELEMETRY_FILE = CORTEX_DIR / "telemetry.json"
+EVENT_LOG = CORTEX_DIR / "events.jsonl"
+SEARCH_DB = CORTEX_DIR / "search.db"
 SERVER_PID_FILE = CORTEX_DIR / "mcp-server.pid"
 OBSIDIAN_VAULT = Path(os.environ.get("CORTEX_OBSIDIAN_VAULT", str(Path.home() / "obsidian-brain")))
 OBSIDIAN_MEMORIES_DIR = OBSIDIAN_VAULT / "cortex" / "memories"
@@ -82,6 +85,17 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _log_event(op: str, memory_id: str = "", **details) -> None:
+    """Append an event to the audit log. Atomic for lines < PIPE_BUF."""
+    try:
+        CORTEX_DIR.mkdir(parents=True, exist_ok=True)
+        entry = {"op": op, "memory_id": memory_id, "timestamp": _now(), **details}
+        with open(EVENT_LOG, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except OSError:
+        pass  # Non-fatal — don't crash operations for logging failures
+
+
 # ---------------------------------------------------------------------------
 # Memory content security scanning
 # ---------------------------------------------------------------------------
@@ -131,7 +145,7 @@ def scan_memory_content(content: str) -> str | None:
 
 def _make_memory(content: str, title: str, tags: list[str] | None = None,
                  project: str = "general", source_type: str = "user",
-                 source_session: str = "") -> dict:
+                 source_session: str = "", importance: int = 3) -> dict:
     threat = scan_memory_content(content)
     if threat:
         raise ValueError(threat)
@@ -150,6 +164,7 @@ def _make_memory(content: str, title: str, tags: list[str] | None = None,
         "project": normalized_project,
         "source_type": source_type,
         "source_session": source_session,
+        "importance": importance,
         "created_at": _now(),
         "updated_at": _now(),
     }
@@ -211,10 +226,14 @@ def _write_obsidian_memory(mem: dict):
         f"updated: {mem.get('updated_at', '')[:10]}\n"
         f"source_type: {mem.get('source_type', 'user')}\n"
         f"source_session: {mem.get('source_session', '')}\n"
+        f"importance: {mem.get('importance', 3)}\n"
         f"status: {mem.get('status', 'active')}\n"
         f"valid_to: {mem.get('valid_to', '')}\n"
-        f"---"
     )
+    contradicts = mem.get("contradicts", [])
+    if contradicts:
+        frontmatter += f"contradicts: [{', '.join(contradicts)}]\n"
+    frontmatter += "---"
 
     body = f"\n\n{mem.get('essence', '')}"
     filepath = OBSIDIAN_MEMORIES_DIR / filename
@@ -256,6 +275,7 @@ def _parse_obsidian_memory_file(md_file: Path) -> dict | None:
         "access_count": 0,
         "last_accessed": "",
         "updated_at": "",
+        "importance": 3,
     }
 
     if content.startswith("---"):
@@ -298,6 +318,13 @@ def _parse_obsidian_memory_file(md_file: Path) -> dict | None:
                     mem["status"] = value
                 elif key == "valid_to":
                     mem["valid_to"] = value
+                elif key == "contradicts":
+                    mem["contradicts"] = _parse_obsidian_tags(value)  # reuse existing tag parser
+                elif key == "importance":
+                    try:
+                        mem["importance"] = int(value)
+                    except (ValueError, TypeError):
+                        mem["importance"] = 3
 
     mem["essence"] = body
     mem["full_record"] = body  # read-time alias for essence — not stored in markdown
@@ -432,6 +459,93 @@ def _containment(a: set, b: set) -> float:
     return overlap / smaller if smaller else 0.0
 
 
+def _init_search_db() -> sqlite3.Connection:
+    """Initialize SQLite FTS5 search index. Returns connection."""
+    CORTEX_DIR.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(SEARCH_DB))
+    conn.execute(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts "
+        "USING fts5(memory_id, title, essence, project, tags)"
+    )
+    conn.commit()
+    return conn
+
+
+def _index_memory(mem: dict) -> None:
+    """Upsert a memory into the FTS5 search index."""
+    try:
+        conn = _init_search_db()
+        mid = mem.get("id", "")
+        conn.execute("DELETE FROM memories_fts WHERE memory_id = ?", (mid,))
+        conn.execute(
+            "INSERT INTO memories_fts (memory_id, title, essence, project, tags) VALUES (?, ?, ?, ?, ?)",
+            (mid, mem.get("title", ""), mem.get("essence", ""), mem.get("project", "general"),
+             " ".join(mem.get("domain_tags", []))),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as exc:
+        log.warning("FTS index failed for %s: %s", mem.get("id", "")[:8], exc)
+
+
+def _remove_from_index(memory_id: str) -> None:
+    """Remove a memory from the FTS5 search index."""
+    try:
+        conn = _init_search_db()
+        conn.execute("DELETE FROM memories_fts WHERE memory_id = ?", (memory_id,))
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+def _search_fts(query: str, scope_id: str = "default", limit: int = 20) -> list[str]:
+    """FTS5 search, returns list of memory IDs ranked by relevance."""
+    try:
+        conn = _init_search_db()
+        normalized = _normalize_scope_id(scope_id)
+        # Escape FTS5 special chars
+        safe_query = query.replace('"', '""')
+        if normalized != "general":
+            cursor = conn.execute(
+                "SELECT memory_id FROM memories_fts WHERE memories_fts MATCH ? AND project = ? ORDER BY rank LIMIT ?",
+                (safe_query, normalized, limit),
+            )
+        else:
+            cursor = conn.execute(
+                "SELECT memory_id FROM memories_fts WHERE memories_fts MATCH ? ORDER BY rank LIMIT ?",
+                (safe_query, limit),
+            )
+        results = [row[0] for row in cursor.fetchall()]
+        conn.close()
+        return results
+    except Exception as exc:
+        log.debug("FTS search failed: %s", exc)
+        return []
+
+
+def _rebuild_search_index() -> int:
+    """Rebuild the FTS5 index from all active Obsidian memories. Returns count."""
+    try:
+        conn = _init_search_db()
+        conn.execute("DELETE FROM memories_fts")
+        count = 0
+        for mem in _obsidian_memories():
+            mid = mem.get("id", "")
+            conn.execute(
+                "INSERT INTO memories_fts (memory_id, title, essence, project, tags) VALUES (?, ?, ?, ?, ?)",
+                (mid, mem.get("title", ""), mem.get("essence", ""), mem.get("project", "general"),
+                 " ".join(mem.get("domain_tags", []))),
+            )
+            count += 1
+        conn.commit()
+        conn.close()
+        return count
+    except Exception as exc:
+        log.warning("FTS rebuild failed: %s", exc)
+        return 0
+
+
 def _find_best_match(content: str, scope_id: str = "default") -> tuple[dict | None, float]:
     """Return (best_mem, best_score) for the closest existing memory to content.
 
@@ -513,12 +627,65 @@ def _is_duplicate(content: str, scope_id: str = "default", threshold: float = 0.
     return None if return_match else False
 
 
+_NEGATION_SIGNALS = {
+    "removed", "no longer", "replaced", "deprecated", "instead of",
+    "stopped using", "switched from", "ripped out", "deleted",
+    "no more", "eliminated", "dropped", "abandoned", "reversed",
+}
+
+
+def _check_contradictions(content: str, scope_id: str = "default") -> list[dict]:
+    """Check if new content contradicts existing memories. Returns list of conflicts."""
+    content_lower = content.lower()
+
+    # Check if new content contains negation signals
+    has_negation = any(signal in content_lower for signal in _NEGATION_SIGNALS)
+    if not has_negation:
+        return []  # No negation in new content — skip expensive search
+
+    # Find similar existing memories
+    try:
+        fts_ids = _search_fts(content[:200], scope_id, 5)
+        candidates = [_find_memory(mid) for mid in fts_ids if _find_memory(mid)]
+    except Exception:
+        # FTS unavailable — use content match
+        match, score = _find_best_match(content, scope_id)
+        candidates = [match] if match and score > 0.2 else []
+
+    contradictions = []
+    for mem in candidates:
+        if not mem:
+            continue
+        mem_lower = mem.get("essence", "").lower()
+        # Check if existing memory and new content have opposing signals
+        # New says "removed X" and old says "use X" (or vice versa)
+        for signal in _NEGATION_SIGNALS:
+            if signal in content_lower and signal not in mem_lower:
+                # New content negates something, existing doesn't — possible contradiction
+                contradictions.append({
+                    "memory_id": mem.get("id", "")[:8],
+                    "title": mem.get("title", "")[:60],
+                    "reason": f"new content contains '{signal}' about a topic the existing memory affirms",
+                })
+                break
+
+    return contradictions
+
+
 def _save_memory(mem: dict):
     """Save memory to Obsidian vault."""
     _require_obsidian_writable()
+
+    # Check for contradictions
+    contradictions = _check_contradictions(mem.get("essence", ""), mem.get("project", "default"))
+    if contradictions:
+        mem["contradicts"] = [c["memory_id"] for c in contradictions]
+
     _write_obsidian_memory(mem)
     if INDEX_PATH.exists():
         _append_or_update_index_line(mem)
+    _log_event("save", mem.get("id", ""), title=mem.get("title", ""))
+    _index_memory(mem)
 
     # Compute and store related memory links
     content = mem.get("essence", "")
@@ -538,6 +705,8 @@ def _delete_memory(memory_id: str) -> bool:
             if obsidian_path.exists():
                 obsidian_path.unlink()
         _remove_index_line(memory_id)
+        _log_event("delete", memory_id)
+        _remove_from_index(memory_id)
         return True
     except Exception:
         return False
@@ -552,6 +721,8 @@ def _deprecate_memory(memory_id: str, reason: str = "superseded") -> bool:
     mem["valid_to"] = _now()
     _write_obsidian_memory(mem)
     _remove_index_line(memory_id)
+    _log_event("deprecate", memory_id, reason=reason)
+    _remove_from_index(memory_id)
     return True
 
 
@@ -711,6 +882,8 @@ def _update_memory(memory_id: str, new_content: str, new_title: str = "") -> Non
     mem["updated_at"] = _now()
     _write_obsidian_memory(mem)
     _append_or_update_index_line(mem)
+    _log_event("update", memory_id)
+    _index_memory(mem)
 
 
 def _get_telemetry(memory_id: str) -> dict:
@@ -844,6 +1017,7 @@ def _playbook_refine(project: str) -> None:
             combined = f"# {project} — Project Playbook\nUpdated: {today}\n\n{combined}"
         PLAYBOOK_DIR.mkdir(parents=True, exist_ok=True)
         playbook_path.write_text(combined + "\n")
+        _log_event("refine", project=project)
         # Clear staging
         if staging_path.exists():
             staging_path.unlink()
@@ -877,6 +1051,7 @@ def _playbook_refine(project: str) -> None:
     refined += f"\n\n<!-- refined:{new_hash} -->\n"
     PLAYBOOK_DIR.mkdir(parents=True, exist_ok=True)
     playbook_path.write_text(refined)
+    _log_event("refine", project=project)
 
     # Clear staging after successful compile
     if staging_path.exists():
