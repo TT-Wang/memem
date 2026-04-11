@@ -45,9 +45,42 @@ def _cleanup_pid_file(path: Path, pid: int):
         pass
 
 
+def _ensure_vault_exists():
+    """Create Obsidian vault directories if they don't exist."""
+    OBSIDIAN_MEMORIES_DIR.mkdir(parents=True, exist_ok=True)
+    INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
+    PLAYBOOK_DIR.mkdir(parents=True, exist_ok=True)
+    CORTEX_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _auto_start_miner():
+    """Start the miner daemon if not already running."""
+    try:
+        wrapper = Path(__file__).resolve().parent / "miner-wrapper.sh"
+        if not wrapper.exists():
+            return
+        # Check if already running
+        result = subprocess.run(
+            ["bash", str(wrapper), "status"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if "running" in result.stdout.lower():
+            return
+        # Start it
+        subprocess.Popen(
+            ["bash", str(wrapper), "start"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        log.info("Auto-started miner daemon")
+    except Exception:
+        pass  # Non-fatal — miner is optional
+
+
 def _register_server_pid():
+    _ensure_vault_exists()
     pid = os.getpid()
     SERVER_PID_FILE.write_text(str(pid))
+    _auto_start_miner()
 
     def _cleanup():
         _cleanup_pid_file(SERVER_PID_FILE, pid)

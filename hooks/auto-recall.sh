@@ -88,35 +88,47 @@ if assembled:
     )
     output = "Cortex context briefing:\n\n" + assembled + "\n\n---\n" + suffix
 else:
-    # Fallback — dump index + playbook (original behavior)
-    index = Path(index_path).read_text()
+    # Fallback — check if memories exist at all
+    index = Path(index_path).read_text() if Path(index_path).exists() else ""
+    memories_dir = Path(vault) / "cortex" / "memories"
+    memory_count = len(list(memories_dir.glob("*.md"))) if memories_dir.exists() else 0
 
-    playbook_dir = Path(vault) / "cortex" / "playbooks"
-    playbook_text = ""
-    if playbook_dir.exists():
-        for pb_file in sorted(playbook_dir.glob("*.md")):
-            content = pb_file.read_text().strip()
-            if content:
-                # Strip the hash comment at the end
-                lines = content.split("\n")
-                if lines and lines[-1].strip().startswith("<!-- cortex-hash:"):
-                    content = "\n".join(lines[:-1]).strip()
-                project_name = pb_file.stem
-                playbook_text += f"\n## Project Playbook: {project_name}\n\n{content}\n\n"
+    if memory_count == 0:
+        # Brand new user — helpful onboarding message
+        output = (
+            "Cortex memory is active but empty — this is your first session. "
+            "Cortex will start learning automatically:\n\n"
+            "1. As you work, save important lessons with memory_save\n"
+            "2. After this session ends, the background miner will extract knowledge\n"
+            "3. Future sessions will start with relevant context pre-loaded\n\n"
+            "Available tools: memory_save, memory_recall, memory_list, "
+            "memory_import, transcript_search, context_assemble"
+        )
+    else:
+        # Has memories but assembly failed — dump index + playbook
+        playbook_dir = Path(vault) / "cortex" / "playbooks"
+        playbook_text = ""
+        if playbook_dir.exists():
+            for pb_file in sorted(playbook_dir.glob("*.md")):
+                content = pb_file.read_text().strip()
+                if content:
+                    lines = content.split("\n")
+                    if lines and (lines[-1].strip().startswith("<!-- cortex-hash:") or lines[-1].strip().startswith("<!-- refined:")):
+                        content = "\n".join(lines[:-1]).strip()
+                    project_name = pb_file.stem
+                    playbook_text += f"\n## Project Playbook: {project_name}\n\n{content}\n\n"
 
-    suffix = (
-        "Above is your memory index. IMPORTANT: Do not just skim the titles — "
-        "actively use the Cortex MCP tools (memory_recall, memory_list, context_assemble) "
-        "to fetch full content of memories relevant to the user's request. "
-        "When saving memories, ALWAYS dual-write: save to Cortex (via memory_save) AND "
-        "to Claude Code's built-in auto memory system."
-    )
+        suffix = (
+            "Above is your memory index. Use Cortex MCP tools (memory_recall, "
+            "memory_list, context_assemble) for deeper recall. "
+            "Save lessons with memory_save as you work."
+        )
 
-    parts = []
-    if playbook_text:
-        parts.append("Cortex project playbooks (curated knowledge):\n" + playbook_text + "---\n")
-    parts.append("Cortex memory index (your full memory catalog):\n\n" + index + "\n\n---\n" + suffix)
-    output = "\n".join(parts)
+        parts = []
+        if playbook_text:
+            parts.append("Cortex project playbooks (curated knowledge):\n" + playbook_text + "---\n")
+        parts.append("Cortex memory index (" + str(memory_count) + " memories):\n\n" + index + "\n\n---\n" + suffix)
+        output = "\n".join(parts)
 
 print(json.dumps({
     "hookSpecificOutput": {

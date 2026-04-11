@@ -119,6 +119,40 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         print(context_assemble(query, project))
         return
 
+    if cmd == "--status":
+        from storage import (
+            OBSIDIAN_MEMORIES_DIR, OBSIDIAN_VAULT, CORTEX_DIR,
+            SEARCH_DB, TELEMETRY_FILE, EVENT_LOG, PLAYBOOK_DIR,
+            _obsidian_memories,
+        )
+        # Memory stats
+        all_mems = _obsidian_memories(include_deprecated=True)
+        active = sum(1 for m in all_mems if m.get("status", "active") == "active")
+        deprecated = sum(1 for m in all_mems if m.get("status") == "deprecated")
+        mined = sum(1 for m in all_mems if m.get("source_type") == "mined")
+        user = sum(1 for m in all_mems if m.get("source_type") == "user")
+        projects = len(set(m.get("project", "general") for m in all_mems))
+        with_related = sum(1 for m in all_mems if m.get("related"))
+
+        print("Cortex Status")
+        print("=" * 40)
+        print(f"  Vault:     {OBSIDIAN_VAULT}")
+        print(f"  Data:      {CORTEX_DIR}")
+        print(f"  Memories:  {active} active, {deprecated} deprecated")
+        print(f"  Sources:   {mined} mined, {user} user")
+        print(f"  Projects:  {projects}")
+        print(f"  Linked:    {with_related} ({with_related * 100 // len(all_mems) if all_mems else 0}%)")
+        print(f"  Search DB: {'yes' if SEARCH_DB.exists() else 'no'} ({SEARCH_DB.stat().st_size // 1024}KB)" if SEARCH_DB.exists() else "  Search DB: not built")
+        print(f"  Playbooks: {len(list(PLAYBOOK_DIR.glob('*.md')))} projects" if PLAYBOOK_DIR.exists() else "  Playbooks: none")
+        print(f"  Events:    {sum(1 for _ in open(EVENT_LOG)) if EVENT_LOG.exists() else 0} logged")
+
+        # Miner status
+        wrapper = str(Path(__file__).resolve().parent / "miner-wrapper.sh")
+        result = subprocess.run(["bash", wrapper, "status"], capture_output=True, text=True, timeout=5)
+        print(f"  Miner:     {result.stdout.strip()}")
+        print("=" * 40)
+        return
+
     if cmd in ("--miner-start", "--miner-stop", "--miner-status"):
         wrapper = str(Path(__file__).resolve().parent / "miner-wrapper.sh")
         action = cmd.replace("--miner-", "")
