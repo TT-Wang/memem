@@ -34,47 +34,82 @@ find "$SESSION_MARKER_DIR" -type f -mtime +7 -delete 2>/dev/null || true
 VAULT="${CORTEX_OBSIDIAN_VAULT:-$HOME/obsidian-brain}"
 INDEX="$VAULT/cortex/_index.md"
 if [ -f "$INDEX" ]; then
-  python3 - "$INDEX" "$VAULT" << 'HOOKPY'
-import sys, json
+  python3 - "$INDEX" "$VAULT" "$INPUT" << 'HOOKPY'
+import sys, json, subprocess, os
 from pathlib import Path
 
 index_path = sys.argv[1]
 vault = sys.argv[2]
-index = Path(index_path).read_text()
+input_data = sys.argv[3] if len(sys.argv) > 3 else ""
 
-# Inject project playbooks if they exist
-playbook_dir = Path(vault) / "cortex" / "playbooks"
-playbook_text = ""
-if playbook_dir.exists():
-    for pb_file in sorted(playbook_dir.glob("*.md")):
-        content = pb_file.read_text().strip()
-        if content:
-            # Strip the hash comment at the end
-            lines = content.split("\n")
-            if lines and lines[-1].strip().startswith("<!-- cortex-hash:"):
-                content = "\n".join(lines[:-1]).strip()
-            project_name = pb_file.stem
-            playbook_text += f"\n## Project Playbook: {project_name}\n\n{content}\n\n"
+# Resolve server.py path
+plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
+if plugin_root:
+    server_path = str(Path(plugin_root) / "cortex-mcp-server" / "server.py")
+else:
+    server_path = str(Path(index_path).resolve().parent.parent / "cortex-mcp-server" / "server.py")
 
-suffix = (
-    "Above is your memory index. IMPORTANT: Do not just skim the titles — "
-    "actively use the Cortex MCP tools (memory_recall, memory_list) to fetch "
-    "full content of memories relevant to the user's request. The index is a "
-    "lookup table, not the knowledge itself. You can also read Obsidian markdown "
-    "files directly at " + vault + "/cortex/memories/<filename>.md "
-    "(filename is slugified title + ID, e.g. cortex-uses-pytest-for-testing-43a80bdd.md). "
-    "Default behavior: identify relevant memories from the index, then recall their "
-    "full content before responding. "
-    "When saving memories, ALWAYS dual-write: save to Cortex (via memory_save) AND "
-    "to Claude Code's built-in auto memory system. This ensures memories persist in "
-    "both systems."
-)
+# Extract user message from hook input
+message = ""
+try:
+    hook_input = json.loads(input_data) if input_data else {}
+    message = hook_input.get("message", hook_input.get("query", ""))
+except (json.JSONDecodeError, TypeError):
+    pass
 
-parts = []
-if playbook_text:
-    parts.append("Cortex project playbooks (curated knowledge):\n" + playbook_text + "---\n")
-parts.append("Cortex memory index (your full memory catalog):\n\n" + index + "\n\n---\n" + suffix)
-output = "\n".join(parts)
+# Try context assembly if we have a message
+assembled = ""
+if message:
+    try:
+        result = subprocess.run(
+            [sys.executable, server_path, "--assemble-context", message, "default"],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            assembled = result.stdout.strip()
+    except Exception:
+        pass
+
+if assembled:
+    # Assembly succeeded — inject the tailored brief
+    suffix = (
+        "Above is a query-tailored context briefing assembled by Cortex. "
+        "For deeper recall, use Cortex MCP tools (memory_recall, memory_list, "
+        "context_assemble). When saving memories, ALWAYS dual-write: save to "
+        "Cortex (via memory_save) AND to Claude Code's built-in auto memory system."
+    )
+    output = "Cortex context briefing:\n\n" + assembled + "\n\n---\n" + suffix
+else:
+    # Fallback — dump index + playbook (original behavior)
+    index = Path(index_path).read_text()
+
+    playbook_dir = Path(vault) / "cortex" / "playbooks"
+    playbook_text = ""
+    if playbook_dir.exists():
+        for pb_file in sorted(playbook_dir.glob("*.md")):
+            content = pb_file.read_text().strip()
+            if content:
+                # Strip the hash comment at the end
+                lines = content.split("\n")
+                if lines and lines[-1].strip().startswith("<!-- cortex-hash:"):
+                    content = "\n".join(lines[:-1]).strip()
+                project_name = pb_file.stem
+                playbook_text += f"\n## Project Playbook: {project_name}\n\n{content}\n\n"
+
+    suffix = (
+        "Above is your memory index. IMPORTANT: Do not just skim the titles — "
+        "actively use the Cortex MCP tools (memory_recall, memory_list, context_assemble) "
+        "to fetch full content of memories relevant to the user's request. "
+        "When saving memories, ALWAYS dual-write: save to Cortex (via memory_save) AND "
+        "to Claude Code's built-in auto memory system."
+    )
+
+    parts = []
+    if playbook_text:
+        parts.append("Cortex project playbooks (curated knowledge):\n" + playbook_text + "---\n")
+    parts.append("Cortex memory index (your full memory catalog):\n\n" + index + "\n\n---\n" + suffix)
+    output = "\n".join(parts)
+
 print(json.dumps({
     "hookSpecificOutput": {
         "hookEventName": "UserPromptSubmit",

@@ -47,6 +47,17 @@ def transcript_search(query: str, limit: int = 5) -> str:
     return _transcript_search(query, limit=limit)
 
 
+@mcp.tool()
+def context_assemble(query: str, project: str = "default") -> str:
+    """Assemble a query-tailored context briefing from all available knowledge.
+
+    Uses memories, playbooks, and session history to produce a comprehensive
+    briefing for the given query. Returns formatted markdown.
+    """
+    from storage import context_assemble as _assemble
+    return _assemble(query, project)
+
+
 if __name__ == "__main__":
     import sys
 

@@ -916,3 +916,83 @@ def _consolidate_project(project: str) -> dict:
             deleted_count += 1
 
     return {"merged": merged_count, "deleted": deleted_count}
+
+
+_ASSEMBLE_SYSTEM = (
+    "You are a context assembly engine. Given a user's query and raw knowledge "
+    "materials, produce a comprehensive briefing that contains everything an AI "
+    "assistant would need to answer the query well. Include all relevant facts, "
+    "decisions, conventions, and context. Exclude anything unrelated to the query. "
+    "Format as clean markdown. Be thorough — include everything relevant, but "
+    "nothing that isn't. Output ONLY the briefing, no meta-commentary."
+)
+
+
+def context_assemble(query: str, project: str = "default") -> str:
+    """Assemble a query-tailored context briefing from all available knowledge.
+
+    Gathers playbook, relevant memories, and session history, then uses Haiku
+    to produce a focused briefing for the given query.
+    """
+    normalized = _normalize_scope_id(project)
+
+    # Load playbook if exists
+    playbook_content = ""
+    playbook_path = PLAYBOOK_DIR / f"{normalized}.md"
+    if playbook_path.exists():
+        try:
+            content = playbook_path.read_text().strip()
+            # Strip hash comment at end
+            lines = content.split("\n")
+            if lines and lines[-1].strip().startswith("<!-- cortex-hash:"):
+                content = "\n".join(lines[:-1]).strip()
+            playbook_content = content
+        except OSError:
+            pass
+
+    # Get relevant memories (lazy import to avoid circular dep)
+    from recall import _search_memories
+    memories = _search_memories(query, scope_id=normalized, limit=20)
+
+    # Get transcript search results (lazy import)
+    from transcripts import transcript_search
+    transcript_results = transcript_search(query, limit=3)
+
+    # Format materials
+    parts = []
+    parts.append(f"PLAYBOOK:\n{playbook_content or 'No playbook available'}")
+
+    if memories:
+        mem_lines = []
+        for mem in memories:
+            title = mem.get("title", "Untitled")
+            essence = mem.get("essence", mem.get("full_record", ""))
+            mem_lines.append(f"## {title}\n{essence}")
+        parts.append(f"RELEVANT MEMORIES:\n" + "\n\n".join(mem_lines))
+
+    if transcript_results and "No matching" not in transcript_results:
+        parts.append(f"RELATED SESSIONS:\n{transcript_results}")
+
+    materials = "\n\n".join(parts)
+    # Cap at 50K chars
+    if len(materials) > 50000:
+        materials = materials[:50000]
+
+    prompt = f"QUERY: {query}\n\n{materials}"
+
+    # Haiku assembles the brief
+    try:
+        result = subprocess.run(
+            ["claude", "-p", "--model", "haiku", "--tools", "", "--system-prompt", _ASSEMBLE_SYSTEM],
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except Exception:
+        return playbook_content or ""
+
+    if result.returncode != 0 or not result.stdout.strip():
+        return playbook_content or ""
+
+    return result.stdout.strip()

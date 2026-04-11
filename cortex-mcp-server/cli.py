@@ -78,6 +78,16 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         print(f"Rebuilt {count} playbooks")
         return
 
+    if cmd == "--assemble-context":
+        query = argv[2] if len(argv) >= 3 else ""
+        project = argv[3] if len(argv) >= 4 else "default"
+        if not query:
+            print("No query provided.")
+            return
+        from storage import context_assemble
+        print(context_assemble(query, project))
+        return
+
     if cmd in ("--miner-start", "--miner-stop", "--miner-status"):
         wrapper = str(Path(__file__).resolve().parent / "miner-wrapper.sh")
         action = cmd.replace("--miner-", "")
