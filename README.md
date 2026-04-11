@@ -4,19 +4,53 @@ Persistent memory and context assembly for Claude Code. Remembers across session
 
 ## Install
 
+### Step 1: Install the plugin
+
 ```bash
 claude plugin marketplace add TT-Wang/cortex-plugin
 claude plugin install cortex@cortex-marketplace
 ```
 
-**First-run setup:**
-```bash
-# Create Obsidian vault (or point CORTEX_OBSIDIAN_VAULT to your existing vault)
-mkdir -p ~/obsidian-brain/cortex/memories
+### Step 2: Install Obsidian (optional but recommended)
 
-# Start the background miner
-bash ~/.claude/plugins/cache/cortex-marketplace/cortex/*/cortex-mcp-server/miner-wrapper.sh start
+Cortex stores memories as markdown files in an Obsidian vault. You don't *need* Obsidian to use Cortex — it works with plain files. But Obsidian lets you browse, search, and visualize your AI's knowledge.
+
+**Download Obsidian:** https://obsidian.md (free for personal use, Mac/Windows/Linux)
+
+After installing:
+1. Open Obsidian
+2. Choose "Open folder as vault"
+3. Select `~/obsidian-brain` (Cortex creates this automatically on first run)
+4. Your memories will appear under `cortex/memories/` as markdown files
+5. Project playbooks appear under `cortex/playbooks/`
+
+**Useful Obsidian features for Cortex:**
+- **Graph view** — see how memories link to each other via the `related` field
+- **Search** — full-text search across all memories
+- **Dataview plugin** — query memories by frontmatter fields (importance, project, status)
+- **Tags** — click any tag to see related memories
+
+### Step 3: Verify setup
+
+Start Claude Code and the plugin loads automatically. Or check manually:
+
+```bash
+# Check status (run from the plugin directory)
+python3 ~/.claude/plugins/cache/cortex-marketplace/cortex/*/cortex-mcp-server/server.py --status
 ```
+
+The miner daemon starts automatically when the MCP server loads. The vault directory (`~/obsidian-brain/cortex/`) is created automatically on first run.
+
+### Custom vault location
+
+If you already have an Obsidian vault elsewhere:
+
+```bash
+# In your shell profile (~/.bashrc or ~/.zshrc)
+export CORTEX_OBSIDIAN_VAULT="$HOME/my-obsidian-vault"
+```
+
+Cortex will create a `cortex/memories/` folder inside your existing vault.
 
 ## What it does
 
