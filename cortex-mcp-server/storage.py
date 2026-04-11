@@ -56,20 +56,24 @@ def _ensure_vault_exists():
 def _auto_start_miner():
     """Start the miner daemon if not already running."""
     try:
+        miner_pid_file = CORTEX_DIR / "miner.pid"
+        # Check if daemon is already running via PID file
+        if miner_pid_file.exists():
+            try:
+                pid = int(miner_pid_file.read_text().strip())
+                if _pid_is_running(pid):
+                    return  # Already running
+            except (ValueError, OSError):
+                pass
+
         wrapper = Path(__file__).resolve().parent / "miner-wrapper.sh"
         if not wrapper.exists():
             return
-        # Check if already running
-        result = subprocess.run(
-            ["bash", str(wrapper), "status"],
-            capture_output=True, text=True, timeout=5,
-        )
-        if "running" in result.stdout.lower():
-            return
-        # Start it
+        # Start via wrapper — use setsid to fully detach from parent
         subprocess.Popen(
-            ["bash", str(wrapper), "start"],
+            ["setsid", "bash", str(wrapper), "start"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
         )
         log.info("Auto-started miner daemon")
     except Exception:
