@@ -94,15 +94,34 @@ else:
     memory_count = len(list(memories_dir.glob("*.md"))) if memories_dir.exists() else 0
 
     if memory_count == 0:
-        # Brand new user — helpful onboarding message
+        # Brand new user — welcome + onboarding
         output = (
-            "Cortex memory is active but empty — this is your first session. "
-            "Cortex will start learning automatically:\n\n"
-            "1. As you work, save important lessons with memory_save\n"
-            "2. After this session ends, the background miner will extract knowledge\n"
-            "3. Future sessions will start with relevant context pre-loaded\n\n"
-            "Available tools: memory_save, memory_recall, memory_list, "
-            "memory_import, transcript_search, context_assemble"
+            "```\n"
+            "  ██████╗ ██████╗ ██████╗ ████████╗███████╗██╗  ██╗\n"
+            " ██╔════╝██╔═══██╗██╔══██╗╚══██╔══╝██╔════╝╚██╗██╔╝\n"
+            " ██║     ██║   ██║██████╔╝   ██║   █████╗   ╚███╔╝ \n"
+            " ██║     ██║   ██║██╔══██╗   ██║   ██╔══╝   ██╔██╗ \n"
+            " ╚██████╗╚██████╔╝██║  ██║   ██║   ███████╗██╔╝ ██╗\n"
+            "  ╚═════╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ╚══════╝╚═╝  ╚═╝\n"
+            "  persistent memory for AI\n"
+            "```\n\n"
+            "Welcome to Cortex! This is your first session with persistent memory enabled.\n\n"
+            "**How it works:**\n"
+            "- Every session you have builds your memory. Decisions, preferences, lessons, "
+            "and conventions are automatically extracted and stored.\n"
+            "- Future sessions start with relevant context pre-loaded — no more repeating yourself.\n"
+            "- The more you work, the smarter it gets.\n\n"
+            "**Getting started:**\n"
+            "1. Just work normally — Cortex runs in the background\n"
+            "2. To save something important now: use `memory_save`\n"
+            "3. To search past knowledge: use `memory_recall`\n"
+            "4. To get a tailored briefing: use `context_assemble`\n\n"
+            "**What happens next:**\n"
+            "- After this session ends, the miner daemon extracts durable knowledge from your conversation\n"
+            "- Next session, you'll see a context briefing tailored to your first message\n"
+            "- Over time, playbooks build per project — curated, self-evolving knowledge\n\n"
+            "Available tools: `memory_save`, `memory_recall`, `memory_list`, "
+            "`memory_import`, `transcript_search`, `context_assemble`"
         )
     else:
         # Has memories but assembly failed — dump index + playbook
