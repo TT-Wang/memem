@@ -338,6 +338,7 @@ def mine_session(jsonl_path: str) -> dict:
                     tags=tags,
                     project=project,
                     source_type="mined",
+                    source_session=session_id[:8],
                 )
                 mem["id"] = _stable_mined_memory_id(session_id, insight["title"], content)
                 _save_memory(mem)

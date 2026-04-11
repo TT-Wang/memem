@@ -126,7 +126,8 @@ def scan_memory_content(content: str) -> str | None:
 
 
 def _make_memory(content: str, title: str, tags: list[str] | None = None,
-                 project: str = "general", source_type: str = "user") -> dict:
+                 project: str = "general", source_type: str = "user",
+                 source_session: str = "") -> dict:
     threat = scan_memory_content(content)
     if threat:
         raise ValueError(threat)
@@ -144,7 +145,11 @@ def _make_memory(content: str, title: str, tags: list[str] | None = None,
         "domain_tags": tags or [],
         "project": normalized_project,
         "source_type": source_type,
+        "source_session": source_session,
         "created_at": _now(),
+        "updated_at": _now(),
+        "access_count": 0,
+        "last_accessed": "",
     }
 
 
@@ -189,19 +194,23 @@ def _write_obsidian_memory(mem: dict):
     clean_title = re.sub(r"^\[[^\]]+\]\s*", "", mem.get("title", "Untitled"))
     project = mem.get("project", "general")
 
-    related = mem.get("related")
-    related_line = ""
-    if related and isinstance(related, list) and len(related) > 0:
-        related_line = f"related: [{', '.join(related)}]\n"
-
     frontmatter = (
         f"---\n"
         f"id: {mem['id']}\n"
         f"title: {_yaml_escape(clean_title)}\n"
         f"project: {project}\n"
         f"tags: [{', '.join(tags)}]\n"
-        f"{related_line}"
+    )
+    related = mem.get("related", [])
+    if related:
+        frontmatter += f"related: [{', '.join(related)}]\n"
+    frontmatter += (
         f"created: {mem.get('created_at', '')[:10]}\n"
+        f"updated: {mem.get('updated_at', '')[:10]}\n"
+        f"source_type: {mem.get('source_type', 'user')}\n"
+        f"source_session: {mem.get('source_session', '')}\n"
+        f"access_count: {mem.get('access_count', 0)}\n"
+        f"last_accessed: {mem.get('last_accessed', '')}\n"
         f"---"
     )
 
@@ -238,6 +247,11 @@ def _parse_obsidian_memory_file(md_file: Path) -> dict | None:
         "domain_tags": [],
         "created_at": "",
         "file": str(md_file),
+        "source_type": "user",
+        "source_session": "",
+        "access_count": 0,
+        "last_accessed": "",
+        "updated_at": "",
     }
 
     if content.startswith("---"):
@@ -263,9 +277,24 @@ def _parse_obsidian_memory_file(md_file: Path) -> dict | None:
                     mem["related"] = _parse_obsidian_tags(value)
                 elif key == "created":
                     mem["created_at"] = value
+                elif key == "updated":
+                    mem["updated_at"] = value
+                elif key == "source_type":
+                    mem["source_type"] = value
+                elif key == "source_session":
+                    mem["source_session"] = value
+                elif key == "access_count":
+                    try:
+                        mem["access_count"] = int(value)
+                    except (ValueError, TypeError):
+                        mem["access_count"] = 0
+                elif key == "last_accessed":
+                    mem["last_accessed"] = value
 
     mem["essence"] = body
     mem["full_record"] = body  # read-time alias for essence — not stored in markdown
+    if not mem["updated_at"]:
+        mem["updated_at"] = mem.get("created_at", "")
     if not mem["title"] or mem["title"] == md_file.stem:
         first_line = next((line.strip() for line in body.splitlines() if line.strip()), "")
         mem["title"] = first_line[:120] if first_line else mem["id"]
@@ -274,7 +303,7 @@ def _parse_obsidian_memory_file(md_file: Path) -> dict | None:
         mem["source_type"] = "import"
     elif "mined" in mem["domain_tags"]:
         mem["source_type"] = "mined"
-    else:
+    elif not mem.get("source_type"):
         mem["source_type"] = "user"
 
     return mem
@@ -601,8 +630,19 @@ def _update_memory(memory_id: str, new_content: str, new_title: str = "") -> Non
     mem["essence"] = new_content
     if new_title:
         mem["title"] = new_title
+    mem["updated_at"] = _now()
     _write_obsidian_memory(mem)
     _append_or_update_index_line(mem)
+
+
+def _record_access(memory_id: str) -> None:
+    """Increment access_count and update last_accessed for a memory. No index update."""
+    mem = _find_memory(memory_id)
+    if mem is None:
+        return
+    mem["access_count"] = mem.get("access_count", 0) + 1
+    mem["last_accessed"] = _now()
+    _write_obsidian_memory(mem)
 
 
 def purge_mined_memories(mined_sessions_file: Path) -> dict:
