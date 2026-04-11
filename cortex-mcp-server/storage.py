@@ -1,4 +1,5 @@
 import atexit
+import fcntl
 import hashlib
 import json
 import logging
@@ -13,11 +14,13 @@ log = logging.getLogger("cortex-storage")
 
 
 CORTEX_DIR = Path(os.environ.get("CORTEX_DIR", os.path.expanduser("~/.cortex")))
+TELEMETRY_FILE = CORTEX_DIR / "telemetry.json"
 SERVER_PID_FILE = CORTEX_DIR / "mcp-server.pid"
 OBSIDIAN_VAULT = Path(os.environ.get("CORTEX_OBSIDIAN_VAULT", str(Path.home() / "obsidian-brain")))
 OBSIDIAN_MEMORIES_DIR = OBSIDIAN_VAULT / "cortex" / "memories"
 INDEX_PATH = OBSIDIAN_VAULT / "cortex" / "_index.md"
 PLAYBOOK_DIR = OBSIDIAN_VAULT / "cortex" / "playbooks"
+PLAYBOOK_STAGING_DIR = PLAYBOOK_DIR / ".staging"
 
 
 def _pid_is_running(pid: int) -> bool:
@@ -149,8 +152,6 @@ def _make_memory(content: str, title: str, tags: list[str] | None = None,
         "source_session": source_session,
         "created_at": _now(),
         "updated_at": _now(),
-        "access_count": 0,
-        "last_accessed": "",
     }
 
 
@@ -210,8 +211,8 @@ def _write_obsidian_memory(mem: dict):
         f"updated: {mem.get('updated_at', '')[:10]}\n"
         f"source_type: {mem.get('source_type', 'user')}\n"
         f"source_session: {mem.get('source_session', '')}\n"
-        f"access_count: {mem.get('access_count', 0)}\n"
-        f"last_accessed: {mem.get('last_accessed', '')}\n"
+        f"status: {mem.get('status', 'active')}\n"
+        f"valid_to: {mem.get('valid_to', '')}\n"
         f"---"
     )
 
@@ -249,6 +250,8 @@ def _parse_obsidian_memory_file(md_file: Path) -> dict | None:
         "created_at": "",
         "file": str(md_file),
         "source_type": "user",
+        "status": "active",
+        "valid_to": "",
         "source_session": "",
         "access_count": 0,
         "last_accessed": "",
@@ -291,6 +294,10 @@ def _parse_obsidian_memory_file(md_file: Path) -> dict | None:
                         mem["access_count"] = 0
                 elif key == "last_accessed":
                     mem["last_accessed"] = value
+                elif key == "status":
+                    mem["status"] = value
+                elif key == "valid_to":
+                    mem["valid_to"] = value
 
     mem["essence"] = body
     mem["full_record"] = body  # read-time alias for essence — not stored in markdown
@@ -314,7 +321,7 @@ def _normalize_scope_id(scope_id: str) -> str:
     return "general" if not scope_id or scope_id == "default" else scope_id
 
 
-def _obsidian_memories(scope_id: str | None = None) -> list[dict]:
+def _obsidian_memories(scope_id: str | None = None, include_deprecated: bool = False) -> list[dict]:
     if not OBSIDIAN_MEMORIES_DIR.exists():
         return []
 
@@ -322,6 +329,8 @@ def _obsidian_memories(scope_id: str | None = None) -> list[dict]:
     for md_file in sorted(OBSIDIAN_MEMORIES_DIR.glob("*.md")):
         mem = _parse_obsidian_memory_file(md_file)
         if not mem:
+            continue
+        if not include_deprecated and mem.get("status") == "deprecated":
             continue
         project = mem.get("project", "general")
         normalized = _normalize_scope_id(scope_id) if scope_id is not None else "general"
@@ -534,6 +543,18 @@ def _delete_memory(memory_id: str) -> bool:
         return False
 
 
+def _deprecate_memory(memory_id: str, reason: str = "superseded") -> bool:
+    """Mark a memory as deprecated instead of deleting it."""
+    mem = _find_memory(memory_id)
+    if not mem:
+        return False
+    mem["status"] = "deprecated"
+    mem["valid_to"] = _now()
+    _write_obsidian_memory(mem)
+    _remove_index_line(memory_id)
+    return True
+
+
 def _extract_project(mem: dict) -> str:
     title = mem.get("title") or ""
     match = re.match(r"^\[([^\]]+)\]", title)
@@ -692,14 +713,43 @@ def _update_memory(memory_id: str, new_content: str, new_title: str = "") -> Non
     _append_or_update_index_line(mem)
 
 
+def _get_telemetry(memory_id: str) -> dict:
+    """Get access telemetry for a memory from the sidecar file."""
+    if not TELEMETRY_FILE.exists():
+        return {"access_count": 0, "last_accessed": ""}
+    try:
+        data = json.loads(TELEMETRY_FILE.read_text())
+        entry = data.get(memory_id[:8], {})
+        return {
+            "access_count": entry.get("access_count", 0),
+            "last_accessed": entry.get("last_accessed", ""),
+        }
+    except (json.JSONDecodeError, OSError):
+        return {"access_count": 0, "last_accessed": ""}
+
+
 def _record_access(memory_id: str) -> None:
-    """Increment access_count and update last_accessed for a memory. No index update."""
-    mem = _find_memory(memory_id)
-    if mem is None:
-        return
-    mem["access_count"] = mem.get("access_count", 0) + 1
-    mem["last_accessed"] = _now()
-    _write_obsidian_memory(mem)
+    """Record a memory access in the telemetry sidecar file."""
+    CORTEX_DIR.mkdir(parents=True, exist_ok=True)
+    lock_path = TELEMETRY_FILE.with_suffix(".lock")
+    fd = open(lock_path, "w")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        data = {}
+        if TELEMETRY_FILE.exists():
+            try:
+                data = json.loads(TELEMETRY_FILE.read_text())
+            except (json.JSONDecodeError, OSError):
+                data = {}
+        key = memory_id[:8]
+        entry = data.get(key, {"access_count": 0, "last_accessed": ""})
+        entry["access_count"] = entry.get("access_count", 0) + 1
+        entry["last_accessed"] = _now()
+        data[key] = entry
+        TELEMETRY_FILE.write_text(json.dumps(data))
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        fd.close()
 
 
 def purge_mined_memories(mined_sessions_file: Path) -> dict:
@@ -717,34 +767,20 @@ def purge_mined_memories(mined_sessions_file: Path) -> dict:
 
 
 def _playbook_append(project: str, new_memory: dict) -> None:
-    """Append a new memory to the project playbook (grow step). No LLM call."""
-    PLAYBOOK_DIR.mkdir(parents=True, exist_ok=True)
-    playbook_path = PLAYBOOK_DIR / f"{project}.md"
+    """Stage a new memory for the next playbook refinement (grow step)."""
+    PLAYBOOK_STAGING_DIR.mkdir(parents=True, exist_ok=True)
+    staging_path = PLAYBOOK_STAGING_DIR / f"{project}.jsonl"
     title = new_memory.get("title", "Untitled")
     essence = new_memory.get("essence", "")
     if not essence:
         return
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-    if not playbook_path.exists():
-        content = f"# {project} — Project Playbook\nUpdated: {today}\n\n## {title}\n{essence}\n"
-        playbook_path.write_text(content)
-    else:
-        content = playbook_path.read_text()
-        # Update date line
-        lines = content.split("\n")
-        for i, line in enumerate(lines):
-            if line.startswith("Updated:"):
-                lines[i] = f"Updated: {today}"
-                break
-        content = "\n".join(lines)
-        # Strip old refinement marker if present
-        for marker in ("<!-- refined:", "<!-- cortex-hash:"):
-            idx = content.rfind(marker)
-            if idx != -1:
-                content = content[:idx].rstrip()
-        content += f"\n\n## {title}\n{essence}\n"
-        playbook_path.write_text(content)
+    entry = json.dumps({
+        "title": title,
+        "essence": essence,
+        "timestamp": _now(),
+    })
+    with open(staging_path, "a") as f:
+        f.write(entry + "\n")
 
 
 _REFINE_SYSTEM = (
@@ -756,30 +792,64 @@ _REFINE_SYSTEM = (
 
 
 def _playbook_refine(project: str) -> None:
-    """Refine a project playbook — merge, deduplicate, reorganize (refine step)."""
+    """Compile staged entries into the playbook and refine (refine step)."""
     playbook_path = PLAYBOOK_DIR / f"{project}.md"
-    if not playbook_path.exists():
+    staging_path = PLAYBOOK_STAGING_DIR / f"{project}.jsonl"
+
+    # Read existing compiled playbook
+    existing = ""
+    if playbook_path.exists():
+        existing = playbook_path.read_text().strip()
+        # Strip old markers
+        for marker in ("<!-- refined:", "<!-- cortex-hash:"):
+            idx = existing.rfind(marker)
+            if idx != -1:
+                existing = existing[:idx].rstrip()
+
+    # Read staged entries
+    staged_entries = []
+    if staging_path.exists():
+        try:
+            for line in staging_path.read_text().splitlines():
+                line = line.strip()
+                if line:
+                    staged_entries.append(json.loads(line))
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # Nothing to do if no staged entries and playbook exists
+    if not staged_entries and existing:
         return
 
-    content = playbook_path.read_text().strip()
-    if len(content) < 2000:
-        return  # Too small to need refinement
+    # If no playbook and no staged entries, nothing to do
+    if not staged_entries and not existing:
+        return
 
-    # Strip old markers before hashing
-    clean = content
-    for marker in ("<!-- refined:", "<!-- cortex-hash:"):
-        idx = clean.rfind(marker)
-        if idx != -1:
-            clean = clean[:idx].rstrip()
+    # Build content for Haiku
+    parts = []
+    if existing:
+        parts.append(existing)
+    for entry in staged_entries:
+        parts.append(f"## {entry.get('title', 'Untitled')}\n{entry.get('essence', '')}")
+    combined = "\n\n".join(parts)
 
-    content_hash = hashlib.sha256(clean.encode()).hexdigest()
-    if content.rstrip().endswith(f"<!-- refined:{content_hash} -->"):
-        return  # Unchanged since last refinement
+    # If too small, just write without Haiku
+    if len(combined) < 2000:
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if not existing:
+            combined = f"# {project} — Project Playbook\nUpdated: {today}\n\n{combined}"
+        PLAYBOOK_DIR.mkdir(parents=True, exist_ok=True)
+        playbook_path.write_text(combined + "\n")
+        # Clear staging
+        if staging_path.exists():
+            staging_path.unlink()
+        return
 
+    # Haiku refine
     try:
         result = subprocess.run(
             ["claude", "-p", "--model", "haiku", "--tools", "", "--system-prompt", _REFINE_SYSTEM],
-            input=clean,
+            input=combined,
             capture_output=True,
             text=True,
             timeout=120,
@@ -793,14 +863,20 @@ def _playbook_refine(project: str) -> None:
         return
 
     refined = result.stdout.strip()
-    # Scan refined playbook for injection before writing
+    # Security scan
     threat = scan_memory_content(refined)
     if threat:
         log.warning("Playbook refine blocked for %s: %s", project, threat)
         return
+
     new_hash = hashlib.sha256(refined.encode()).hexdigest()
     refined += f"\n\n<!-- refined:{new_hash} -->\n"
+    PLAYBOOK_DIR.mkdir(parents=True, exist_ok=True)
     playbook_path.write_text(refined)
+
+    # Clear staging after successful compile
+    if staging_path.exists():
+        staging_path.unlink()
 
 
 _CONSOLIDATION_SYSTEM = (
@@ -902,7 +978,7 @@ def _consolidate_project(project: str) -> dict:
         if not isinstance(mem_id, str):
             continue
         if _find_memory(mem_id):
-            _delete_memory(mem_id)
+            _deprecate_memory(mem_id, "consolidated")
             deleted_count += 1
 
     return {"merged": merged_count, "deleted": deleted_count}

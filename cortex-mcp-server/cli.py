@@ -77,6 +77,11 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         print(f"Refined {count} playbooks")
         return
 
+    if cmd == "--eval":
+        from eval import run_eval
+        run_eval()
+        return
+
     if cmd == "--assemble-context":
         query = argv[2] if len(argv) >= 3 else ""
         project = argv[3] if len(argv) >= 4 else "default"

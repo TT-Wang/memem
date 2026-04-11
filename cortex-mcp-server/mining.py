@@ -21,6 +21,7 @@ from storage import (
     ObsidianUnavailableError,
     _consolidate_project,
     _delete_memory,
+    _deprecate_memory,
     _find_best_match,
     _find_memory,
     _generate_index,
@@ -353,11 +354,11 @@ def mine_session(jsonl_path: str) -> dict:
             except Exception as exc:
                 raise FatalMiningError(f"storage write failed: {exc}") from exc
 
-            # Handle supersedes — delete the obsolete memory
+            # Handle supersedes — deprecate the obsolete memory
             if insight.get("supersedes"):
                 old_mem, old_score = _find_best_match(insight["supersedes"], scope_id=project)
                 if old_mem and old_score > 0.3 and old_mem.get("id") != mem["id"]:
-                    _delete_memory(old_mem["id"])
+                    _deprecate_memory(old_mem["id"], "superseded")
                     memories_deleted += 1
 
         _mark_session(
