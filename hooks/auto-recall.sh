@@ -22,11 +22,6 @@ if [ -n "$SESSION_ID" ] && [ -f "$MARKER" ]; then
   exit 0
 fi
 
-# Mark session as recalled
-if [ -n "$SESSION_ID" ]; then
-  touch "$MARKER"
-fi
-
 # Clean up old session markers (older than 7 days)
 find "$SESSION_MARKER_DIR" -type f -mtime +7 -delete 2>/dev/null || true
 
@@ -117,4 +112,9 @@ print(json.dumps({
     }
 }))
 HOOKPY
+
+  # Mark session as recalled AFTER successful execution
+  if [ -n "$SESSION_ID" ]; then
+    touch "$MARKER"
+  fi
 fi

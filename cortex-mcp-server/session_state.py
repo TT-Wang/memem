@@ -1,3 +1,4 @@
+import fcntl
 import json
 import os
 import time
@@ -76,21 +77,29 @@ def save_mined_session_state(states: dict[str, dict]) -> None:
 
 
 def update_session_state(path: Path, status: str, message: str = "") -> dict:
-    states = load_mined_session_state()
-    fingerprint = session_fingerprint(path)
-    session_id = path.stem
-    state = {
-        "session_id": session_id,
-        "status": status,
-        "mtime_ns": fingerprint["mtime_ns"],
-        "size": fingerprint["size"],
-        "version": MINER_STATE_VERSION,
-        "updated_at": _now(),
-        "message": message[:500],
-    }
-    states[session_id] = state
-    save_mined_session_state(states)
-    return state
+    lock_path = MINED_SESSIONS_FILE.with_suffix(".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = open(lock_path, "w")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        states = load_mined_session_state()
+        fingerprint = session_fingerprint(path)
+        session_id = path.stem
+        state = {
+            "session_id": session_id,
+            "status": status,
+            "mtime_ns": fingerprint["mtime_ns"],
+            "size": fingerprint["size"],
+            "version": MINER_STATE_VERSION,
+            "updated_at": _now(),
+            "message": message[:500],
+        }
+        states[session_id] = state
+        save_mined_session_state(states)
+        return state
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        fd.close()
 
 
 def session_is_complete(path: Path, state: dict | None) -> bool:

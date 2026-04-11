@@ -426,11 +426,9 @@ def _containment(a: set, b: set) -> float:
 def _find_best_match(content: str, scope_id: str = "default") -> tuple[dict | None, float]:
     """Return (best_mem, best_score) for the closest existing memory to content.
 
-    Uses a blended containment score (overlap / smaller set) instead of Jaccard
-    to handle length asymmetry — a short new insight fully contained in a longer
-    existing memory should score high. Returns (None, 0.0) when content has no
-    words or no memories exist. The caller interprets the score:
-    <0.3 = new, 0.3-0.6 = merge candidate, >0.6 = duplicate.
+    Uses CONTENT-ONLY scoring (containment) for dedup/merge decisions.
+    No temporal or access weighting — those belong in the recall path only.
+    Score thresholds: <0.3 = new, 0.3-0.6 = merge candidate, >0.6 = duplicate.
     """
     content_words = _word_set(content)
     if not content_words:
@@ -452,24 +450,7 @@ def _find_best_match(content: str, scope_id: str = "default") -> tuple[dict | No
         word_c = _containment(content_words, mem_words)
         bigram_c = _containment(content_bigrams, _ngram_set(mem_text, 2))
         trigram_c = _containment(content_trigrams, _ngram_set(mem_text, 3))
-        containment_score = 0.5 * word_c + 0.3 * bigram_c + 0.2 * trigram_c
-
-        # Temporal + access weighting
-        last_touch = mem.get("last_accessed") or mem.get("updated_at") or mem.get("created_at", "")
-        try:
-            if last_touch:
-                dt = datetime.fromisoformat(last_touch.replace("Z", "+00:00"))
-                hours_old = max(0, (datetime.now(timezone.utc) - dt).total_seconds() / 3600)
-                recency = 0.995 ** hours_old
-            else:
-                recency = 0.5
-        except (ValueError, TypeError):
-            recency = 0.5
-
-        access_count = mem.get("access_count", 0)
-        access_boost = min(access_count / 10.0, 1.0)
-
-        score = 0.6 * containment_score + 0.2 * recency + 0.2 * access_boost
+        score = 0.5 * word_c + 0.3 * bigram_c + 0.2 * trigram_c
         if score > best_score:
             best_score = score
             best_mem = mem
@@ -697,6 +678,9 @@ def _load_obsidian_memories(picked_ids: list[str]) -> list[dict]:
 
 def _update_memory(memory_id: str, new_content: str, new_title: str = "") -> None:
     """Update an existing memory's content and optionally its title."""
+    threat = scan_memory_content(new_content)
+    if threat:
+        raise ValueError(f"Update blocked: {threat}")
     mem = _find_memory(memory_id)
     if mem is None:
         raise ValueError(f"Memory not found: {memory_id}")
@@ -809,6 +793,11 @@ def _playbook_refine(project: str) -> None:
         return
 
     refined = result.stdout.strip()
+    # Scan refined playbook for injection before writing
+    threat = scan_memory_content(refined)
+    if threat:
+        log.warning("Playbook refine blocked for %s: %s", project, threat)
+        return
     new_hash = hashlib.sha256(refined.encode()).hexdigest()
     refined += f"\n\n<!-- refined:{new_hash} -->\n"
     playbook_path.write_text(refined)

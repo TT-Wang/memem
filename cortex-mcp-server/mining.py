@@ -325,10 +325,9 @@ def mine_session(jsonl_path: str) -> dict:
                     memories_merged += 1
                     _playbook_append(project, {"title": insight["title"], "essence": merged})
                 except (TransientMiningError, ValueError) as exc:
-                    # If merge fails, fall through to save as new
-                    pass
-                else:
-                    continue
+                    # Merge failed — skip this insight entirely, don't duplicate
+                    log.warning("Merge failed, skipping insight: %s", exc)
+                continue
 
             # Score < 0.3 or merge failed — save as new
             try:
@@ -357,7 +356,7 @@ def mine_session(jsonl_path: str) -> dict:
             # Handle supersedes — delete the obsolete memory
             if insight.get("supersedes"):
                 old_mem, old_score = _find_best_match(insight["supersedes"], scope_id=project)
-                if old_mem and old_score > 0.3:
+                if old_mem and old_score > 0.3 and old_mem.get("id") != mem["id"]:
                     _delete_memory(old_mem["id"])
                     memories_deleted += 1
 
