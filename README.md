@@ -1,6 +1,6 @@
 # Cortex
 
-Persistent memory for Claude Code. Remembers across sessions, gets smarter over time.
+Persistent memory and context assembly for Claude Code. Remembers across sessions, self-evolves, gets smarter over time.
 
 ## Install
 
@@ -9,119 +9,137 @@ claude plugin marketplace add TT-Wang/cortex-plugin
 claude plugin install cortex@cortex-marketplace
 ```
 
+**First-run setup:**
+```bash
+# Create Obsidian vault (or point CORTEX_OBSIDIAN_VAULT to your existing vault)
+mkdir -p ~/obsidian-brain/cortex/memories
+
+# Start the background miner
+bash ~/.claude/plugins/cache/cortex-marketplace/cortex/*/cortex-mcp-server/miner-wrapper.sh start
+```
+
 ## What it does
 
 Cortex gives Claude Code a long-term memory. Without it, every session starts from zero. With Cortex, Claude remembers what worked, what failed, and what your project needs.
 
-- **Auto-recalls** on every session — injects relevant memories before you even ask
-- **Auto-mines** session logs — a background Haiku-powered daemon extracts insights from completed sessions
-- **Auto-saves** lessons as you work — decisions, patterns, and conventions persist across sessions
-
-Over time, the memory grows. The 50th session is dramatically better than the 1st.
-
-## How it works
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      Claude Code Session                     │
-│                                                              │
-│  ┌──────────────────┐       ┌─────────────────────────────┐ │
-│  │ UserPromptSubmit  │──────▶│ Hook injects _index.md      │ │
-│  │ hook (1st msg)    │       │ Claude picks relevant files  │ │
-│  └──────────────────┘       │ Reads ~/obsidian-brain/      │ │
-│                              │   cortex/memories/*.md       │ │
-│  ┌──────────────────┐       └─────────────────────────────┘ │
-│  │ During work       │                                       │
-│  │  memory_save()  ──┼──┐                                    │
-│  └──────────────────┘  │                                    │
-└────────────────────────┼────────────────────────────────────┘
-                         │
-                         ▼
-          ┌──────────────────────────┐
-          │    Obsidian Vault         │
-          │    ~/obsidian-brain/      │
-          │      cortex/memories/     │
-          │      cortex/_index.md     │
-          └──────────┬───────────────┘
-                     │
-                     ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    Miner Daemon (background)                  │
-│                                                              │
-│  Polls ~/.claude/projects/*/*.jsonl every 60s                │
-│  Session idle 5min → parse exchanges → Haiku extracts        │
-│  insights → dedup check → write to Obsidian vault            │
-└─────────────────────────────────────────────────────────────┘
-```
-
-**Storage:** Obsidian vault is the single source of truth. Each memory is a markdown file with YAML frontmatter. An `_index.md` file catalogs all memories for fast lookup.
-
-**Recall:** On session start, a hook injects the memory index. Claude reads the relevant `.md` files directly with the Read tool — no database layer in between.
-
-**Mining:** A background daemon watches for completed sessions, sends exchanges to Haiku for knowledge extraction, deduplicates against existing memories, and writes new insights to the vault.
+- **Context assembly** — first message triggers a query-tailored briefing assembled by Haiku
+- **Auto-mining** — background daemon extracts durable knowledge from completed sessions
+- **Self-evolving** — memories merge, deprecate, and consolidate automatically
+- **Security scanned** — all memory writes checked for prompt injection and credential exfil
 
 ## Architecture
 
 ```
-cortex-mcp-server/
-├── server.py          MCP entrypoint (5 tools)
-├── storage.py         Obsidian read/write, indexing, dedup
-├── recall.py          Keyword search + Haiku smart recall
-├── mining.py          Session mining with Haiku extraction
-├── operations.py      memory_save, memory_import
-├── transcripts.py     JSONL session parsing + search
-├── session_state.py   Mined session tracking
-├── miner-daemon.py    Background mining daemon
-├── miner_protocol.py  Status/version constants
-└── cli.py             CLI dispatch (--mine-all, --rebuild-index, etc.)
+Session starts → User types first message
+  → Hook fires → context_assemble(query) → Haiku assembles tailored brief
+  → LLM starts working with relevant context, zero tool calls needed
 
-hooks/
-├── auto-recall.sh     UserPromptSubmit hook — injects memory index
-└── hooks.json         Hook configuration
+During session:
+  → memory_recall / context_assemble available for deeper dives
+  → memory_save for persisting new knowledge
+
+Background (miner daemon):
+  → Extract conversation from JSONL → Haiku extracts memories
+  → AUDN pipeline: Add / Update (merge) / Noop (skip) / Deprecate
+  → Consolidation: merge redundant, deprecate obsolete
+  → Playbook: grow (stage) + refine (compile)
+
+Storage:
+  → Obsidian vault (source of truth, human-readable)
+  → SQLite FTS5 (search index, machine-fast)
+  → Telemetry sidecar (access tracking)
+  → Event log (audit trail)
 ```
 
 ## MCP Tools
 
 | Tool | What |
 |------|------|
-| `memory_recall` | Search memories by keyword |
-| `memory_save` | Store a lesson, pattern, or convention |
+| `memory_recall` | Search memories (FTS5 + keyword + temporal + importance scoring) |
+| `memory_save` | Store a lesson, pattern, or convention (security scanned) |
 | `memory_list` | List all memories with stats |
 | `memory_import` | Import from files, directories, or chat exports |
 | `transcript_search` | Search raw Claude Code session logs |
+| `context_assemble` | On-demand query-tailored briefing from all knowledge |
+
+## Memory Schema
+
+Each memory is a markdown file with YAML frontmatter:
+
+```yaml
+---
+id: uuid
+title: "descriptive title"
+project: project-name
+tags: [mined, project-name]
+related: [id1, id2, id3]
+created: 2026-04-11
+updated: 2026-04-11
+source_type: mined | user | import
+source_session: abc12345
+importance: 3        # 1-5 scale
+status: active       # active | deprecated
+valid_to:            # set when deprecated
+contradicts: [id1]   # flagged conflicts
+---
+
+Memory content here.
+```
+
+## Scoring
+
+Recall uses multi-signal scoring:
+- **50%** keyword/FTS relevance (with stemming + synonym expansion)
+- **15%** recency (exponential decay, 0.995^hours)
+- **15%** access history (usage reinforcement)
+- **20%** importance (1-5 scale from extraction)
+
+Dedup/merge uses content-only containment scoring (no temporal bias).
 
 ## CLI
 
 ```bash
-python3 server.py                    # Start MCP server (stdio)
-python3 server.py --recall "query"   # Keyword search
-python3 server.py --recall-smart "q" # Haiku-assisted recall
-python3 server.py --mine-all         # Mine all pending sessions
-python3 server.py --mine-session f   # Mine a single JSONL file
-python3 server.py --rebuild-index    # Regenerate _index.md
-python3 server.py --purge-mined      # Delete all mined memories
-python3 miner-daemon.py start        # Start background miner
-python3 miner-daemon.py stop         # Stop background miner
-python3 miner-daemon.py status       # Check miner status
+python3 server.py                          # Start MCP server
+python3 server.py --assemble-context "q"   # Context assembly
+python3 server.py --recall "query"         # Keyword search
+python3 server.py --recall-smart "query"   # Haiku-assisted recall
+python3 server.py --mine-all              # Mine all pending sessions
+python3 server.py --mine-session file.jsonl # Mine single session
+python3 server.py --rebuild-index          # Regenerate _index.md
+python3 server.py --rebuild-playbooks      # Refine all playbooks
+python3 server.py --rebuild-search-index   # Rebuild SQLite FTS5
+python3 server.py --eval                   # Run quality eval
+python3 server.py --events                 # View recent event log
+python3 server.py --purge-mined            # Delete all mined memories
+python3 miner-daemon.py start|stop|status  # Miner daemon
+bash miner-wrapper.sh start|stop|status    # Miner with auto-restart
 ```
 
 ## Configuration
 
 | Env var | Default | What |
 |---------|---------|------|
-| `CORTEX_OBSIDIAN_VAULT` | `~/obsidian-brain` | Path to your Obsidian vault |
-| `CORTEX_EXTRA_SESSION_DIRS` | (none) | Extra session dirs to mine, colon-separated |
-| `CORTEX_MINER_SETTLE_SECONDS` | `300` | Wait time before mining a session |
+| `CORTEX_OBSIDIAN_VAULT` | `~/obsidian-brain` | Path to Obsidian vault |
+| `CORTEX_EXTRA_SESSION_DIRS` | (none) | Extra session dirs to mine |
+| `CORTEX_MINER_SETTLE_SECONDS` | `300` | Wait before mining a session |
+
+## Data Locations
+
+| Store | Path | Purpose |
+|-------|------|---------|
+| Memories | `~/obsidian-brain/cortex/memories/*.md` | Source of truth |
+| Index | `~/obsidian-brain/cortex/_index.md` | Flat catalog |
+| Playbooks | `~/obsidian-brain/cortex/playbooks/*.md` | Per-project briefings |
+| Search DB | `~/.cortex/search.db` | SQLite FTS5 index |
+| Telemetry | `~/.cortex/telemetry.json` | Access tracking |
+| Event log | `~/.cortex/events.jsonl` | Audit trail |
+| Miner state | `~/.cortex/.mined_sessions` | Mining progress |
 
 ## Requirements
 
 - Claude Code
 - Python 3.11+
-- Obsidian vault (default `~/obsidian-brain/`, configurable via env var)
-
-## See Also
-
-- **[Forge](https://github.com/TT-Wang/forge)** — Structured planning, parallel execution, and validation for Claude Code
+- Obsidian vault (default `~/obsidian-brain/`, configurable)
 
 ## License
 

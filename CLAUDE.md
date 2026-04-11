@@ -1,12 +1,15 @@
-# Cortex — Persistent Memory
+# Cortex — Persistent Memory & Context Assembly
 
-You have access to a persistent memory system via Cortex. This memory persists across sessions and gets smarter over time.
+You have access to a persistent memory system via Cortex. This memory persists across sessions, self-evolves, and gets smarter over time.
 
 Storage: Obsidian vault at `~/obsidian-brain/cortex/memories/` (markdown files, single source of truth).
+Machine index: SQLite FTS5 at `~/.cortex/search.db` for fast retrieval.
 
 ## Auto-recall
 
-The UserPromptSubmit hook automatically injects the memory index on your first message. IMPORTANT: Do not just skim the index titles — use Cortex MCP tools (memory_recall, memory_list) to fetch full content of memories relevant to the user's request before responding. The index is a lookup table, not the knowledge itself. You can also read Obsidian markdown files directly when needed.
+The UserPromptSubmit hook fires on your first message and assembles a query-tailored context briefing using `context_assemble`. This uses your message to find relevant memories and produce a focused brief — not a raw index dump.
+
+For deeper recall during the session, use the MCP tools below.
 
 ## Auto-save
 
@@ -17,32 +20,24 @@ Call `mcp__plugin_cortex_cortex__memory_save` with:
 - `title`: Short descriptive title
 - `tags`: Comma-separated relevant tags
 
-Examples of what to save:
-- "This project uses Poetry instead of pip"
-- "The auth module requires Redis for session storage"
-- "Using mock.patch on the class not the instance fixed the test"
+**Save these (durable knowledge):**
+- User preferences, corrections, conventions
+- Architecture decisions with rationale
+- Environment facts, tool quirks, project structure
+- Non-obvious lessons learned from failures
 
-Do NOT save:
-- Trivial or obvious facts
-- Things already documented in the project
-- Temporary state or in-progress work
-
-## Mining chat exports
-
-When the user asks to import chat history or conversation exports:
-
-1. Call `mcp__plugin_cortex_cortex__memory_import` with the file/directory path
-2. The tool returns raw conversation content
-3. YOU extract the knowledge — read through and identify decisions, lessons, conventions, facts
-4. For each piece of knowledge, call `mcp__plugin_cortex_cortex__memory_save` with atomic, self-contained content
-5. Do NOT save raw conversation text. Extract the insight, discard the chat.
+**Do NOT save these (use transcript_search instead):**
+- Task progress, session outcomes, what was worked on today
+- Completed-work logs or TODO state
+- Trivial or obvious facts easily re-discovered from code
 
 ## Available tools
 
 | Tool | What |
 |------|------|
 | `memory_save` | Store a lesson, pattern, or convention |
-| `memory_recall` | Search memories by keyword |
-| `memory_list` | List all memories |
+| `memory_recall` | Search memories (FTS5 + keyword + temporal ranking) |
+| `memory_list` | List all memories with stats |
 | `memory_import` | Import from files, directories, or chat exports |
 | `transcript_search` | Search raw Claude Code session logs |
+| `context_assemble` | On-demand query-tailored briefing from all knowledge |
