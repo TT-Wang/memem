@@ -120,6 +120,11 @@ else:
             "- After this session ends, the miner daemon extracts durable knowledge from your conversation\n"
             "- Next session, you'll see a context briefing tailored to your first message\n"
             "- Over time, playbooks build per project — curated, self-evolving knowledge\n\n"
+            "**Browse your memories with Obsidian (optional):**\n"
+            "- Download Obsidian: https://obsidian.md (free)\n"
+            "- Open `~/obsidian-brain` as a vault\n"
+            "- Memories appear in `cortex/memories/`, playbooks in `cortex/playbooks/`\n"
+            "- Use Graph View to see how memories link to each other\n\n"
             "Available tools: `memory_save`, `memory_recall`, `memory_list`, "
             "`memory_import`, `transcript_search`, `context_assemble`"
         )
