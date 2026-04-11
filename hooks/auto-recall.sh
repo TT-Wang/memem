@@ -109,11 +109,12 @@ else:
         mine_option = ""
         if existing_sessions > 0:
             mine_option = (
-                f"\n**Your existing history ({existing_sessions} sessions):**\n"
-                "The background miner is already processing your past Claude Code sessions. "
-                "Knowledge will be extracted automatically — no action needed. "
-                "This may take a few hours for large histories. "
-                "Run `/cortex-status` anytime to check progress.\n"
+                f"\n**You have {existing_sessions} past Claude Code sessions.**\n"
+                "Cortex can mine your existing history for knowledge — decisions, "
+                "preferences, lessons, and conventions from past conversations.\n\n"
+                "- **To mine existing sessions:** type `/cortex-mine` or ask me to mine your history\n"
+                "- **To skip:** do nothing — Cortex will only mine new sessions going forward\n\n"
+                "Mining is optional and runs in the background. It may take a few hours for large histories.\n"
             )
 
         output = (

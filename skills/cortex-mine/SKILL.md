@@ -4,7 +4,7 @@ description: Mine existing Claude Code sessions for knowledge. Extracts durable 
 allowed-tools: [Bash]
 ---
 
-Mine all existing Claude Code sessions for knowledge. This extracts durable insights (decisions, preferences, conventions, lessons) from your past conversations.
+Mine all existing Claude Code sessions for knowledge. This opts in to mining your full history — by default, Cortex only mines new sessions going forward.
 
 1. First show how many sessions are available:
 ```bash
@@ -13,7 +13,7 @@ find ~/.claude/projects/ -name "*.jsonl" ! -path "*/subagents/*" -size +5k | wc 
 
 2. Tell the user approximately how long it will take (~3-5 seconds per session).
 
-3. Start the mining in the background:
+3. Start the mining in the background (--mine-all clears the install-time gate):
 ```bash
 nohup python3 "${CLAUDE_PLUGIN_ROOT}/cortex-mcp-server/server.py" --mine-all > /dev/null 2>&1 &
 echo "Mining started in background (PID $!)"

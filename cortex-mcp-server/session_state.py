@@ -119,10 +119,31 @@ def session_is_complete(path: Path, state: dict | None) -> bool:
     )
 
 
+INSTALLED_AT_FILE = CORTEX_DIR / ".installed_at"
+
+
+def _get_installed_at() -> float:
+    """Get the timestamp when Cortex was installed. Returns 0 if mine-all mode."""
+    if not INSTALLED_AT_FILE.exists():
+        # First run — record install time
+        CORTEX_DIR.mkdir(parents=True, exist_ok=True)
+        INSTALLED_AT_FILE.write_text(str(time.time()))
+    try:
+        return float(INSTALLED_AT_FILE.read_text().strip())
+    except (OSError, ValueError):
+        return 0.0
+
+
+def clear_installed_at():
+    """Remove the installed_at gate so all sessions are mined (used by --mine-all)."""
+    INSTALLED_AT_FILE.unlink(missing_ok=True)
+
+
 def find_settled_sessions(states: dict[str, dict] | None = None) -> list[Path]:
     now = time.time()
     states = states or {}
     settled: list[tuple[int, Path]] = []
+    installed_at = _get_installed_at()
 
     for sessions_dir in SESSIONS_DIRS:
         if not sessions_dir.exists():
@@ -135,6 +156,9 @@ def find_settled_sessions(states: dict[str, dict] | None = None) -> list[Path]:
             except OSError:
                 continue
             if stat.st_size < 5000:
+                continue
+            # Only mine sessions created after install (unless gate cleared)
+            if installed_at > 0 and stat.st_mtime < installed_at:
                 continue
             if (now - stat.st_mtime) <= SETTLE_SECONDS:
                 continue

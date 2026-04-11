@@ -33,6 +33,8 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         return
 
     if cmd == "--mine-all":
+        from session_state import clear_installed_at
+        clear_installed_at()  # Mine ALL sessions, including pre-install history
         try:
             print(json.dumps(mine_all()))
         except MiningError as exc:

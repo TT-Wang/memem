@@ -33,13 +33,13 @@ Call `mcp__plugin_cortex_cortex__memory_save` with:
 
 ## Mining existing sessions
 
-When a user asks to mine their existing sessions (e.g. "mine my existing sessions"), run this command in the background:
+By default, Cortex only mines sessions created after installation. When a user asks to mine their existing history (e.g. "mine my existing sessions", "mine my history"), run this in the background:
 
 ```bash
-python3 "${CLAUDE_PLUGIN_ROOT}/cortex-mcp-server/server.py" --mine-all &
+nohup python3 "${CLAUDE_PLUGIN_ROOT}/cortex-mcp-server/server.py" --mine-all > /dev/null 2>&1 &
 ```
 
-This extracts knowledge from all past Claude Code sessions. It runs in the background and may take a while for large histories. Tell the user it's running and they can continue working normally.
+The `--mine-all` flag clears the install-time gate so all historical sessions are included. Tell the user it's running in the background and they can continue working normally.
 
 ## Available tools
 
