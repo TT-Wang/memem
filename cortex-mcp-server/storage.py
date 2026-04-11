@@ -36,18 +36,6 @@ def _pid_is_running(pid: int) -> bool:
         return True
 
 
-def _read_pid_file(path: Path) -> int | None:
-    try:
-        pid = int(path.read_text().strip())
-    except (OSError, ValueError):
-        return None
-
-    if _pid_is_running(pid):
-        return pid
-
-    path.unlink(missing_ok=True)
-    return None
-
 
 def _cleanup_pid_file(path: Path, pid: int):
     try:
@@ -135,7 +123,7 @@ def scan_memory_content(content: str) -> str | None:
         if char in content:
             return f"Blocked: invisible unicode U+{ord(char):04X} (possible injection)"
 
-    text = content + " " + (content if isinstance(content, str) else "")
+    text = content if isinstance(content, str) else ""
     for pattern, name in _INJECTION_PATTERNS + _EXFIL_PATTERNS:
         if re.search(pattern, text, re.IGNORECASE):
             return f"Blocked: matches threat pattern '{name}'"
@@ -443,13 +431,6 @@ def _ngram_set(text: str, n: int) -> set:
     return set(tuple(tokens[i:i + n]) for i in range(len(tokens) - n + 1))
 
 
-def _jaccard(a: set, b: set) -> float:
-    if not a or not b:
-        return 0.0
-    union = len(a | b)
-    return len(a & b) / union if union else 0.0
-
-
 def _containment(a: set, b: set) -> float:
     """What fraction of the smaller set is contained in the larger."""
     if not a or not b:
@@ -646,7 +627,7 @@ def _check_contradictions(content: str, scope_id: str = "default") -> list[dict]
     # Find similar existing memories
     try:
         fts_ids = _search_fts(content[:200], scope_id, 5)
-        candidates = [_find_memory(mid) for mid in fts_ids if _find_memory(mid)]
+        candidates = [m for mid in fts_ids if (m := _find_memory(mid))]
     except Exception:
         # FTS unavailable — use content match
         match, score = _find_best_match(content, scope_id)

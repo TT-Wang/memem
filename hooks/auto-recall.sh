@@ -31,6 +31,7 @@ INDEX="$VAULT/cortex/_index.md"
 if [ -f "$INDEX" ]; then
   # Write INPUT to temp file to avoid argv size limits on large prompts
   INPUT_FILE=$(mktemp)
+  trap 'rm -f "$INPUT_FILE"' EXIT
   echo "$INPUT" > "$INPUT_FILE"
 
   python3 - "$INDEX" "$VAULT" "$INPUT_FILE" << 'HOOKPY'
@@ -124,9 +125,6 @@ print(json.dumps({
     }
 }))
 HOOKPY
-
-  # Clean up temp file
-  rm -f "$INPUT_FILE"
 
   # Mark session as recalled AFTER successful execution
   if [ -n "$SESSION_ID" ]; then

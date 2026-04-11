@@ -1,7 +1,10 @@
+import logging
 import re
 import subprocess
 from collections import Counter
 from datetime import datetime, timezone
+
+log = logging.getLogger("cortex-recall")
 
 from storage import INDEX_PATH, _find_memory, _get_telemetry, _load_obsidian_memories, _obsidian_memories, _record_access, _word_set
 from transcripts import transcript_search
@@ -46,7 +49,8 @@ def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 1
 
         tel_scored.sort(key=lambda x: x[0], reverse=True)
         return [mem for _, mem in tel_scored[:limit]]
-    except Exception:
+    except Exception as exc:
+        log.debug("FTS search failed, falling back to file scan: %s", exc)
         return []  # Fallback: caller will use file scan
 
 
@@ -231,8 +235,8 @@ def smart_recall(prompt: str, scope_id: str = "default") -> str:
                 match = re.search(r"\b([0-9a-f]{8})\b", line.strip().strip("-").strip())
                 if match:
                     picked_ids.append(match.group(1))
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("Smart recall Haiku failed: %s", exc)
 
     if not picked_ids:
         return memory_recall(prompt, scope_id=scope_id, limit=10)

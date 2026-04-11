@@ -96,8 +96,7 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         lines = EVENT_LOG.read_text().splitlines()
         for line in lines[-20:]:  # Last 20 events
             try:
-                import json as _json
-                event = _json.loads(line)
+                event = json.loads(line)
                 ts = event.get("timestamp", "?")[:19]
                 op = event.get("op", "?")
                 mid = event.get("memory_id", "")[:8]
