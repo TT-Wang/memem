@@ -171,6 +171,11 @@ def scan_memory_content(content: str) -> str | None:
 def _make_memory(content: str, title: str, tags: list[str] | None = None,
                  project: str = "general", source_type: str = "user",
                  source_session: str = "", importance: int = 3) -> dict:
+    # Reject junk content
+    stripped = content.strip().strip(".")
+    if len(stripped) < 10:
+        raise ValueError(f"Content too short ({len(stripped)} chars): rejected as junk")
+
     threat = scan_memory_content(content)
     if threat:
         raise ValueError(threat)
@@ -223,7 +228,10 @@ def _write_obsidian_memory(mem: dict):
     slug = _slugify(title) or mem["id"][:8]
     filename = f"{slug}-{mem['id'][:8]}.md"
 
+    # Clean up old file if title changed (check both obsidian_file and file fields)
     old_file = mem.get("obsidian_file", "")
+    if not old_file and mem.get("file"):
+        old_file = Path(mem["file"]).name
     if old_file and old_file != filename:
         old_path = OBSIDIAN_MEMORIES_DIR / old_file
         if old_path.exists():
@@ -369,8 +377,21 @@ def _parse_obsidian_memory_file(md_file: Path) -> dict | None:
     return mem
 
 
+_PROJECT_ALIASES = {
+    "vibe-reader": "vibereader",
+    "vibireader": "vibereader",
+    "Vibereader": "vibereader",
+    "Vibireader": "vibereader",
+    "hft-strategies": "HFT trading system",
+    "HFT strategies": "HFT trading system",
+    "Tech Feed TUI": "techfeed",
+}
+
+
 def _normalize_scope_id(scope_id: str) -> str:
-    return "general" if not scope_id or scope_id == "default" else scope_id
+    if not scope_id or scope_id == "default":
+        return "general"
+    return _PROJECT_ALIASES.get(scope_id, scope_id)
 
 
 def _obsidian_memories(scope_id: str | None = None, include_deprecated: bool = False) -> list[dict]:
