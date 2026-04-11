@@ -113,8 +113,8 @@ else:
                 "Cortex can mine your existing history for knowledge — decisions, "
                 "preferences, lessons, and conventions from past conversations.\n\n"
                 "- **To mine existing sessions:** type `/cortex-mine` or ask me to mine your history\n"
-                "- **To skip:** do nothing — Cortex will only mine new sessions going forward\n\n"
-                "Mining is optional and runs in the background. It may take a few hours for large histories.\n"
+                "- **To skip:** do nothing — Cortex will automatically mine all new sessions going forward\n\n"
+                "History mining runs in the background and may take a few hours for large histories.\n"
             )
 
         output = (
