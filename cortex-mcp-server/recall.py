@@ -7,7 +7,7 @@ from storage import INDEX_PATH, _find_memory, _get_telemetry, _load_obsidian_mem
 from transcripts import transcript_search
 
 
-def _search_memories(query: str, scope_id: str | None = None, limit: int = 10) -> list[dict]:
+def _search_memories(query: str, scope_id: str | None = None, limit: int = 10, record_access: bool = True) -> list[dict]:
     query_words = _word_set(query)
     if not query_words:
         return []
@@ -63,11 +63,12 @@ def _search_memories(query: str, scope_id: str | None = None, limit: int = 10) -
     max_total = limit * 2
     results = (primary + linked)[:max_total]
 
-    # Track access for returned memories
-    for mem in results:
-        mem_id = mem.get("id", "")
-        if mem_id:
-            _record_access(mem_id)
+    # Track access for returned memories (skip for internal/assembly calls)
+    if record_access:
+        for mem in results:
+            mem_id = mem.get("id", "")
+            if mem_id:
+                _record_access(mem_id)
 
     return results
 

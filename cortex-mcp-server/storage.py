@@ -835,6 +835,10 @@ def _playbook_refine(project: str) -> None:
 
     # If too small, just write without Haiku
     if len(combined) < 2000:
+        threat = scan_memory_content(combined)
+        if threat:
+            log.warning("Playbook blocked for %s: %s", project, threat)
+            return
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         if not existing:
             combined = f"# {project} — Project Playbook\nUpdated: {today}\n\n{combined}"
@@ -968,7 +972,7 @@ def _consolidate_project(project: str) -> dict:
             from mining import _merge_memories
             merged_content = _merge_memories(keep_mem.get("essence", ""), remove_mem.get("essence", ""))
             _update_memory(keep_mem["id"], merged_content)
-            _delete_memory(remove_mem["id"])
+            _deprecate_memory(remove_mem["id"], f"merged_into:{keep_id}")
             merged_count += 1
         except Exception as exc:
             log.warning("Consolidation merge failed: %s", exc)
@@ -1018,7 +1022,7 @@ def context_assemble(query: str, project: str = "default") -> str:
 
     # Get relevant memories (lazy import to avoid circular dep)
     from recall import _search_memories
-    memories = _search_memories(query, scope_id=normalized, limit=20)
+    memories = _search_memories(query, scope_id=normalized, limit=20, record_access=False)
 
     # Get transcript search results (lazy import)
     from transcripts import transcript_search

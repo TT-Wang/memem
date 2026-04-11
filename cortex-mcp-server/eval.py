@@ -91,11 +91,13 @@ def run_eval(sample_size: int = 10) -> dict:
 
     for text_a, text_b, should_match in test_pairs:
         results["dedup_tests"] += 1
-        words_a = _word_set(text_a)
-        words_b = _word_set(text_b)
-        overlap = len(words_a & words_b)
-        smaller = min(len(words_a), len(words_b))
-        score = overlap / smaller if smaller else 0
+        # Use the real scoring engine, not a hand-rolled formula
+        from storage import _containment, _ngram_set
+        ws_a, ws_b = _word_set(text_a), _word_set(text_b)
+        word_c = _containment(ws_a, ws_b)
+        bigram_c = _containment(_ngram_set(text_a, 2), _ngram_set(text_b, 2))
+        trigram_c = _containment(_ngram_set(text_a, 3), _ngram_set(text_b, 3))
+        score = 0.5 * word_c + 0.3 * bigram_c + 0.2 * trigram_c
         matched = score > 0.3
         if matched == should_match:
             results["dedup_correct"] += 1

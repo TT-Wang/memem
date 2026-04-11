@@ -197,12 +197,15 @@ def _summarize_session_haiku(messages: list[str]) -> list[dict] | None:
 
     output = result.stdout.strip()
     if not output:
-        return None
+        raise TransientMiningError("empty response from Haiku")
 
     # Extract JSON array (preferred) or object from output
     json_str = _extract_json_string(output)
     if json_str is None:
-        return None
+        # Check if output is literally "[]" or empty array indicator
+        if output.strip() in ("[]", "[ ]"):
+            return None  # Legitimate empty — nothing to extract
+        raise TransientMiningError(f"no JSON found in Haiku output: {output[:100]}")
 
     # Parse with repair fallback
     parsed = None
@@ -219,7 +222,7 @@ def _summarize_session_haiku(messages: list[str]) -> list[dict] | None:
     if isinstance(parsed, dict):
         parsed = [parsed] if parsed else []
     elif not isinstance(parsed, list):
-        return None
+        raise TransientMiningError(f"unexpected Haiku output type: {type(parsed)}")
 
     # Validate and cap each item
     valid_items: list[dict] = []

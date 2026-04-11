@@ -29,20 +29,32 @@ find "$SESSION_MARKER_DIR" -type f -mtime +7 -delete 2>/dev/null || true
 VAULT="${CORTEX_OBSIDIAN_VAULT:-$HOME/obsidian-brain}"
 INDEX="$VAULT/cortex/_index.md"
 if [ -f "$INDEX" ]; then
-  python3 - "$INDEX" "$VAULT" "$INPUT" << 'HOOKPY'
+  # Write INPUT to temp file to avoid argv size limits on large prompts
+  INPUT_FILE=$(mktemp)
+  echo "$INPUT" > "$INPUT_FILE"
+
+  python3 - "$INDEX" "$VAULT" "$INPUT_FILE" << 'HOOKPY'
 import sys, json, subprocess, os
 from pathlib import Path
 
 index_path = sys.argv[1]
 vault = sys.argv[2]
-input_data = sys.argv[3] if len(sys.argv) > 3 else ""
+input_file = sys.argv[3] if len(sys.argv) > 3 else ""
+
+# Read hook input from temp file
+input_data = ""
+if input_file:
+    try:
+        input_data = Path(input_file).read_text()
+    except OSError:
+        pass
 
 # Resolve server.py path
 plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
 if plugin_root:
     server_path = str(Path(plugin_root) / "cortex-mcp-server" / "server.py")
 else:
-    server_path = str(Path(index_path).resolve().parent.parent / "cortex-mcp-server" / "server.py")
+    server_path = str(Path(index_path).resolve().parent / "cortex-mcp-server" / "server.py")
 
 # Extract user message from hook input
 message = ""
@@ -112,6 +124,9 @@ print(json.dumps({
     }
 }))
 HOOKPY
+
+  # Clean up temp file
+  rm -f "$INPUT_FILE"
 
   # Mark session as recalled AFTER successful execution
   if [ -n "$SESSION_ID" ]; then
