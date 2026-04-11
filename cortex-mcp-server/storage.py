@@ -732,85 +732,86 @@ def purge_mined_memories(mined_sessions_file: Path) -> dict:
     return {"deleted": deleted}
 
 
-_PLAYBOOK_SYSTEM_PROMPT = (
-    "You are creating a project knowledge playbook from individual memory entries. "
-    "Organize into coherent sections by topic. Remove redundancy. Resolve contradictions "
-    "(prefer entries with more recent created dates). Output a concise markdown document "
-    "a future AI session can use as a project briefing. No JSON — output markdown directly."
+def _playbook_append(project: str, new_memory: dict) -> None:
+    """Append a new memory to the project playbook (grow step). No LLM call."""
+    PLAYBOOK_DIR.mkdir(parents=True, exist_ok=True)
+    playbook_path = PLAYBOOK_DIR / f"{project}.md"
+    title = new_memory.get("title", "Untitled")
+    essence = new_memory.get("essence", "")
+    if not essence:
+        return
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    if not playbook_path.exists():
+        content = f"# {project} — Project Playbook\nUpdated: {today}\n\n## {title}\n{essence}\n"
+        playbook_path.write_text(content)
+    else:
+        content = playbook_path.read_text()
+        # Update date line
+        lines = content.split("\n")
+        for i, line in enumerate(lines):
+            if line.startswith("Updated:"):
+                lines[i] = f"Updated: {today}"
+                break
+        content = "\n".join(lines)
+        # Strip old refinement marker if present
+        for marker in ("<!-- refined:", "<!-- cortex-hash:"):
+            idx = content.rfind(marker)
+            if idx != -1:
+                content = content[:idx].rstrip()
+        content += f"\n\n## {title}\n{essence}\n"
+        playbook_path.write_text(content)
+
+
+_REFINE_SYSTEM = (
+    "You are refining a project knowledge playbook. Reorganize sections by topic. "
+    "Merge redundant entries. Remove obsolete information that contradicts newer entries. "
+    "Keep it concise and well-structured. Preserve the title line and Updated date at the top. "
+    "Output the refined playbook as clean markdown."
 )
 
-_PLAYBOOK_HASH_PREFIX = "<!-- cortex-hash:"
 
+def _playbook_refine(project: str) -> None:
+    """Refine a project playbook — merge, deduplicate, reorganize (refine step)."""
+    playbook_path = PLAYBOOK_DIR / f"{project}.md"
+    if not playbook_path.exists():
+        return
 
-def _generate_playbook(project: str) -> str:
-    """Generate a synthesized playbook for the given project using Haiku.
+    content = playbook_path.read_text().strip()
+    if len(content) < 2000:
+        return  # Too small to need refinement
 
-    Returns the playbook markdown content, or "" if no memories exist or on error.
-    """
-    normalized = _normalize_scope_id(project)
-    memories = _obsidian_memories(normalized)
-    if not memories:
-        return ""
+    # Strip old markers before hashing
+    clean = content
+    for marker in ("<!-- refined:", "<!-- cortex-hash:"):
+        idx = clean.rfind(marker)
+        if idx != -1:
+            clean = clean[:idx].rstrip()
 
-    # Concatenate memory essences (cap at 50K chars)
-    parts = []
-    total = 0
-    for mem in memories:
-        title = mem.get("title", "Untitled")
-        essence = mem.get("essence", "")
-        created = mem.get("created_at", "")
-        entry = f"### {title}\ncreated: {created}\n\n{essence}\n"
-        if total + len(entry) > 50_000:
-            break
-        parts.append(entry)
-        total += len(entry)
+    content_hash = hashlib.sha256(clean.encode()).hexdigest()
+    if content.rstrip().endswith(f"<!-- refined:{content_hash} -->"):
+        return  # Unchanged since last refinement
 
-    combined = "\n".join(parts)
-
-    # Compute hash of combined content
-    hexdigest = hashlib.sha256(combined.encode("utf-8")).hexdigest()
-
-    # Check existing playbook for matching hash
-    PLAYBOOK_DIR.mkdir(parents=True, exist_ok=True)
-    playbook_file = PLAYBOOK_DIR / f"{normalized}.md"
-    if playbook_file.exists():
-        try:
-            existing = playbook_file.read_text()
-            last_line = existing.rstrip().rsplit("\n", 1)[-1]
-            if last_line.startswith(_PLAYBOOK_HASH_PREFIX) and last_line.rstrip().endswith("-->"):
-                existing_hash = last_line[len(_PLAYBOOK_HASH_PREFIX):].rstrip().removesuffix("-->").strip()
-                if existing_hash == hexdigest:
-                    # Strip trailing hash comment and return content
-                    content_end = existing.rfind(_PLAYBOOK_HASH_PREFIX)
-                    return existing[:content_end].rstrip() if content_end != -1 else existing
-        except OSError:
-            pass
-
-    # Call Haiku via subprocess
     try:
         result = subprocess.run(
-            ["claude", "-p", "--model", "haiku", "--tools", "", "--system-prompt", _PLAYBOOK_SYSTEM_PROMPT],
-            input=combined,
+            ["claude", "-p", "--model", "haiku", "--tools", "", "--system-prompt", _REFINE_SYSTEM],
+            input=clean,
             capture_output=True,
             text=True,
             timeout=120,
         )
-        if result.returncode != 0:
-            log.warning("Haiku playbook call failed (rc=%d): %s", result.returncode, result.stderr[:200])
-            return ""
-        playbook_content = result.stdout.strip()
     except Exception as exc:
-        log.warning("Haiku playbook call raised exception: %s", exc)
-        return ""
+        log.warning("Playbook refine failed for %s: %s", project, exc)
+        return
 
-    # Write playbook with hash comment
-    file_content = f"{playbook_content}\n\n{_PLAYBOOK_HASH_PREFIX}{hexdigest} -->\n"
-    try:
-        playbook_file.write_text(file_content)
-    except OSError as exc:
-        log.warning("Failed to write playbook file %s: %s", playbook_file, exc)
+    if result.returncode != 0 or not result.stdout.strip():
+        log.warning("Playbook refine empty/error for %s", project)
+        return
 
-    return playbook_content
+    refined = result.stdout.strip()
+    new_hash = hashlib.sha256(refined.encode()).hexdigest()
+    refined += f"\n\n<!-- refined:{new_hash} -->\n"
+    playbook_path.write_text(refined)
 
 
 _CONSOLIDATION_SYSTEM = (
@@ -944,7 +945,7 @@ def context_assemble(query: str, project: str = "default") -> str:
             content = playbook_path.read_text().strip()
             # Strip hash comment at end
             lines = content.split("\n")
-            if lines and lines[-1].strip().startswith("<!-- cortex-hash:"):
+            if lines and (lines[-1].strip().startswith("<!-- cortex-hash:") or lines[-1].strip().startswith("<!-- refined:")):
                 content = "\n".join(lines[:-1]).strip()
             playbook_content = content
         except OSError:

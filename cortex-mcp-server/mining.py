@@ -24,7 +24,8 @@ from storage import (
     _find_best_match,
     _find_memory,
     _generate_index,
-    _generate_playbook,
+    _playbook_append,
+    _playbook_refine,
     _make_memory,
     _obsidian_memories,
     _save_memory,
@@ -322,6 +323,7 @@ def mine_session(jsonl_path: str) -> dict:
                     merged = _merge_memories(existing.get("essence", ""), content)
                     _update_memory(existing["id"], merged, insight["title"])
                     memories_merged += 1
+                    _playbook_append(project, {"title": insight["title"], "essence": merged})
                 except (TransientMiningError, ValueError) as exc:
                     # If merge fails, fall through to save as new
                     pass
@@ -346,6 +348,7 @@ def mine_session(jsonl_path: str) -> dict:
                 mem["id"] = _stable_mined_memory_id(session_id, insight["title"], content)
                 _save_memory(mem)
                 memories_saved += 1
+                _playbook_append(project, mem)
             except ObsidianUnavailableError as exc:
                 raise FatalMiningError(str(exc)) from exc
             except Exception as exc:
@@ -401,16 +404,11 @@ def mine_all() -> dict:
 
     if newly_mined > 0:
         _generate_index()
-        # Regenerate playbooks for all projects (hash-skip handles unchanged ones)
+        # Collect all seen projects for consolidation
         seen_projects: set[str] = set()
-        try:
-            for mem in _obsidian_memories():
-                project = mem.get("project", "general")
-                if project not in seen_projects:
-                    seen_projects.add(project)
-                    _generate_playbook(project)
-        except Exception as exc:
-            log.warning("Playbook generation failed: %s", exc)
+        for mem in _obsidian_memories():
+            project = mem.get("project", "general")
+            seen_projects.add(project)
 
         # Consolidate memories — merge redundant, delete obsolete
         try:
@@ -420,6 +418,13 @@ def mine_all() -> dict:
                     log.info("Consolidation: project=%s merged=%d deleted=%d", project, result["merged"], result["deleted"])
         except Exception as exc:
             log.warning("Consolidation failed: %s", exc)
+
+        # Refine playbooks — reorganize, deduplicate, clean up
+        try:
+            for project in seen_projects:
+                _playbook_refine(project)
+        except Exception as exc:
+            log.warning("Playbook refinement failed: %s", exc)
 
     return {
         "total_sessions": total,

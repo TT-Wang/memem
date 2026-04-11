@@ -64,18 +64,17 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         return
 
     if cmd == "--rebuild-playbooks":
-        from storage import _obsidian_memories, _generate_playbook
+        from storage import _obsidian_memories, _playbook_refine
         seen = set()
         count = 0
         for mem in _obsidian_memories():
             project = mem.get("project", "general")
             if project not in seen:
                 seen.add(project)
-                result = _generate_playbook(project)
-                if result:
-                    count += 1
-                    print(f"  Generated: {project}")
-        print(f"Rebuilt {count} playbooks")
+                _playbook_refine(project)
+                count += 1
+                print(f"  Refined: {project}")
+        print(f"Refined {count} playbooks")
         return
 
     if cmd == "--assemble-context":
