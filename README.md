@@ -173,7 +173,8 @@ bash miner-wrapper.sh start|stop|status    # Miner with auto-restart
 
 - Claude Code
 - Python 3.11+
-- Obsidian vault (default `~/obsidian-brain/`, configurable)
+- `mcp` Python package (`pip install mcp`)
+- Obsidian vault (default `~/obsidian-brain/`, auto-created on first run)
 
 ## License
 

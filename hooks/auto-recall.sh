@@ -65,9 +65,13 @@ try:
 except (json.JSONDecodeError, TypeError):
     pass
 
-# Try context assembly if we have a message
+# Check if memories exist before calling expensive assembly
+memories_dir = Path(vault) / "cortex" / "memories"
+memory_count = len(list(memories_dir.glob("*.md"))) if memories_dir.exists() else 0
+
+# Try context assembly if we have a message AND memories exist
 assembled = ""
-if message:
+if message and memory_count > 0:
     try:
         result = subprocess.run(
             [sys.executable, server_path, "--assemble-context", message, "default"],

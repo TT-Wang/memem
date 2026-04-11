@@ -1217,9 +1217,14 @@ def context_assemble(query: str, project: str = "default") -> str:
     from transcripts import transcript_search
     transcript_results = transcript_search(query, limit=3)
 
+    # Early return if nothing to assemble
+    if not playbook_content and not memories and ("No matching" in transcript_results or not transcript_results):
+        return ""
+
     # Format materials
     parts = []
-    parts.append(f"PLAYBOOK:\n{playbook_content or 'No playbook available'}")
+    if playbook_content:
+        parts.append(f"PLAYBOOK:\n{playbook_content}")
 
     if memories:
         mem_lines = []
