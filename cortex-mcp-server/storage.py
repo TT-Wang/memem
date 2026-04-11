@@ -343,8 +343,63 @@ def _find_memory(memory_id: str) -> dict | None:
     return prefix_match
 
 
+_SYNONYMS = {
+    "auth": "authentication",
+    "authentication": "auth",
+    "db": "database",
+    "database": "db",
+    "config": "configuration",
+    "configuration": "config",
+    "env": "environment",
+    "environment": "env",
+    "repo": "repository",
+    "repository": "repo",
+    "dep": "dependency",
+    "dependency": "dep",
+    "deps": "dependencies",
+    "dependencies": "deps",
+    "dir": "directory",
+    "directory": "dir",
+    "impl": "implementation",
+    "implementation": "impl",
+    "func": "function",
+    "function": "func",
+    "param": "parameter",
+    "parameter": "param",
+    "args": "arguments",
+    "arguments": "args",
+    "msg": "message",
+    "message": "msg",
+    "err": "error",
+    "error": "err",
+    "req": "request",
+    "request": "req",
+    "res": "response",
+    "response": "res",
+    "jwt": "token",
+    "token": "jwt",
+}
+
+
+def _stem(word: str) -> str:
+    """Minimal suffix stemmer — strips common suffixes for better matching."""
+    for suffix in ("tion", "sion", "ing", "ment", "ness", "able", "ible", "ous", "ive", "ful", "less", "ize", "ise", "ated", "ates", "ies", "ed", "er", "ly", "al", "es", "s"):
+        if len(word) > len(suffix) + 3 and word.endswith(suffix):
+            return word[:-len(suffix)]
+    return word
+
+
 def _word_set(text: str) -> set[str]:
-    return set(re.findall(r"[a-z0-9]+", text.lower()))
+    words = set(re.findall(r"[a-z0-9]+", text.lower()))
+    expanded = set(words)
+    for word in words:
+        stemmed = _stem(word)
+        if stemmed != word:
+            expanded.add(stemmed)
+        syn = _SYNONYMS.get(word)
+        if syn:
+            expanded.add(syn)
+    return expanded
 
 
 def _ngram_set(text: str, n: int) -> set:

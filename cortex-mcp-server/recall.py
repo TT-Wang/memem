@@ -23,7 +23,7 @@ def _search_memories(query: str, scope_id: str | None = None, limit: int = 10) -
         title_hits = len(query_words & title_words)
         body_hits = len(query_words & mem_words) - title_hits
         keyword_score = (title_hits * 2 + body_hits) / len(query_words)
-        if keyword_score > 0:
+        if keyword_score >= 0.3:
             # Temporal + access weighting
             last_touch = mem.get("last_accessed") or mem.get("updated_at") or mem.get("created_at", "")
             try:
