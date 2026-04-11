@@ -1,26 +1,24 @@
 ---
 name: cortex-mine
-description: Mine existing Claude Code sessions for knowledge. Extracts durable insights from past conversations.
+description: Start the Cortex miner daemon to automatically mine new sessions going forward.
 allowed-tools: [Bash]
 ---
 
-Mine all existing Claude Code sessions for knowledge. This opts in to mining your full history — by default, Cortex only mines new sessions going forward.
+Start the Cortex miner daemon. It runs in the background and automatically extracts knowledge from new Claude Code sessions as they complete.
 
-1. First show how many sessions are available:
+1. Check if the miner is already running:
 ```bash
-find ~/.claude/projects/ -name "*.jsonl" ! -path "*/subagents/*" -size +5k | wc -l
+bash "${CLAUDE_PLUGIN_ROOT}/cortex-mcp-server/miner-wrapper.sh" status
 ```
 
-2. Tell the user approximately how long it will take (~3-5 seconds per session).
-
-3. Start the mining in the background (--mine-all clears the install-time gate):
+2. If not running, start it:
 ```bash
-nohup python3 "${CLAUDE_PLUGIN_ROOT}/cortex-mcp-server/server.py" --mine-all > /dev/null 2>&1 &
-echo "Mining started in background (PID $!)"
+bash "${CLAUDE_PLUGIN_ROOT}/cortex-mcp-server/miner-wrapper.sh" start
 ```
 
-4. Tell the user:
-- Mining is running in the background
-- They can continue working normally
-- New memories will appear in Obsidian as they're extracted
-- Run `/cortex-status` to check progress
+3. If already running, tell the user:
+- The miner is active and mining new sessions automatically
+- It polls every 60 seconds for completed sessions
+- Run `/cortex-status` to check memory count and health
+
+The miner only processes sessions created after Cortex was installed. For mining older history, use `/cortex-mine-history`.

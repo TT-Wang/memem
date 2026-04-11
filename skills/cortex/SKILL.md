@@ -25,7 +25,8 @@ Then show this help:
 **Available commands:**
 - `/cortex` — this help screen
 - `/cortex-status` — detailed memory system status
-- `/cortex-mine` — mine existing Claude Code sessions for knowledge
+- `/cortex-mine` — start/check the miner daemon (new sessions)
+- `/cortex-mine-history` — mine all historical sessions (opt-in, may take hours)
 
 **MCP tools:**
 - `memory_save` — store a lesson, pattern, or convention
