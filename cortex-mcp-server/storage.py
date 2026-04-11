@@ -1,5 +1,6 @@
 import atexit
 import hashlib
+import json
 import logging
 import os
 import re
@@ -396,7 +397,24 @@ def _find_best_match(content: str, scope_id: str = "default") -> tuple[dict | No
         word_c = _containment(content_words, mem_words)
         bigram_c = _containment(content_bigrams, _ngram_set(mem_text, 2))
         trigram_c = _containment(content_trigrams, _ngram_set(mem_text, 3))
-        score = 0.5 * word_c + 0.3 * bigram_c + 0.2 * trigram_c
+        containment_score = 0.5 * word_c + 0.3 * bigram_c + 0.2 * trigram_c
+
+        # Temporal + access weighting
+        last_touch = mem.get("last_accessed") or mem.get("updated_at") or mem.get("created_at", "")
+        try:
+            if last_touch:
+                dt = datetime.fromisoformat(last_touch.replace("Z", "+00:00"))
+                hours_old = max(0, (datetime.now(timezone.utc) - dt).total_seconds() / 3600)
+                recency = 0.995 ** hours_old
+            else:
+                recency = 0.5
+        except (ValueError, TypeError):
+            recency = 0.5
+
+        access_count = mem.get("access_count", 0)
+        access_boost = min(access_count / 10.0, 1.0)
+
+        score = 0.6 * containment_score + 0.2 * recency + 0.2 * access_boost
         if score > best_score:
             best_score = score
             best_mem = mem
@@ -738,3 +756,108 @@ def _generate_playbook(project: str) -> str:
         log.warning("Failed to write playbook file %s: %s", playbook_file, exc)
 
     return playbook_content
+
+
+_CONSOLIDATION_SYSTEM = (
+    "You are a memory consolidation engine. Review these memory entries for a project "
+    "and identify cleanup actions. Output a JSON object with:\n"
+    '- "merge": array of [keep_id, remove_id] pairs for redundant memories that say the same thing. '
+    "The first ID is kept (merged into), the second is deleted.\n"
+    '- "delete": array of IDs for memories that are obsolete, superseded by other memories in the set, '
+    "or no longer accurate.\n\n"
+    "Be conservative — only flag clear redundancies and obvious obsolescence. "
+    "When in doubt, keep the memory.\n"
+    "Output ONLY the JSON object, no other text."
+)
+
+
+def _consolidate_project(project: str) -> dict:
+    """Consolidate memories for a project — merge redundant, delete obsolete."""
+    memories = _obsidian_memories(project)
+    if len(memories) < 5:
+        return {"merged": 0, "deleted": 0}
+
+    # Build summary for Haiku
+    lines = []
+    total_chars = 0
+    for mem in memories:
+        line = f"[{mem['id'][:8]}] {mem.get('title', '')}: {mem.get('essence', '')[:200]}"
+        if total_chars + len(line) > 50000:
+            break
+        lines.append(line)
+        total_chars += len(line)
+
+    prompt = "Review these memory entries and identify cleanup actions:\n\n" + "\n".join(lines)
+
+    try:
+        result = subprocess.run(
+            ["claude", "-p", "--model", "haiku", "--tools", "", "--system-prompt", _CONSOLIDATION_SYSTEM],
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except Exception as exc:
+        log.warning("Consolidation failed for %s: %s", project, exc)
+        return {"merged": 0, "deleted": 0}
+
+    if result.returncode != 0:
+        log.warning("Consolidation Haiku error for %s: %s", project, result.stderr.strip()[:200])
+        return {"merged": 0, "deleted": 0}
+
+    output = result.stdout.strip()
+    if not output:
+        return {"merged": 0, "deleted": 0}
+
+    # Parse JSON — find { } with bracket depth
+    json_start = output.find("{")
+    if json_start == -1:
+        return {"merged": 0, "deleted": 0}
+    depth = 0
+    json_end = -1
+    for i in range(json_start, len(output)):
+        if output[i] == "{": depth += 1
+        elif output[i] == "}":
+            depth -= 1
+            if depth == 0:
+                json_end = i
+                break
+    if json_end == -1:
+        return {"merged": 0, "deleted": 0}
+
+    try:
+        actions = json.loads(output[json_start:json_end + 1])
+    except json.JSONDecodeError:
+        return {"merged": 0, "deleted": 0}
+
+    merged_count = 0
+    deleted_count = 0
+
+    # Execute merges
+    for pair in actions.get("merge", []):
+        if not isinstance(pair, list) or len(pair) != 2:
+            continue
+        keep_id, remove_id = pair[0], pair[1]
+        keep_mem = _find_memory(keep_id)
+        remove_mem = _find_memory(remove_id)
+        if not keep_mem or not remove_mem:
+            continue
+        try:
+            # Lazy import to avoid circular dependency (mining imports from storage)
+            from mining import _merge_memories
+            merged_content = _merge_memories(keep_mem.get("essence", ""), remove_mem.get("essence", ""))
+            _update_memory(keep_mem["id"], merged_content)
+            _delete_memory(remove_mem["id"])
+            merged_count += 1
+        except Exception as exc:
+            log.warning("Consolidation merge failed: %s", exc)
+
+    # Execute deletes
+    for mem_id in actions.get("delete", []):
+        if not isinstance(mem_id, str):
+            continue
+        if _find_memory(mem_id):
+            _delete_memory(mem_id)
+            deleted_count += 1
+
+    return {"merged": merged_count, "deleted": deleted_count}

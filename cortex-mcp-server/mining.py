@@ -19,6 +19,8 @@ import logging
 
 from storage import (
     ObsidianUnavailableError,
+    _consolidate_project,
+    _delete_memory,
     _find_best_match,
     _find_memory,
     _generate_index,
@@ -302,6 +304,7 @@ def mine_session(jsonl_path: str) -> dict:
         memories_saved = 0
         memories_merged = 0
         duplicates_skipped = 0
+        memories_deleted = 0
         for insight in insights:
             project = insight["project"]
             content = insight["content"]
@@ -348,16 +351,24 @@ def mine_session(jsonl_path: str) -> dict:
             except Exception as exc:
                 raise FatalMiningError(f"storage write failed: {exc}") from exc
 
+            # Handle supersedes — delete the obsolete memory
+            if insight.get("supersedes"):
+                old_mem, old_score = _find_best_match(insight["supersedes"], scope_id=project)
+                if old_mem and old_score > 0.3:
+                    _delete_memory(old_mem["id"])
+                    memories_deleted += 1
+
         _mark_session(
             path,
             STATUS_COMPLETE,
-            f"saved={memories_saved} merged={memories_merged} skipped={duplicates_skipped} version={MINER_STATE_VERSION}",
+            f"saved={memories_saved} merged={memories_merged} skipped={duplicates_skipped} deleted={memories_deleted} version={MINER_STATE_VERSION}",
         )
         return {
             "session_id": session_id,
             "memories_saved": memories_saved,
             "memories_merged": memories_merged,
             "duplicates_skipped": duplicates_skipped,
+            "memories_deleted": memories_deleted,
             "skipped": False,
             "status": STATUS_COMPLETE,
         }
@@ -391,8 +402,8 @@ def mine_all() -> dict:
     if newly_mined > 0:
         _generate_index()
         # Regenerate playbooks for all projects (hash-skip handles unchanged ones)
+        seen_projects: set[str] = set()
         try:
-            seen_projects = set()
             for mem in _obsidian_memories():
                 project = mem.get("project", "general")
                 if project not in seen_projects:
@@ -400,6 +411,15 @@ def mine_all() -> dict:
                     _generate_playbook(project)
         except Exception as exc:
             log.warning("Playbook generation failed: %s", exc)
+
+        # Consolidate memories — merge redundant, delete obsolete
+        try:
+            for project in seen_projects:
+                result = _consolidate_project(project)
+                if result["merged"] > 0 or result["deleted"] > 0:
+                    log.info("Consolidation: project=%s merged=%d deleted=%d", project, result["merged"], result["deleted"])
+        except Exception as exc:
+            log.warning("Consolidation failed: %s", exc)
 
     return {
         "total_sessions": total,

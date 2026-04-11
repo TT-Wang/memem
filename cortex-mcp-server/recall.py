@@ -1,6 +1,7 @@
 import re
 import subprocess
 from collections import Counter
+from datetime import datetime, timezone
 
 from storage import INDEX_PATH, _find_memory, _load_obsidian_memories, _obsidian_memories, _record_access, _word_set
 from transcripts import transcript_search
@@ -21,8 +22,25 @@ def _search_memories(query: str, scope_id: str | None = None, limit: int = 10) -
         title_words = _word_set(title + " " + " ".join(tags))
         title_hits = len(query_words & title_words)
         body_hits = len(query_words & mem_words) - title_hits
-        score = (title_hits * 2 + body_hits) / len(query_words)
-        if score > 0:
+        keyword_score = (title_hits * 2 + body_hits) / len(query_words)
+        if keyword_score > 0:
+            # Temporal + access weighting
+            last_touch = mem.get("last_accessed") or mem.get("updated_at") or mem.get("created_at", "")
+            try:
+                if last_touch:
+                    dt = datetime.fromisoformat(last_touch.replace("Z", "+00:00"))
+                    hours_old = max(0, (datetime.now(timezone.utc) - dt).total_seconds() / 3600)
+                    recency = 0.995 ** hours_old
+                else:
+                    recency = 0.5
+            except (ValueError, TypeError):
+                recency = 0.5
+
+            access_count = mem.get("access_count", 0)
+            access_boost = min(access_count / 10.0, 1.0)
+
+            score = 0.6 * keyword_score + 0.2 * recency + 0.2 * access_boost
+
             result = dict(mem)
             scored.append((score, result))
 
