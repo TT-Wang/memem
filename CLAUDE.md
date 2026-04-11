@@ -31,6 +31,16 @@ Call `mcp__plugin_cortex_cortex__memory_save` with:
 - Completed-work logs or TODO state
 - Trivial or obvious facts easily re-discovered from code
 
+## Mining existing sessions
+
+When a user asks to mine their existing sessions (e.g. "mine my existing sessions"), run this command in the background:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/cortex-mcp-server/server.py" --mine-all &
+```
+
+This extracts knowledge from all past Claude Code sessions. It runs in the background and may take a while for large histories. Tell the user it's running and they can continue working normally.
+
 ## Available tools
 
 | Tool | What |

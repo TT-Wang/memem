@@ -98,7 +98,25 @@ else:
     memory_count = len(list(memories_dir.glob("*.md"))) if memories_dir.exists() else 0
 
     if memory_count == 0:
+        # Count existing session logs for the mine-existing option
+        import glob as _glob
+        sessions_dir = Path.home() / ".claude" / "projects"
+        existing_sessions = 0
+        if sessions_dir.exists():
+            existing_sessions = len(_glob.glob(str(sessions_dir / "**" / "*.jsonl"), recursive=True))
+
         # Brand new user — welcome + onboarding
+        mine_option = ""
+        if existing_sessions > 0:
+            mine_option = (
+                f"\n**Quick start — mine your existing sessions:**\n"
+                f"You have {existing_sessions} past Claude Code sessions. "
+                "Cortex can extract knowledge from them to give you a head start. "
+                "Ask me: **\"mine my existing sessions\"** and I'll run "
+                "the miner to extract durable knowledge from your history. "
+                "This runs in the background and may take a while for large histories.\n"
+            )
+
         output = (
             "```\n"
             "  ██████╗ ██████╗ ██████╗ ████████╗███████╗██╗  ██╗\n"
@@ -115,7 +133,8 @@ else:
             "and conventions are automatically extracted and stored.\n"
             "- Future sessions start with relevant context pre-loaded — no more repeating yourself.\n"
             "- The more you work, the smarter it gets.\n\n"
-            "**Getting started:**\n"
+            + mine_option +
+            "\n**Getting started:**\n"
             "1. Just work normally — Cortex runs in the background\n"
             "2. To save something important now: use `memory_save`\n"
             "3. To search past knowledge: use `memory_recall`\n"
