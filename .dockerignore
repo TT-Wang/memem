@@ -1,0 +1,30 @@
+# Exclude everything not needed to build the MCP server image.
+# Glama only needs the Python package + deps to validate introspection.
+
+.git
+.github
+.venv
+.claude
+.forge
+.pytest_cache
+__pycache__
+*.pyc
+*.pyo
+
+# Dev-only assets
+tests
+docs
+skills
+hooks
+bootstrap.sh
+cortex_server/miner-wrapper.sh
+cortex_server/mine-cron.sh
+
+# Build artifacts
+dist
+build
+*.egg-info
+
+# Local state (should never be in the repo but defensive)
+~/.cortex
+obsidian-brain
