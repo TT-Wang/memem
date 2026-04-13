@@ -85,6 +85,22 @@ def _build_mcp():
         results with a multi-signal scorer (relevance + recency + usage + importance),
         and expands related-memory links.
 
+        Behaviour:
+          - Read-only. Does not modify any memory, index, or sidecar file.
+            Only side effect is a bump to the access-count telemetry sidecar
+            (~/.cortex/telemetry.json), which influences future ranking.
+          - No authentication required. Cortex is local-first; there are no
+            credentials, tokens, or API keys.
+          - No rate limits. Typical latency is under 100ms on corpora up to
+            ~10k memories; pathological queries can take up to ~500ms.
+          - Data access scope: reads from ~/obsidian-brain/cortex/memories/
+            and ~/.cortex/search.db. Nothing leaves the local machine.
+          - Idempotent: calling twice with the same query returns the same
+            results (modulo the access-count telemetry bump).
+          - Failure modes: returns "No memories found for: <query>" on empty
+            result sets. Never raises to the caller; internal errors fall
+            back to a slower file-scan path.
+
         Use `memory_recall` when:
         - You need specific facts ("what auth library did we pick?")
         - You want to check if a topic has prior context before making a decision
@@ -162,6 +178,24 @@ def _build_mcp():
         environment quirks, non-obvious bug fixes, or anything you'd otherwise
         have to re-explain in the next session.
 
+        Behaviour:
+          - MUTATION. Writes a new markdown file under
+            ~/obsidian-brain/cortex/memories/, appends to the FTS5 index
+            (~/.cortex/search.db), updates ~/obsidian-brain/cortex/_index.md,
+            and writes an append-only entry to ~/.cortex/events.jsonl.
+            Writes are atomic (tmp + fsync + os.replace) and fcntl-locked.
+          - No authentication required. Local-first; no credentials.
+          - No rate limits. Typical latency 50-200ms including the security
+            scan, dedup check, and write sync.
+          - Data access scope: writes stay entirely on the local filesystem.
+            Nothing is sent over the network.
+          - Not idempotent: calling twice with identical content triggers
+            the dedup check and the second call returns a "Memory already
+            exists" error instead of a duplicate write.
+          - Failure modes: rejected inputs return a string error ("Memory
+            already exists", "Memory rejected: <security threat>"); they
+            never raise to the caller.
+
         Every save goes through:
         1. Prompt-injection + credential-exfil security scan (rejects matches)
         2. Fuzzy deduplication against existing memories (word+bigram+trigram
@@ -216,6 +250,17 @@ def _build_mcp():
         stored — e.g. to audit which projects have the most memories, to check
         if a specific memory you wrote earlier is still present, or to find a
         memory whose exact title you remember but whose keywords are ambiguous.
+
+        Behaviour:
+          - Read-only. No mutations at all, not even telemetry bumps.
+          - No authentication required.
+          - No rate limits. Latency scales linearly with memory count;
+            typical sub-second on corpora up to ~10k.
+          - Data access scope: reads ~/obsidian-brain/cortex/memories/
+            markdown files via filesystem glob. Nothing leaves the machine.
+          - Idempotent and deterministic for a given filesystem state.
+          - Failure modes: returns "No memories in scope: <scope>" for an
+            empty scope. Never raises.
 
         Use `memory_list` when:
         - You want to see everything, not a ranked subset
@@ -275,6 +320,23 @@ def _build_mcp():
         Each imported item runs through the same security scan and deduplication
         as `memory_save`, so clean imports even from messy sources.
 
+        Behaviour:
+          - MUTATION. Writes one or more memory markdown files, updates
+            FTS5 index, _index.md, and events.jsonl. Same atomic +
+            fcntl-locked write path as `memory_save`.
+          - No authentication required.
+          - No rate limits, but latency scales with source size —
+            importing a 100-item directory can take several seconds.
+          - Data access scope: reads the supplied `source_path` from the
+            local filesystem. Guarded against path traversal: the resolved
+            path must be inside $HOME; anything outside is rejected.
+            Nothing is sent over the network.
+          - Not idempotent: re-importing the same source triggers the
+            dedup check, which rejects duplicates with a summary count.
+          - Failure modes: invalid or non-existent source paths return a
+            string error. Individual rejected items are counted in the
+            summary and do not abort the whole import.
+
         Use `memory_import` for:
         - Initial bootstrap from an existing `CLAUDE.md` or notes folder
         - Absorbing a team-wide decision log into a project scope
@@ -330,6 +392,20 @@ def _build_mcp():
         Use it when you need to find the actual back-and-forth of a prior
         conversation, not the distilled lesson from it.
 
+        Behaviour:
+          - Read-only. Does not modify transcripts, memories, or any index.
+          - No authentication required.
+          - No rate limits. Latency scales with transcript corpus size;
+            typical 100-500ms across a year of daily sessions.
+          - Data access scope: reads ~/.claude/projects/**/*.jsonl via
+            direct filesystem access. Does NOT read ~/obsidian-brain/
+            (that's what `memory_recall` and `memory_list` are for).
+            Nothing is sent over the network.
+          - Idempotent and deterministic for a given filesystem state.
+          - Failure modes: returns "No matching sessions" on empty
+            result sets. Sessions older than Claude Code's 30-day
+            retention window are not searchable (they've been deleted).
+
         Use `transcript_search` when:
         - You want to recall "what did I actually say three weeks ago about X"
         - A mined memory references a session and you want the full context
@@ -383,6 +459,31 @@ def _build_mcp():
         then uses Claude Haiku to synthesise a focused markdown briefing for
         the given query. The result is a ready-to-read summary, NOT a raw
         memory dump — usually 300-800 tokens of distilled relevant knowledge.
+
+        Behaviour:
+          - Read-only with respect to the Cortex memory store. Bumps access
+            telemetry on memories it reads (same as `memory_recall`).
+          - No authentication required by Cortex itself. The optional
+            Haiku synthesis step shells out to the local `claude` CLI,
+            which may use Claude Code credentials the user already has
+            signed in — Cortex does not handle those credentials directly.
+          - Rate limits: depend on the `claude` CLI backend in the healthy
+            path. In degraded mode (claude CLI missing), there are no
+            rate limits at all — Cortex just returns raw materials.
+          - Data access scope: reads ~/obsidian-brain/cortex/memories/,
+            ~/obsidian-brain/cortex/playbooks/<project>.md, ~/.cortex/search.db,
+            and ~/.claude/projects/ transcripts. If the `claude` CLI is
+            invoked, the gathered materials (up to 50KB) are sent to Haiku
+            via that subprocess — which in turn sends them to Anthropic's
+            API under the user's existing Claude Code session. In degraded
+            mode nothing leaves the machine.
+          - Latency: 3-15 seconds with Haiku; <500ms in degraded mode.
+          - Not idempotent at the Haiku level: the same query can produce
+            slightly different briefings across calls due to Haiku sampling.
+            The underlying memory retrieval step IS deterministic.
+          - Failure modes: returns "" on genuinely empty vaults. Never
+            raises to the caller; Haiku failures silently fall back to
+            returning the raw materials.
 
         Use `context_assemble` when:
         - Starting a new session and you want the assistant loaded with context
