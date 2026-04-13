@@ -8,7 +8,6 @@ interactions.
 
 import re
 
-
 _INJECTION_PATTERNS = [
     (r"ignore\s+.{0,20}(previous|prior|above|all)\s+.{0,10}instructions", "prompt_injection"),
     (r"ignore\s+(previous|all|above|prior)\s+instructions", "prompt_injection"),

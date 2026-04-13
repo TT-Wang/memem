@@ -9,17 +9,16 @@ Usage: python3 eval.py
 """
 
 import random
-import sys
-from pathlib import Path
 
 
 def run_eval(sample_size: int = 10) -> dict:
     """Run memory system evaluation and return scorecard."""
-    from session_state import SESSIONS_DIRS, SETTLE_SECONDS
-    from storage import _find_best_match, _word_set, scan_memory_content, _obsidian_memories
-    from transcripts import _extract_conversation
-    from mining import _is_agent_session
     import time
+
+    from mining import _is_agent_session
+    from session_state import SESSIONS_DIRS
+    from storage import _obsidian_memories, _word_set, scan_memory_content
+    from transcripts import _extract_conversation
 
     results = {
         "sessions_sampled": 0,

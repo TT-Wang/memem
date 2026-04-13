@@ -1,6 +1,5 @@
 """Tests for SQLite FTS5 search index."""
 
-import pytest
 
 
 def test_init_db(tmp_cortex_dir):

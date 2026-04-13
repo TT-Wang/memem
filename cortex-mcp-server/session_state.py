@@ -7,7 +7,6 @@ from pathlib import Path
 from miner_protocol import MINER_STATE_VERSION, STATUS_COMPLETE
 from storage import CORTEX_DIR, _now
 
-
 MINED_SESSIONS_FILE = CORTEX_DIR / ".mined_sessions"
 SESSIONS_DIRS = [Path.home() / ".claude" / "projects"]
 _extra = os.environ.get("CORTEX_EXTRA_SESSION_DIRS", "")

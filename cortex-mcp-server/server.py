@@ -11,13 +11,13 @@ This file is the thin runtime entrypoint. Core behavior lives in:
   cli.py        command dispatch for non-MCP entrypoints
 """
 
-from mcp.server.fastmcp import FastMCP
-
 from cli import dispatch_cli
-from operations import memory_import as _memory_import, memory_save as _memory_save
-from recall import memory_list as _memory_list, memory_recall as _memory_recall
+from mcp.server.fastmcp import FastMCP
+from operations import memory_import as _memory_import
+from operations import memory_save as _memory_save
+from recall import memory_list as _memory_list
+from recall import memory_recall as _memory_recall
 from transcripts import transcript_search as _transcript_search
-
 
 mcp = FastMCP("cortex")
 

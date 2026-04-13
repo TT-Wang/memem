@@ -14,7 +14,7 @@ import os
 import re
 import tempfile
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 
@@ -36,7 +36,6 @@ def _atomic_write(path: Path, content: str) -> None:
         raise
 
 from models import (
-    CORTEX_DIR,
     INDEX_PATH,
     OBSIDIAN_MEMORIES_DIR,
     OBSIDIAN_VAULT,
@@ -44,9 +43,9 @@ from models import (
     _normalize_scope_id,
     now_iso,
 )
+from search_index import _index_memory, _remove_from_index
 from security import scan_memory_content
 from telemetry import _log_event
-from search_index import _index_memory, _remove_from_index
 
 log = logging.getLogger("cortex-obsidian")
 
@@ -656,7 +655,7 @@ def _memory_date_key(mem: dict) -> datetime:
     try:
         return datetime.fromisoformat((mem.get("created_at") or "").replace("Z", "+00:00"))
     except Exception:
-        return datetime.min.replace(tzinfo=timezone.utc)
+        return datetime.min.replace(tzinfo=UTC)
 
 
 def _generate_index(scope_id: str = "default") -> str:
@@ -670,7 +669,7 @@ def _generate_index(scope_id: str = "default") -> str:
     if "general" in projects:
         sorted_projects.append("general")
 
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
     lines = [
         "# Cortex Memory Index",
         f"Updated: {today} | Total: {len(memories)} memories",
@@ -706,7 +705,7 @@ def _recount_index_sections(lines: list[str]) -> list[str]:
             lines[idx] = f"## {section_name} ({count} {noun})"
 
     total = sum(1 for entry in lines if entry.startswith("- "))
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
     for idx, entry in enumerate(lines):
         if entry.startswith("Updated:"):
             lines[idx] = f"Updated: {today} | Total: {total} memories"

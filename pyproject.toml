@@ -49,7 +49,19 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "RET", "SIM"]
-ignore = ["E501", "N806", "N803"]
+ignore = [
+    "E501", "N806", "N803",
+    "E402",   # module imports not at top — used for lazy/circular avoidance
+    "E701",   # multiple statements on one line
+    "B904",   # raise ... from err — style, not correctness
+    "C401",   # set comprehension vs generator
+    "SIM102", # nested-if readability preference
+    "SIM105", # contextlib.suppress preference
+    "SIM115", # context-handler preference
+]
+
+[tool.ruff.lint.per-file-ignores]
+"cortex-mcp-server/storage.py" = ["F401"]
 
 [tool.mypy]
 python_version = "3.11"

@@ -2,12 +2,20 @@ import logging
 import re
 import subprocess
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+
+from storage import (
+    INDEX_PATH,
+    _find_memory,
+    _get_telemetry,
+    _load_obsidian_memories,
+    _obsidian_memories,
+    _record_access,
+    _word_set,
+)
+from transcripts import transcript_search
 
 log = logging.getLogger("cortex-recall")
-
-from storage import INDEX_PATH, _find_memory, _get_telemetry, _load_obsidian_memories, _obsidian_memories, _record_access, _word_set
-from transcripts import transcript_search
 
 
 def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 10) -> list[dict]:
@@ -32,7 +40,7 @@ def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 1
             try:
                 if last_touch:
                     dt = datetime.fromisoformat(last_touch.replace("Z", "+00:00"))
-                    hours_old = max(0, (datetime.now(timezone.utc) - dt).total_seconds() / 3600)
+                    hours_old = max(0, (datetime.now(UTC) - dt).total_seconds() / 3600)
                     recency = 0.995 ** hours_old
                 else:
                     recency = 0.5
@@ -100,7 +108,7 @@ def _search_memories(query: str, scope_id: str | None = None, limit: int = 10, r
             try:
                 if last_touch:
                     dt = datetime.fromisoformat(last_touch.replace("Z", "+00:00"))
-                    hours_old = max(0, (datetime.now(timezone.utc) - dt).total_seconds() / 3600)
+                    hours_old = max(0, (datetime.now(UTC) - dt).total_seconds() / 3600)
                     recency = 0.995 ** hours_old
                 else:
                     recency = 0.5

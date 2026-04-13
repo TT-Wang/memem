@@ -1,4 +1,5 @@
 import json
+import logging
 import subprocess
 from pathlib import Path
 
@@ -9,34 +10,29 @@ from miner_protocol import (
     STATUS_IN_PROGRESS,
 )
 from session_state import (
-    MINED_SESSIONS_FILE,
     find_settled_sessions,
     load_mined_session_state,
     session_is_complete,
     update_session_state,
 )
-import logging
-
 from storage import (
     ObsidianUnavailableError,
     _consolidate_project,
-    _delete_memory,
     _deprecate_memory,
     _find_best_match,
-    _find_memory,
     _generate_index,
     _log_event,
-    _playbook_append,
-    _playbook_refine,
     _make_memory,
     _obsidian_memories,
+    _playbook_append,
+    _playbook_refine,
     _save_memory,
     _stable_mined_memory_id,
     _update_memory,
 )
+from transcripts import _extract_conversation
 
 log = logging.getLogger("cortex-miner")
-from transcripts import _extract_conversation
 
 
 class MiningError(RuntimeError):

@@ -77,7 +77,7 @@ def context_assemble(query: str, project: str = "default") -> str:
             title = mem.get("title", "Untitled")
             essence = mem.get("essence", mem.get("full_record", ""))
             mem_lines.append(f"## {title}\n{essence}")
-        parts.append(f"RELEVANT MEMORIES:\n" + "\n\n".join(mem_lines))
+        parts.append("RELEVANT MEMORIES:\n" + "\n\n".join(mem_lines))
 
     if transcript_results and "No matching" not in transcript_results:
         parts.append(f"RELATED SESSIONS:\n{transcript_results}")

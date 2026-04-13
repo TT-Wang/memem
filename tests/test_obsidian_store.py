@@ -26,7 +26,7 @@ def test_make_memory_rejects_injection(tmp_vault):
 
 
 def test_write_read_roundtrip(tmp_vault, sample_memory):
-    from obsidian_store import _make_memory, _write_obsidian_memory, _obsidian_memories
+    from obsidian_store import _make_memory, _obsidian_memories, _write_obsidian_memory
     mem = _make_memory(**sample_memory)
     _write_obsidian_memory(mem)
     mems = _obsidian_memories()
@@ -35,7 +35,7 @@ def test_write_read_roundtrip(tmp_vault, sample_memory):
 
 
 def test_containment_scoring():
-    from obsidian_store import _word_set, _containment
+    from obsidian_store import _containment, _word_set
     a = _word_set("JWT authentication tokens")
     b = _word_set("JWT tokens are used for auth")
     assert _containment(a, b) > 0.3

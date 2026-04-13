@@ -4,12 +4,11 @@ Exercises the full save → search → recall → deprecate flow across
 multiple split modules.
 """
 
-import pytest
 
 
 def test_save_and_recall(tmp_vault, tmp_cortex_dir):
     """Save 3 memories, verify they can all be read back."""
-    from obsidian_store import _make_memory, _save_memory, _obsidian_memories
+    from obsidian_store import _make_memory, _obsidian_memories, _save_memory
 
     memories = [
         _make_memory(
@@ -39,7 +38,7 @@ def test_save_and_recall(tmp_vault, tmp_cortex_dir):
 
 def test_dedup_catches_similar(tmp_vault, tmp_cortex_dir):
     """Two memories with overlapping content should trigger dedup."""
-    from obsidian_store import _make_memory, _save_memory, _find_best_match
+    from obsidian_store import _find_best_match, _make_memory, _save_memory
 
     mem1 = _make_memory(
         content="Use bcrypt for password hashing with 10 salt rounds",
@@ -56,8 +55,10 @@ def test_dedup_catches_similar(tmp_vault, tmp_cortex_dir):
 def test_deprecate_preserves_file(tmp_vault, tmp_cortex_dir):
     """Deprecated memories stay on disk but are excluded from active queries."""
     from obsidian_store import (
-        _make_memory, _save_memory, _deprecate_memory,
+        _deprecate_memory,
+        _make_memory,
         _obsidian_memories,
+        _save_memory,
     )
 
     mem = _make_memory(content="Some old decision we reversed", title="Old decision")
@@ -72,7 +73,7 @@ def test_deprecate_preserves_file(tmp_vault, tmp_cortex_dir):
 
 def test_frontmatter_roundtrip_preserves_all_fields(tmp_vault, tmp_cortex_dir):
     """All frontmatter fields must survive write→read."""
-    from obsidian_store import _make_memory, _save_memory, _obsidian_memories
+    from obsidian_store import _make_memory, _obsidian_memories, _save_memory
 
     mem = _make_memory(
         content="The auth module requires Redis for session storage",

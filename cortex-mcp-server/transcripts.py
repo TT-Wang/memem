@@ -1,9 +1,7 @@
 import json
 import re
-from pathlib import Path
 
 from session_state import SESSIONS_DIRS
-
 
 _SYSTEM_REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
 _COMMAND_TAGS_RE = re.compile(

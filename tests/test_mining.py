@@ -1,7 +1,5 @@
 """Tests for mining pipeline (mocked Haiku)."""
 
-import pytest
-from unittest.mock import patch, MagicMock
 
 
 def test_extract_json_string():

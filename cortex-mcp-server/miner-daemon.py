@@ -24,7 +24,6 @@ from miner_protocol import FATAL_EXIT_CODE, TRANSIENT_EXIT_CODE
 from session_state import MINED_SESSIONS_FILE, SETTLE_SECONDS, find_settled_sessions, load_mined_session_state
 from storage import CORTEX_DIR
 
-
 PID_FILE = CORTEX_DIR / "miner.pid"
 LOG_FILE = CORTEX_DIR / "miner.log"
 POLL_INTERVAL = 60
@@ -94,7 +93,7 @@ def start_daemon():
         os._exit(0)
 
     # Redirect std file descriptors
-    devnull_r = open(os.devnull, "r")
+    devnull_r = open(os.devnull)
     devnull_w = open(os.devnull, "w")
     os.dup2(devnull_r.fileno(), sys.stdin.fileno())
     os.dup2(devnull_w.fileno(), sys.stdout.fileno())

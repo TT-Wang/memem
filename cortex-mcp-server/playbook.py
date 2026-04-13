@@ -8,7 +8,7 @@ import hashlib
 import json
 import logging
 import subprocess
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from models import PLAYBOOK_DIR, PLAYBOOK_STAGING_DIR, now_iso
 from obsidian_store import _atomic_write
@@ -93,7 +93,7 @@ def _playbook_refine(project: str) -> None:
         if threat:
             log.warning("Playbook blocked for %s: %s", project, threat)
             return
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
         if not existing:
             combined = f"# {project} — Project Playbook\nUpdated: {today}\n\n{combined}"
         PLAYBOOK_DIR.mkdir(parents=True, exist_ok=True)

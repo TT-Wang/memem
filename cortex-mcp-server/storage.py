@@ -14,7 +14,7 @@ from pathlib import Path
 # ============================================================================
 # Re-exports from split modules
 # ============================================================================
-
+from assembly import _consolidate_project, context_assemble
 from models import (
     CORTEX_DIR,
     EVENT_LOG,
@@ -29,41 +29,16 @@ from models import (
     Memory,
     ObsidianUnavailableError,
     _normalize_scope_id,
-    _PROJECT_ALIASES,
     _now,
     now_iso,
 )
-
-from security import (
-    _EXFIL_PATTERNS,
-    _INJECTION_PATTERNS,
-    _INVISIBLE_CHARS,
-    scan_memory_content,
-)
-
-from telemetry import (
-    _get_telemetry,
-    _log_event,
-    _record_access,
-)
-
-from search_index import (
-    _index_memory,
-    _init_search_db,
-    _rebuild_search_index,
-    _remove_from_index,
-    _search_fts,
-)
-
 from obsidian_store import (
-    _NEGATION_SIGNALS,
-    _SYNONYMS,
     _append_or_update_index_line,
+    _atomic_write,
     _check_contradictions,
     _containment,
     _delete_memory,
     _deprecate_memory,
-    _extract_memory_id_from_filename,
     _extract_project,
     _find_best_match,
     _find_memory,
@@ -77,7 +52,6 @@ from obsidian_store import (
     _ngram_set,
     _obsidian_memories,
     _parse_obsidian_memory_file,
-    _parse_obsidian_tags,
     _recount_index_sections,
     _remove_index_line,
     _require_obsidian_writable,
@@ -86,24 +60,22 @@ from obsidian_store import (
     _stable_mined_memory_id,
     _stem,
     _update_memory,
+    _with_index_lock,
     _word_set,
     _write_obsidian_memory,
     _yaml_escape,
     purge_mined_memories,
 )
-
-from playbook import (
-    _REFINE_SYSTEM,
-    _playbook_append,
-    _playbook_refine,
+from playbook import _playbook_append, _playbook_refine
+from search_index import (
+    _index_memory,
+    _init_search_db,
+    _rebuild_search_index,
+    _remove_from_index,
+    _search_fts,
 )
-
-from assembly import (
-    _ASSEMBLE_SYSTEM,
-    _CONSOLIDATION_SYSTEM,
-    _consolidate_project,
-    context_assemble,
-)
+from security import scan_memory_content
+from telemetry import _get_telemetry, _log_event, _record_access
 
 log = logging.getLogger("cortex-storage")
 

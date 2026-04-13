@@ -1,8 +1,6 @@
 """Shared pytest fixtures for Cortex tests."""
 
-import os
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -20,6 +18,7 @@ def tmp_vault(tmp_path, monkeypatch):
     monkeypatch.setenv("CORTEX_OBSIDIAN_VAULT", str(vault))
     # Reload models to pick up env var
     import importlib
+
     import models
     importlib.reload(models)
     import obsidian_store
@@ -36,6 +35,7 @@ def tmp_cortex_dir(tmp_path, monkeypatch):
     cortex.mkdir()
     monkeypatch.setenv("CORTEX_DIR", str(cortex))
     import importlib
+
     import models
     importlib.reload(models)
     import telemetry

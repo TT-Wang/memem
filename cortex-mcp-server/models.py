@@ -1,10 +1,9 @@
 """Core data types, constants, and path definitions for Cortex."""
 
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypedDict
-
 
 # ============================================================================
 # Path constants
@@ -90,7 +89,7 @@ def _normalize_scope_id(scope_id: str) -> str:
 
 def now_iso() -> str:
     """Return current time as ISO 8601 string with UTC timezone."""
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 # Backward-compat alias

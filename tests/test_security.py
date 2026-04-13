@@ -1,6 +1,5 @@
 """Tests for security.scan_memory_content."""
 
-import pytest
 from security import scan_memory_content
 
 

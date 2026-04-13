@@ -1,6 +1,5 @@
 """Tests for telemetry sidecar."""
 
-import pytest
 
 
 def test_default_telemetry(tmp_cortex_dir):
@@ -27,8 +26,8 @@ def test_multiple_accesses(tmp_cortex_dir):
 
 
 def test_event_log(tmp_cortex_dir):
-    from telemetry import _log_event
     from models import EVENT_LOG
+    from telemetry import _log_event
     _log_event("save", "test-id", title="test")
     assert EVENT_LOG.exists()
     assert "save" in EVENT_LOG.read_text()
