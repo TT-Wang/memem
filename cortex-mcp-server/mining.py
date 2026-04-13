@@ -209,7 +209,9 @@ def _summarize_session_haiku(messages: list[str]) -> list[dict] | None:
         # Check if output is literally "[]" or empty array indicator
         if output.strip() in ("[]", "[ ]"):
             return None  # Legitimate empty — nothing to extract
-        raise TransientMiningError(f"no JSON found in Haiku output: {output[:100]}")
+        # Haiku returned prose/list instead of JSON — log and skip (don't fail session)
+        log.warning("Haiku returned non-JSON output, skipping session: %s", output[:100])
+        return None
 
     # Parse with repair fallback
     parsed = None
@@ -220,13 +222,15 @@ def _summarize_session_haiku(messages: list[str]) -> list[dict] | None:
         try:
             parsed = json.loads(repaired)
         except json.JSONDecodeError:
-            raise TransientMiningError("invalid JSON from Haiku (repair failed)")
+            log.warning("JSON repair failed, skipping session")
+            return None
 
     # Normalise to a list
     if isinstance(parsed, dict):
         parsed = [parsed] if parsed else []
     elif not isinstance(parsed, list):
-        raise TransientMiningError(f"unexpected Haiku output type: {type(parsed)}")
+        log.warning("Unexpected Haiku output type %s, skipping session", type(parsed))
+        return None
 
     # Validate and cap each item
     valid_items: list[dict] = []
@@ -365,6 +369,10 @@ def mine_session(jsonl_path: str) -> dict:
                     log.warning("Memory %s contradicts: %s", mem["id"][:8], mem["contradicts"])
             except ObsidianUnavailableError as exc:
                 raise FatalMiningError(str(exc)) from exc
+            except ValueError as exc:
+                # Validation failure (junk content, security threat) — skip insight, don't crash
+                log.warning("Skipping insight: %s", exc)
+                continue
             except Exception as exc:
                 raise FatalMiningError(f"storage write failed: {exc}") from exc
 
