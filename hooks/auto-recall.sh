@@ -87,6 +87,45 @@ if message and memory_count > 0 and plugin_root:
     except Exception as exc:
         print(f"cortex auto-recall: assemble-context errored: {exc}", file=sys.stderr)
 
+# Build a one-line status banner from ~/.cortex/.capabilities (written by
+# bootstrap.sh and the --doctor command). Silent no-op if the file is missing
+# or the schema is older than we expect.
+def _build_status_banner(memories_dir_path):
+    try:
+        import json as _json
+        caps_path = Path.home() / ".cortex" / ".capabilities"
+        if not caps_path.exists():
+            return None
+        caps = _json.loads(caps_path.read_text())
+        if not isinstance(caps, dict) or caps.get("schema_version", 0) < 1:
+            return None
+        count = 0
+        if memories_dir_path and Path(memories_dir_path).exists():
+            count = len(list(Path(memories_dir_path).glob("*.md")))
+
+        # Check miner state via pidfile (avoid shelling out)
+        miner_ok = False
+        miner_pid = Path.home() / ".cortex" / "miner.pid"
+        if miner_pid.exists():
+            try:
+                pid = int(miner_pid.read_text().strip())
+                os.kill(pid, 0)
+                miner_ok = True
+            except (OSError, ValueError):
+                miner_ok = False
+
+        miner_glyph = "OK" if miner_ok else "DOWN"
+        assembly_glyph = "OK" if caps.get("claude_cli") else "degraded"
+        parts = [f"[Cortex] {count} memories", f"miner {miner_glyph}", f"assembly {assembly_glyph}"]
+        if not caps.get("claude_cli", True):
+            parts.append("(claude CLI missing — FTS-only recall)")
+        if not caps.get("writable_vault", True):
+            parts.append("(vault read-only!)")
+        return " · ".join(parts)
+    except Exception:
+        return None
+
+
 if assembled:
     # Assembly succeeded — inject the tailored brief
     suffix = (
@@ -95,7 +134,9 @@ if assembled:
         "context_assemble). When saving memories, ALWAYS dual-write: save to "
         "Cortex (via memory_save) AND to Claude Code's built-in auto memory system."
     )
-    output = "Cortex context briefing:\n\n" + assembled + "\n\n---\n" + suffix
+    banner = _build_status_banner(memories_dir)
+    banner_prefix = (banner + "\n\n") if banner else ""
+    output = banner_prefix + "Cortex context briefing:\n\n" + assembled + "\n\n---\n" + suffix
 else:
     # Fallback — check if memories exist at all
     index = Path(index_path).read_text() if Path(index_path).exists() else ""

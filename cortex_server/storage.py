@@ -11,6 +11,7 @@ import atexit
 import logging
 import os
 import subprocess
+import time
 from pathlib import Path
 
 from cortex_server.models import CORTEX_DIR, INDEX_PATH, OBSIDIAN_MEMORIES_DIR, PLAYBOOK_DIR, SERVER_PID_FILE
@@ -45,7 +46,15 @@ def _ensure_vault_exists():
 
 
 def _auto_start_miner():
-    """Start the miner daemon if not already running."""
+    """Start the miner daemon if not already running, and verify it came up.
+
+    Previously this was fire-and-forget Popen with no verification — if
+    ``setsid`` was missing, the wrapper was unexecutable, or the daemon
+    crashed on startup, the failure was silent and the user discovered it
+    hours later via ``--status``. Now we Popen, then poll the miner PID
+    file for up to 2 seconds and log a clear warning if the daemon did
+    not come up.
+    """
     try:
         miner_pid_file = CORTEX_DIR / "miner.pid"
         if miner_pid_file.exists():
@@ -58,13 +67,39 @@ def _auto_start_miner():
 
         wrapper = Path(__file__).resolve().parent / "miner-wrapper.sh"
         if not wrapper.exists():
+            log.warning("auto-start-miner: wrapper not found at %s", wrapper)
             return
+
+        # Prefer setsid but fall back to plain bash if setsid is missing
+        # (e.g. minimal macOS installs without coreutils).
+        import shutil as _shutil
+        cmd: list[str] = (
+            ["setsid", "bash", str(wrapper), "start"]
+            if _shutil.which("setsid")
+            else ["bash", str(wrapper), "start"]
+        )
+
         subprocess.Popen(
-            ["setsid", "bash", str(wrapper), "start"],
+            cmd,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
-        log.info("Auto-started miner daemon")
+
+        # Poll for the daemon's PID file instead of trusting Popen.
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            time.sleep(0.1)
+            if miner_pid_file.exists():
+                try:
+                    pid = int(miner_pid_file.read_text().strip())
+                    if _pid_is_running(pid):
+                        log.info("Auto-started miner daemon (PID %d)", pid)
+                        return
+                except (ValueError, OSError):
+                    continue
+        log.warning(
+            "auto-start-miner: daemon did not come up within 2s — check ~/.cortex/miner.log"
+        )
     except Exception:
         log.warning("auto-start-miner failed", exc_info=True)
 

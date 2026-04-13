@@ -230,6 +230,13 @@ def smart_recall(prompt: str, scope_id: str = "default") -> str:
     if not index_content.strip():
         return memory_recall(prompt, scope_id=scope_id, limit=10)
 
+    # Degraded mode: if claude CLI is unavailable, fall back to keyword recall
+    # (which uses FTS5 only). No user-facing failure.
+    from cortex_server.capabilities import assembly_available
+    if not assembly_available():
+        log.info("smart_recall: claude CLI unavailable, falling back to memory_recall (degraded)")
+        return memory_recall(prompt, scope_id=scope_id, limit=10)
+
     system_prompt = "You are a memory selector. Output ONLY 8-character memory IDs, one per line, nothing else."
     user_prompt = (
         f"USER MESSAGE:\n{prompt}\n\n"

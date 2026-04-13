@@ -128,6 +128,14 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         run_eval()
         return
 
+    if cmd == "--doctor":
+        from cortex_server.capabilities import detect_capabilities, pretty_report, write_capabilities
+        caps = detect_capabilities()
+        write_capabilities(caps)
+        print(pretty_report(caps))
+        blockers = not caps.get("mcp") or not caps.get("writable_cortex_dir") or not caps.get("writable_vault")
+        raise SystemExit(1 if blockers else 0)
+
     if cmd == "--events":
         from cortex_server.models import EVENT_LOG
         if not EVENT_LOG.exists():

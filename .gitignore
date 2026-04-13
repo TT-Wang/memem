@@ -4,3 +4,9 @@ __pycache__/
 .claude/settings.json
 .claude/settings.local.json
 .forge/
+# Plugin-local venv created by bootstrap.sh on first run
+.venv/
+# Build artifacts
+dist/
+build/
+*.egg-info/

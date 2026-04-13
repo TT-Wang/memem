@@ -11,10 +11,10 @@
   "keywords": ["memory", "context", "knowledge", "recall", "learning"],
   "mcpServers": {
     "cortex": {
-      "command": "python3",
-      "args": ["-m", "cortex_server.server"],
+      "command": "bash",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/bootstrap.sh"],
       "env": {
-        "PYTHONPATH": "${CLAUDE_PLUGIN_ROOT}"
+        "CLAUDE_PLUGIN_ROOT": "${CLAUDE_PLUGIN_ROOT}"
       }
     }
   }

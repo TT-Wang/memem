@@ -76,14 +76,17 @@ def test_console_script_entry_exists_in_pyproject():
     assert 'cortex-server = "cortex_server.server:main"' in content
 
 
-def test_plugin_json_uses_module_invocation():
-    """Regression guard: plugin.json must invoke the package via `-m` not a raw path."""
+def test_plugin_json_points_at_bootstrap_shim():
+    """Regression guard: plugin.json must invoke bootstrap.sh (not server.py or -m directly).
+
+    The shim is what makes first-run self-healing possible via uv sync.
+    """
     import json
     plugin_json = json.loads((REPO_ROOT / ".claude-plugin" / "plugin.json").read_text())
     mcp = plugin_json["mcpServers"]["cortex"]
-    assert mcp["command"] == "python3"
-    assert mcp["args"][:2] == ["-m", "cortex_server.server"]
-    assert "PYTHONPATH" in mcp["env"]
+    assert mcp["command"] == "bash"
+    assert any("bootstrap.sh" in a for a in mcp["args"]), f"expected bootstrap.sh in args, got {mcp['args']}"
+    assert (REPO_ROOT / "bootstrap.sh").exists(), "bootstrap.sh referenced in plugin.json but missing"
 
 
 def test_hook_references_new_package_path():

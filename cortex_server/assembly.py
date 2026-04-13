@@ -89,6 +89,14 @@ def context_assemble(query: str, project: str = "default") -> str:
 
     prompt = f"QUERY: {query}\n\n{materials}"
 
+    # Degraded mode: if the `claude` CLI isn't available, return the raw
+    # materials (playbook + memory list) instead of failing or silently
+    # returning empty. The caller still gets useful context.
+    from cortex_server.capabilities import assembly_available
+    if not assembly_available():
+        log.info("context_assemble: claude CLI unavailable, returning raw materials (degraded)")
+        return materials if materials else (playbook_content or "")
+
     # Haiku assembles the brief
     try:
         result = subprocess.run(
