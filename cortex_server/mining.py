@@ -164,7 +164,7 @@ def _repair_json(s: str) -> str:
     return s + "".join(reversed(stack))
 
 
-def _summarize_session_haiku(messages: list[str]) -> list[dict] | None:
+def _summarize_session_haiku(messages: list[str]) -> list[dict]:
     """One Haiku call to summarize the whole session into one or more memories."""
     # Truncate at message boundary, not mid-message
     combined_parts = []
@@ -204,31 +204,33 @@ def _summarize_session_haiku(messages: list[str]) -> list[dict] | None:
     # Extract JSON array (preferred) or object from output
     json_str = _extract_json_string(output)
     if json_str is None:
-        # Check if output is literally "[]" or empty array indicator
+        # Legitimate empty — Haiku explicitly signalled nothing to extract
         if output.strip() in ("[]", "[ ]"):
-            return None  # Legitimate empty — nothing to extract
-        # Haiku returned prose/list instead of JSON — log and skip (don't fail session)
-        log.warning("Haiku returned non-JSON output, skipping session: %s", output[:100])
-        return None
+            return []
+        # Malformed output — raise transient so the session stays unmined and retries
+        raise TransientMiningError(
+            f"Haiku returned non-JSON output (first 200 chars): {output[:200]}"
+        )
 
     # Parse with repair fallback
-    parsed = None
     try:
         parsed = json.loads(json_str)
     except json.JSONDecodeError:
         repaired = _repair_json(json_str)
         try:
             parsed = json.loads(repaired)
-        except json.JSONDecodeError:
-            log.warning("JSON repair failed, skipping session")
-            return None
+        except json.JSONDecodeError as exc:
+            raise TransientMiningError(
+                f"JSON repair failed on Haiku output: {exc}"
+            ) from exc
 
     # Normalise to a list
     if isinstance(parsed, dict):
         parsed = [parsed] if parsed else []
     elif not isinstance(parsed, list):
-        log.warning("Unexpected Haiku output type %s, skipping session", type(parsed))
-        return None
+        raise TransientMiningError(
+            f"Unexpected Haiku output type {type(parsed).__name__}"
+        )
 
     # Validate and cap each item
     valid_items: list[dict] = []
@@ -251,7 +253,7 @@ def _summarize_session_haiku(messages: list[str]) -> list[dict] | None:
         entry["importance"] = importance
         valid_items.append(entry)
 
-    return valid_items if valid_items else None
+    return valid_items
 
 
 def _is_agent_session(messages: list[str]) -> bool:

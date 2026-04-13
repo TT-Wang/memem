@@ -66,7 +66,7 @@ def _auto_start_miner():
         )
         log.info("Auto-started miner daemon")
     except Exception:
-        pass
+        log.warning("auto-start-miner failed", exc_info=True)
 
 
 def _register_server_pid():

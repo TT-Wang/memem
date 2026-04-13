@@ -8,6 +8,7 @@ append-only audit trail of all memory operations.
 import fcntl
 import json
 import logging
+import os
 
 from cortex_server.models import CORTEX_DIR, EVENT_LOG, TELEMETRY_FILE, now_iso
 
@@ -34,7 +35,12 @@ def _get_telemetry(memory_id: str) -> dict:
 
 
 def _record_access(memory_id: str) -> None:
-    """Record a memory access in the telemetry sidecar file."""
+    """Record a memory access in the telemetry sidecar file.
+
+    Write is atomic (tmp + fsync + os.replace). If the existing file is
+    corrupt, it's preserved as <file>.corrupt.<ts> rather than silently
+    overwritten so telemetry history can be recovered if needed.
+    """
     CORTEX_DIR.mkdir(parents=True, exist_ok=True)
     lock_path = TELEMETRY_FILE.with_suffix(".lock")
     fd = open(lock_path, "w")
@@ -44,14 +50,27 @@ def _record_access(memory_id: str) -> None:
         if TELEMETRY_FILE.exists():
             try:
                 data = json.loads(TELEMETRY_FILE.read_text())
-            except (json.JSONDecodeError, OSError):
+            except (json.JSONDecodeError, OSError) as exc:
+                backup = TELEMETRY_FILE.with_suffix(f".corrupt.{int(os.path.getmtime(TELEMETRY_FILE))}")
+                try:
+                    TELEMETRY_FILE.rename(backup)
+                    log.warning("telemetry file corrupt (%s); preserved as %s", exc, backup.name)
+                except OSError:
+                    log.warning("telemetry file corrupt (%s); could not back up", exc)
                 data = {}
         key = memory_id[:8]
         entry = data.get(key, {"access_count": 0, "last_accessed": ""})
         entry["access_count"] = entry.get("access_count", 0) + 1
         entry["last_accessed"] = now_iso()
         data[key] = entry
-        TELEMETRY_FILE.write_text(json.dumps(data))
+
+        # Atomic write: tmp + fsync + os.replace
+        tmp_path = TELEMETRY_FILE.with_suffix(".tmp")
+        with open(tmp_path, "w") as out:
+            out.write(json.dumps(data))
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(tmp_path, TELEMETRY_FILE)
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
         fd.close()

@@ -53,7 +53,10 @@ if input_file:
 # Resolve plugin root for PYTHONPATH (package runs via `python -m cortex_server.server`)
 plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
 if not plugin_root:
-    plugin_root = str(Path(index_path).resolve().parent)
+    # No sensible fallback — without plugin root we cannot locate the package.
+    # Surface it on stderr instead of silently guessing the wrong directory.
+    print("cortex auto-recall: CLAUDE_PLUGIN_ROOT not set, skipping assembly", file=sys.stderr)
+    plugin_root = None
 
 # Extract user message from hook input
 message = ""
@@ -67,9 +70,9 @@ except (json.JSONDecodeError, TypeError):
 memories_dir = Path(vault) / "cortex" / "memories"
 memory_count = len(list(memories_dir.glob("*.md"))) if memories_dir.exists() else 0
 
-# Try context assembly if we have a message AND memories exist
+# Try context assembly if we have a message AND memories exist AND we know where the package lives
 assembled = ""
-if message and memory_count > 0:
+if message and memory_count > 0 and plugin_root:
     try:
         sub_env = os.environ.copy()
         sub_env["PYTHONPATH"] = plugin_root + os.pathsep + sub_env.get("PYTHONPATH", "")
@@ -79,8 +82,10 @@ if message and memory_count > 0:
         )
         if result.returncode == 0 and result.stdout.strip():
             assembled = result.stdout.strip()
-    except Exception:
-        pass
+        elif result.returncode != 0:
+            print(f"cortex auto-recall: assemble-context failed (rc={result.returncode}): {result.stderr.strip()[:200]}", file=sys.stderr)
+    except Exception as exc:
+        print(f"cortex auto-recall: assemble-context errored: {exc}", file=sys.stderr)
 
 if assembled:
     # Assembly succeeded — inject the tailored brief
