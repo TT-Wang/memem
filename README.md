@@ -1,105 +1,144 @@
 # Cortex
 
-Persistent memory and context assembly for Claude Code. Remembers across sessions, self-evolves, gets smarter over time.
+**Claude Code that remembers your project across every session.**
+
+Stop re-explaining your conventions, architecture, and lessons. Cortex gives Claude Code a persistent memory that learns from every conversation and surfaces what matters when you need it.
+
+```
+  ██████╗ ██████╗ ██████╗ ████████╗███████╗██╗  ██╗
+ ██╔════╝██╔═══██╗██╔══██╗╚══██╔══╝██╔════╝╚██╗██╔╝
+ ██║     ██║   ██║██████╔╝   ██║   █████╗   ╚███╔╝ 
+ ██║     ██║   ██║██╔══██╗   ██║   ██╔══╝   ██╔██╗ 
+ ╚██████╗╚██████╔╝██║  ██║   ██║   ███████╗██╔╝ ██╗
+  ╚═════╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ╚══════╝╚═╝  ╚═╝
+```
+
+## The problem
+
+Every Claude Code session starts from zero. You re-explain:
+- What your project does
+- Which framework you're using
+- Why you made that weird decision three weeks ago
+- What you tried last time that didn't work
+- Your coding conventions
+
+Multiply by every session, every week, forever.
+
+## What Cortex does
+
+Cortex runs in the background and turns your conversations into durable knowledge. When you start a new session, it assembles a tailored briefing from everything it's learned about your project.
+
+- **Auto-extracts** decisions, conventions, and lessons from every session
+- **Self-evolves** — merges related memories, deprecates outdated ones, consolidates redundancy
+- **Query-aware** — your first message triggers a Haiku-assembled context brief, not a raw index dump
+- **Human-readable** — every memory is a markdown file in your Obsidian vault
+- **Secure** — scans every write for prompt injection and credential exfiltration
 
 ## Install
-
-### Step 1: Install the plugin
 
 ```bash
 claude plugin marketplace add TT-Wang/cortex-plugin
 claude plugin install cortex@cortex-marketplace
 ```
 
-### Step 2: Install Obsidian (optional but recommended)
+That's it. On first run, Cortex creates an Obsidian vault at `~/obsidian-brain` and starts a background miner daemon. Your existing Claude Code sessions stay private by default — run `/cortex-mine-history` if you want to mine them.
 
-Cortex stores memories as markdown files in an Obsidian vault. You don't *need* Obsidian to use Cortex — it works with plain files. But Obsidian lets you browse, search, and visualize your AI's knowledge.
+## First session
 
-**Download Obsidian:** https://obsidian.md (free for personal use, Mac/Windows/Linux)
+```
+You: help me fix the auth bug
 
-After installing:
-1. Open Obsidian
-2. Choose "Open folder as vault"
-3. Select `~/obsidian-brain` (Cortex creates this automatically on first run)
-4. Your memories will appear under `cortex/memories/` as markdown files
-5. Project playbooks appear under `cortex/playbooks/`
+Cortex: [injects context automatically]
+- JWT tokens use RS256 in production (memory from last week)
+- bcrypt.compare is async — must await (memory from 2 days ago)  
+- Auth routes in src/routes/auth.ts
+- JWT_SECRET defaults to 'secret' if not set (known issue)
 
-**Useful Obsidian features for Cortex:**
-- **Graph view** — see how memories link to each other via the `related` field
-- **Search** — full-text search across all memories
-- **Dataview plugin** — query memories by frontmatter fields (importance, project, status)
-- **Tags** — click any tag to see related memories
+Claude: Let me look at src/routes/auth.ts...
+```
 
-### Step 3: Verify setup
+No re-explaining. Claude starts with context.
 
-Start Claude Code and the plugin loads automatically. Or check manually:
+## How it works
 
+```
+Session → auto-recall hook fires on first message
+  → context_assemble(query) → Haiku assembles tailored brief
+  → Relevant memories injected, zero tool calls needed
+
+During session → memory_recall / memory_save / context_assemble available
+  → Save lessons as you discover them
+
+Background → miner daemon extracts knowledge from completed sessions
+  → AUDN pipeline: Add / Update / Noop / Deprecate
+  → Consolidation merges redundant, deprecates obsolete
+  → Playbooks grow per-project, refine periodically
+
+Storage → Obsidian vault (source of truth, human-readable)
+  → SQLite FTS5 (machine-fast search index)
+  → Telemetry sidecar (access tracking, no write amplification)
+  → Event log (append-only audit trail)
+```
+
+## Why not just use vanilla Claude Code?
+
+Vanilla Claude Code gives you `CLAUDE.md` — a single file you edit by hand. Cortex gives you:
+
+- **Automatic knowledge capture** — no manual note-taking
+- **Query-aware context** — only relevant memories injected per session
+- **Self-evolving** — memories merge, update, and deprecate automatically
+- **Cross-project** — works across all your Claude Code projects
+- **Security scanning** — blocks prompt injection, credential leaks
+- **Obsidian integration** — browse your AI's knowledge visually
+
+## Why not use Mem0?
+
+Mem0 is a production-grade memory service. Cortex is different:
+
+| | Cortex | Mem0 |
+|---|--------|------|
+| Storage | Local files (Obsidian + SQLite) | Vector DB + cloud |
+| Deployment | Zero infrastructure | Managed service or self-host |
+| Context assembly | Haiku-synthesized briefings | Raw search results |
+| Human interface | Obsidian vault | API only |
+| Cost at scale | Pay Anthropic for Haiku | Pay for embedding + vector DB |
+| Multi-framework | Claude Code plugin | Works everywhere |
+
+**Use Mem0 if:** you're building a production app for end users with millions of memories, need enterprise features, or want vector search quality.
+
+**Use Cortex if:** you're a developer using Claude Code daily, want local-first storage, care about human-readable memories, and like the Obsidian ecosystem.
+
+## Commands
+
+Slash commands (type in Claude Code):
+- `/cortex` — welcome, status, help
+- `/cortex-status` — memory count, projects, miner health
+- `/cortex-mine` — start the miner daemon
+- `/cortex-mine-history` — opt-in to mine pre-install sessions
+
+CLI (from terminal):
 ```bash
-# Check status (run from the plugin directory)
-python3 ~/.claude/plugins/cache/cortex-marketplace/cortex/*/cortex-mcp-server/server.py --status
+python3 server.py --status                # System status
+python3 server.py --assemble-context "q"  # Context assembly
+python3 server.py --events                # Recent audit log
+python3 server.py --eval                  # Quality smoke test
+python3 server.py --rebuild-search-index  # Rebuild FTS5 index
 ```
 
-The miner daemon starts automatically when the MCP server loads. The vault directory (`~/obsidian-brain/cortex/`) is created automatically on first run.
-
-### Custom vault location
-
-If you already have an Obsidian vault elsewhere:
-
-```bash
-# In your shell profile (~/.bashrc or ~/.zshrc)
-export CORTEX_OBSIDIAN_VAULT="$HOME/my-obsidian-vault"
-```
-
-Cortex will create a `cortex/memories/` folder inside your existing vault.
-
-## What it does
-
-Cortex gives Claude Code a long-term memory. Without it, every session starts from zero. With Cortex, Claude remembers what worked, what failed, and what your project needs.
-
-- **Context assembly** — first message triggers a query-tailored briefing assembled by Haiku
-- **Auto-mining** — background daemon extracts durable knowledge from completed sessions
-- **Self-evolving** — memories merge, deprecate, and consolidate automatically
-- **Security scanned** — all memory writes checked for prompt injection and credential exfil
-
-## Architecture
-
-```
-Session starts → User types first message
-  → Hook fires → context_assemble(query) → Haiku assembles tailored brief
-  → LLM starts working with relevant context, zero tool calls needed
-
-During session:
-  → memory_recall / context_assemble available for deeper dives
-  → memory_save for persisting new knowledge
-
-Background (miner daemon):
-  → Extract conversation from JSONL → Haiku extracts memories
-  → AUDN pipeline: Add / Update (merge) / Noop (skip) / Deprecate
-  → Consolidation: merge redundant, deprecate obsolete
-  → Playbook: grow (stage) + refine (compile)
-
-Storage:
-  → Obsidian vault (source of truth, human-readable)
-  → SQLite FTS5 (search index, machine-fast)
-  → Telemetry sidecar (access tracking)
-  → Event log (audit trail)
-```
-
-## MCP Tools
+## MCP tools (for the LLM)
 
 | Tool | What |
 |------|------|
-| `memory_recall` | Search memories (FTS5 + keyword + temporal + importance scoring) |
-| `memory_save` | Store a lesson, pattern, or convention (security scanned) |
+| `memory_recall` | Search memories (FTS5 + keyword + temporal + importance) |
+| `memory_save` | Store a lesson (security scanned) |
 | `memory_list` | List all memories with stats |
-| `memory_import` | Import from files, directories, or chat exports |
+| `memory_import` | Import from files, directories, chat exports |
 | `transcript_search` | Search raw Claude Code session logs |
-| `context_assemble` | On-demand query-tailored briefing from all knowledge |
+| `context_assemble` | On-demand query-tailored briefing |
 
-## Memory Schema
+## Architecture highlights
 
-Each memory is a markdown file with YAML frontmatter:
-
+**Memory schema** (stored as markdown frontmatter):
 ```yaml
 ---
 id: uuid
@@ -107,74 +146,73 @@ title: "descriptive title"
 project: project-name
 tags: [mined, project-name]
 related: [id1, id2, id3]
-created: 2026-04-11
-updated: 2026-04-11
+created: 2026-04-13
+updated: 2026-04-13
 source_type: mined | user | import
 source_session: abc12345
-importance: 3        # 1-5 scale
-status: active       # active | deprecated
-valid_to:            # set when deprecated
-contradicts: [id1]   # flagged conflicts
+importance: 1-5
+status: active | deprecated
+valid_to:                     # set when deprecated
+contradicts: [id1]            # flagged conflicts
 ---
-
-Memory content here.
 ```
 
-## Scoring
+**Multi-signal scoring** (recall ranking):
+- 50% keyword/FTS relevance
+- 15% recency (0.995^hours decay)
+- 15% access history (usage reinforcement)
+- 20% importance (1-5 scale from Haiku)
 
-Recall uses multi-signal scoring:
-- **50%** keyword/FTS relevance (with stemming + synonym expansion)
-- **15%** recency (exponential decay, 0.995^hours)
-- **15%** access history (usage reinforcement)
-- **20%** importance (1-5 scale from extraction)
+**Three-layer memory flow**:
+- **Raw memories** — atomic units, markdown files
+- **Playbooks** — compiled per-project knowledge, refined periodically
+- **Context briefs** — query-tailored assembly via Haiku
 
-Dedup/merge uses content-only containment scoring (no temporal bias).
+## Setup Obsidian (optional but recommended)
 
-## CLI
+Cortex works without Obsidian — it just writes markdown files. But Obsidian makes browsing your AI's knowledge visual:
 
-```bash
-python3 server.py                          # Start MCP server
-python3 server.py --assemble-context "q"   # Context assembly
-python3 server.py --recall "query"         # Keyword search
-python3 server.py --recall-smart "query"   # Haiku-assisted recall
-python3 server.py --mine-all              # Mine all pending sessions
-python3 server.py --mine-session file.jsonl # Mine single session
-python3 server.py --rebuild-index          # Regenerate _index.md
-python3 server.py --rebuild-playbooks      # Refine all playbooks
-python3 server.py --rebuild-search-index   # Rebuild SQLite FTS5
-python3 server.py --eval                   # Run quality eval
-python3 server.py --events                 # View recent event log
-python3 server.py --purge-mined            # Delete all mined memories
-python3 miner-daemon.py start|stop|status  # Miner daemon
-bash miner-wrapper.sh start|stop|status    # Miner with auto-restart
-```
+1. Download: https://obsidian.md (free)
+2. Open `~/obsidian-brain` as a vault
+3. Memories appear in `cortex/memories/`, playbooks in `cortex/playbooks/`
+4. Use Graph View to see how memories link via the `related` field
 
 ## Configuration
 
-| Env var | Default | What |
-|---------|---------|------|
-| `CORTEX_OBSIDIAN_VAULT` | `~/obsidian-brain` | Path to Obsidian vault |
+| Env var | Default | Purpose |
+|---------|---------|---------|
+| `CORTEX_OBSIDIAN_VAULT` | `~/obsidian-brain` | Vault location |
 | `CORTEX_EXTRA_SESSION_DIRS` | (none) | Extra session dirs to mine |
 | `CORTEX_MINER_SETTLE_SECONDS` | `300` | Wait before mining a session |
-
-## Data Locations
-
-| Store | Path | Purpose |
-|-------|------|---------|
-| Memories | `~/obsidian-brain/cortex/memories/*.md` | Source of truth |
-| Index | `~/obsidian-brain/cortex/_index.md` | Flat catalog |
-| Playbooks | `~/obsidian-brain/cortex/playbooks/*.md` | Per-project briefings |
-| Search DB | `~/.cortex/search.db` | SQLite FTS5 index |
-| Telemetry | `~/.cortex/telemetry.json` | Access tracking |
-| Event log | `~/.cortex/events.jsonl` | Audit trail |
-| Miner state | `~/.cortex/.mined_sessions` | Mining progress |
 
 ## Requirements
 
 - Claude Code
 - Python 3.11+
 - `mcp` Python package (`pip install mcp`)
-- Obsidian vault (default `~/obsidian-brain/`, auto-created on first run)
+
+## Data locations
+
+| Store | Path | Purpose |
+|-------|------|---------|
+| Memories | `~/obsidian-brain/cortex/memories/*.md` | Source of truth |
+| Playbooks | `~/obsidian-brain/cortex/playbooks/*.md` | Per-project briefings |
+| Search DB | `~/.cortex/search.db` | SQLite FTS5 index |
+| Telemetry | `~/.cortex/telemetry.json` | Access tracking |
+| Event log | `~/.cortex/events.jsonl` | Audit trail |
+
+## Comparison to similar projects
+
+- **[Mem0](https://github.com/mem0ai/mem0)** — production memory service with vector search. Use for scale.
+- **[claude-mem](https://github.com/thedotmack/claude-mem)** — Claude Code memory via SQLite + progressive disclosure.
+- **[Hermes Agent](https://github.com/NousResearch/hermes-agent)** — self-improving agent with bounded markdown memory.
+- **[Letta](https://github.com/letta-ai/letta)** — agent runtime with OS-style memory hierarchy.
+
+Cortex is the Obsidian-native, context-assembly-first, local-first option for Claude Code users who want their memories as readable markdown.
+
+## Contributing
+
+Issues, PRs, and ideas welcome. This is an active project.
 
 ## License
 
