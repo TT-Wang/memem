@@ -8,7 +8,7 @@ multiple split modules.
 
 def test_save_and_recall(tmp_vault, tmp_cortex_dir):
     """Save 3 memories, verify they can all be read back."""
-    from obsidian_store import _make_memory, _obsidian_memories, _save_memory
+    from cortex_server.obsidian_store import _make_memory, _obsidian_memories, _save_memory
 
     memories = [
         _make_memory(
@@ -38,7 +38,7 @@ def test_save_and_recall(tmp_vault, tmp_cortex_dir):
 
 def test_dedup_catches_similar(tmp_vault, tmp_cortex_dir):
     """Two memories with overlapping content should trigger dedup."""
-    from obsidian_store import _find_best_match, _make_memory, _save_memory
+    from cortex_server.obsidian_store import _find_best_match, _make_memory, _save_memory
 
     mem1 = _make_memory(
         content="Use bcrypt for password hashing with 10 salt rounds",
@@ -54,7 +54,7 @@ def test_dedup_catches_similar(tmp_vault, tmp_cortex_dir):
 
 def test_deprecate_preserves_file(tmp_vault, tmp_cortex_dir):
     """Deprecated memories stay on disk but are excluded from active queries."""
-    from obsidian_store import (
+    from cortex_server.obsidian_store import (
         _deprecate_memory,
         _make_memory,
         _obsidian_memories,
@@ -73,7 +73,7 @@ def test_deprecate_preserves_file(tmp_vault, tmp_cortex_dir):
 
 def test_frontmatter_roundtrip_preserves_all_fields(tmp_vault, tmp_cortex_dir):
     """All frontmatter fields must survive write→read."""
-    from obsidian_store import _make_memory, _obsidian_memories, _save_memory
+    from cortex_server.obsidian_store import _make_memory, _obsidian_memories, _save_memory
 
     mem = _make_memory(
         content="The auth module requires Redis for session storage",
@@ -99,11 +99,11 @@ def test_frontmatter_roundtrip_preserves_all_fields(tmp_vault, tmp_cortex_dir):
 
 def test_context_assemble_empty_vault(tmp_vault, tmp_cortex_dir, monkeypatch):
     """context_assemble returns empty string when there's no playbook or memories."""
-    import transcripts
+    from cortex_server import transcripts
     # Isolate from real session transcripts on disk
     monkeypatch.setattr(transcripts, "transcript_search", lambda *a, **kw: "No matching sessions")
 
-    from assembly import context_assemble
+    from cortex_server.assembly import context_assemble
 
     result = context_assemble("tell me about auth", "nonexistent-project")
     # Should return empty or very short since nothing to assemble

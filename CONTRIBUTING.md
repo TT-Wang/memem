@@ -18,7 +18,7 @@ pre-commit install
 ```bash
 pytest                          # run all tests
 pytest -v                       # verbose
-pytest --cov=cortex-mcp-server  # with coverage
+pytest --cov=cortex_server  # with coverage
 pytest tests/test_security.py   # single file
 ```
 
@@ -31,7 +31,7 @@ pytest tests/test_security.py   # single file
 ```bash
 ruff check .
 ruff format .
-mypy cortex-mcp-server
+mypy cortex_server
 ```
 
 ## PR process

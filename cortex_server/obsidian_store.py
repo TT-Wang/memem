@@ -35,7 +35,7 @@ def _atomic_write(path: Path, content: str) -> None:
             pass
         raise
 
-from models import (
+from cortex_server.models import (
     INDEX_PATH,
     OBSIDIAN_MEMORIES_DIR,
     OBSIDIAN_VAULT,
@@ -43,9 +43,9 @@ from models import (
     _normalize_scope_id,
     now_iso,
 )
-from search_index import _index_memory, _remove_from_index
-from security import scan_memory_content
-from telemetry import _log_event
+from cortex_server.search_index import _index_memory, _remove_from_index
+from cortex_server.security import scan_memory_content
+from cortex_server.telemetry import _log_event
 
 log = logging.getLogger("cortex-obsidian")
 
@@ -517,7 +517,7 @@ def _check_contradictions(content: str, scope_id: str = "default") -> list[dict]
 
     # Find similar existing memories
     try:
-        from search_index import _search_fts
+        from cortex_server.search_index import _search_fts
         fts_ids = _search_fts(content[:200], scope_id, 5)
         candidates = [m for mid in fts_ids if (m := _find_memory(mid))]
     except Exception:

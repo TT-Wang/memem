@@ -9,7 +9,7 @@ import fcntl
 import json
 import logging
 
-from models import CORTEX_DIR, EVENT_LOG, TELEMETRY_FILE, now_iso
+from cortex_server.models import CORTEX_DIR, EVENT_LOG, TELEMETRY_FILE, now_iso
 
 log = logging.getLogger("cortex-telemetry")
 

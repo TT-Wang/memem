@@ -4,10 +4,10 @@ Cortex Miner Daemon — persistent background process that watches for
 completed Claude Code sessions and mines them with Haiku.
 
 Usage:
-    python3 miner-daemon.py start    # start daemon
-    python3 miner-daemon.py stop     # stop daemon
-    python3 miner-daemon.py status   # check if running
-    python3 miner-daemon.py run      # run in foreground (for debugging)
+    python3 miner_daemon.py start    # start daemon
+    python3 miner_daemon.py stop     # stop daemon
+    python3 miner_daemon.py status   # check if running
+    python3 miner_daemon.py run      # run in foreground (for debugging)
 """
 
 import json
@@ -20,9 +20,14 @@ import sys
 import time
 from pathlib import Path
 
-from miner_protocol import FATAL_EXIT_CODE, TRANSIENT_EXIT_CODE
-from session_state import MINED_SESSIONS_FILE, SETTLE_SECONDS, find_settled_sessions, load_mined_session_state
-from storage import CORTEX_DIR
+from cortex_server.miner_protocol import FATAL_EXIT_CODE, TRANSIENT_EXIT_CODE
+from cortex_server.session_state import (
+    MINED_SESSIONS_FILE,
+    SETTLE_SECONDS,
+    find_settled_sessions,
+    load_mined_session_state,
+)
+from cortex_server.storage import CORTEX_DIR
 
 PID_FILE = CORTEX_DIR / "miner.pid"
 LOG_FILE = CORTEX_DIR / "miner.log"
@@ -129,13 +134,15 @@ def status_daemon():
 
 
 def _run_server_command(args: list[str], expect_json: bool = True):
-    server_path = str(Path(__file__).parent / "server.py")
+    plugin_root = str(Path(__file__).resolve().parent.parent)
+    env = os.environ.copy()
+    env["PYTHONPATH"] = plugin_root + os.pathsep + env.get("PYTHONPATH", "")
     result = subprocess.run(
-        [sys.executable, server_path, *args],
+        [sys.executable, "-m", "cortex_server.server", *args],
         capture_output=True,
         text=True,
         timeout=300,
-        env=os.environ.copy(),
+        env=env,
     )
     stdout = result.stdout.strip()
     stderr = result.stderr.strip()

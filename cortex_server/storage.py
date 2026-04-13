@@ -14,8 +14,8 @@ from pathlib import Path
 # ============================================================================
 # Re-exports from split modules
 # ============================================================================
-from assembly import _consolidate_project, context_assemble
-from models import (
+from cortex_server.assembly import _consolidate_project, context_assemble
+from cortex_server.models import (
     CORTEX_DIR,
     EVENT_LOG,
     INDEX_PATH,
@@ -32,7 +32,7 @@ from models import (
     _now,
     now_iso,
 )
-from obsidian_store import (
+from cortex_server.obsidian_store import (
     _append_or_update_index_line,
     _atomic_write,
     _check_contradictions,
@@ -66,16 +66,16 @@ from obsidian_store import (
     _yaml_escape,
     purge_mined_memories,
 )
-from playbook import _playbook_append, _playbook_refine
-from search_index import (
+from cortex_server.playbook import _playbook_append, _playbook_refine
+from cortex_server.search_index import (
     _index_memory,
     _init_search_db,
     _rebuild_search_index,
     _remove_from_index,
     _search_fts,
 )
-from security import scan_memory_content
-from telemetry import _get_telemetry, _log_event, _record_access
+from cortex_server.security import scan_memory_content
+from cortex_server.telemetry import _get_telemetry, _log_event, _record_access
 
 log = logging.getLogger("cortex-storage")
 

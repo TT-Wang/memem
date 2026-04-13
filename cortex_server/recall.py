@@ -4,7 +4,7 @@ import subprocess
 from collections import Counter
 from datetime import UTC, datetime
 
-from storage import (
+from cortex_server.storage import (
     INDEX_PATH,
     _find_memory,
     _get_telemetry,
@@ -13,7 +13,7 @@ from storage import (
     _record_access,
     _word_set,
 )
-from transcripts import transcript_search
+from cortex_server.transcripts import transcript_search
 
 log = logging.getLogger("cortex-recall")
 
@@ -21,7 +21,7 @@ log = logging.getLogger("cortex-recall")
 def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 10) -> list[dict]:
     """FTS5-first search: query SQLite index, load full memories from Obsidian."""
     try:
-        from storage import _search_fts
+        from cortex_server.storage import _search_fts
         fts_ids = _search_fts(query, scope_id or "default", limit * 2)
         if not fts_ids:
             return []

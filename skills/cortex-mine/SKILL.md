@@ -8,12 +8,12 @@ Start the Cortex miner daemon. It runs in the background and automatically extra
 
 1. Check if the miner is already running:
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/cortex-mcp-server/miner-wrapper.sh" status
+bash "${CLAUDE_PLUGIN_ROOT}/cortex_server/miner-wrapper.sh" status
 ```
 
 2. If not running, start it:
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/cortex-mcp-server/miner-wrapper.sh" start
+bash "${CLAUDE_PLUGIN_ROOT}/cortex_server/miner-wrapper.sh" start
 ```
 
 3. If already running, tell the user:

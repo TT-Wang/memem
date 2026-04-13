@@ -21,7 +21,7 @@ jobs:
       - name: Ruff
         run: ruff check .
       - name: Mypy
-        run: mypy cortex-mcp-server || true  # non-blocking initially
+        run: mypy cortex_server || true  # non-blocking initially
 
   test:
     runs-on: ubuntu-latest

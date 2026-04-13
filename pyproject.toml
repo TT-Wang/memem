@@ -25,6 +25,9 @@ dependencies = [
     "mcp>=1.0",
 ]
 
+[project.scripts]
+cortex-server = "cortex_server.server:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
@@ -41,7 +44,7 @@ Issues = "https://github.com/TT-Wang/cortex-plugin/issues"
 Changelog = "https://github.com/TT-Wang/cortex-plugin/blob/main/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
-packages = ["cortex-mcp-server"]
+packages = ["cortex_server"]
 
 [tool.ruff]
 line-length = 120
@@ -61,7 +64,8 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"cortex-mcp-server/storage.py" = ["F401"]
+"cortex_server/storage.py" = ["F401"]
+"cortex_server/__init__.py" = ["F401"]
 
 [tool.mypy]
 python_version = "3.11"

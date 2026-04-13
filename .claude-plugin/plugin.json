@@ -12,8 +12,10 @@
   "mcpServers": {
     "cortex": {
       "command": "python3",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/cortex-mcp-server/server.py"],
-      "env": {}
+      "args": ["-m", "cortex_server.server"],
+      "env": {
+        "PYTHONPATH": "${CLAUDE_PLUGIN_ROOT}"
+      }
     }
   }
 }

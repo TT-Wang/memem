@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Cortex Miner Wrapper — keeps the miner daemon alive.
-# Auto-restarts on crash. Run this instead of miner-daemon.py directly.
+# Auto-restarts on crash. Run this instead of miner_daemon.py directly.
 #
 # Usage:
 #   bash miner-wrapper.sh start   # start with auto-restart
 #   bash miner-wrapper.sh stop    # stop daemon + wrapper
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-DAEMON="$SCRIPT_DIR/miner-daemon.py"
+PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+export PYTHONPATH="$PLUGIN_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+DAEMON_CMD="python3 -m cortex_server.miner_daemon"
 CORTEX_DIR="${CORTEX_DIR:-$HOME/.cortex}"
 WRAPPER_PID_FILE="$CORTEX_DIR/miner-wrapper.pid"
 LOG_FILE="$CORTEX_DIR/miner.log"
@@ -34,7 +36,7 @@ start_wrapper() {
 
 stop_wrapper() {
     # Stop daemon first
-    python3 "$DAEMON" stop 2>/dev/null
+    $DAEMON_CMD stop 2>/dev/null
 
     # Stop wrapper
     if [ -f "$WRAPPER_PID_FILE" ]; then
@@ -55,7 +57,7 @@ run_loop() {
     while true; do
         echo "$(date '+%Y-%m-%d %H:%M:%S') INFO Wrapper: starting miner (foreground in wrapper)..."
         # Run miner in foreground — wrapper manages the lifecycle
-        python3 "$DAEMON" run 2>> "$LOG_FILE"
+        $DAEMON_CMD run 2>> "$LOG_FILE"
         EXIT_CODE=$?
         if [ "$EXIT_CODE" -eq 0 ] || [ "$EXIT_CODE" -eq 75 ]; then
             echo "$(date '+%Y-%m-%d %H:%M:%S') WARN Wrapper: miner exited permanently (code $EXIT_CODE), not restarting."
@@ -80,7 +82,7 @@ case "${1:-status}" in
         else
             echo "Miner wrapper not running"
         fi
-        python3 "$DAEMON" status
+        $DAEMON_CMD status
         ;;
     _loop)
         run_loop

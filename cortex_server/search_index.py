@@ -7,7 +7,7 @@ Obsidian is the source of truth, this is the query engine.
 import logging
 import sqlite3
 
-from models import CORTEX_DIR, SEARCH_DB, _normalize_scope_id
+from cortex_server.models import CORTEX_DIR, SEARCH_DB, _normalize_scope_id
 
 log = logging.getLogger("cortex-search")
 
@@ -86,7 +86,7 @@ def _rebuild_search_index() -> int:
     """Rebuild the FTS5 index from all active Obsidian memories. Returns count."""
     try:
         # Lazy import to avoid circular dep (obsidian_store depends on search_index)
-        from obsidian_store import _obsidian_memories
+        from cortex_server.obsidian_store import _obsidian_memories
 
         conn = _init_search_db()
         conn.execute("DELETE FROM memories_fts")

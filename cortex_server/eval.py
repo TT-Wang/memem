@@ -15,10 +15,10 @@ def run_eval(sample_size: int = 10) -> dict:
     """Run memory system evaluation and return scorecard."""
     import time
 
-    from mining import _is_agent_session
-    from session_state import SESSIONS_DIRS
-    from storage import _obsidian_memories, _word_set, scan_memory_content
-    from transcripts import _extract_conversation
+    from cortex_server.mining import _is_agent_session
+    from cortex_server.session_state import SESSIONS_DIRS
+    from cortex_server.storage import _obsidian_memories, _word_set, scan_memory_content
+    from cortex_server.transcripts import _extract_conversation
 
     results = {
         "sessions_sampled": 0,
@@ -91,7 +91,7 @@ def run_eval(sample_size: int = 10) -> dict:
     for text_a, text_b, should_match in test_pairs:
         results["dedup_tests"] += 1
         # Use the real scoring engine, not a hand-rolled formula
-        from storage import _containment, _ngram_set
+        from cortex_server.storage import _containment, _ngram_set
         ws_a, ws_b = _word_set(text_a), _word_set(text_b)
         word_c = _containment(ws_a, ws_b)
         bigram_c = _containment(_ngram_set(text_a, 2), _ngram_set(text_b, 2))

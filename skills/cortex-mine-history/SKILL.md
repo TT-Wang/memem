@@ -17,7 +17,7 @@ find ~/.claude/projects/ -name "*.jsonl" ! -path "*/subagents/*" -size +5k | wc 
 
 4. Start the mining in the background:
 ```bash
-nohup python3 "${CLAUDE_PLUGIN_ROOT}/cortex-mcp-server/server.py" --mine-all > /dev/null 2>&1 &
+nohup PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python3 -m cortex_server.server --mine-all > /dev/null 2>&1 &
 echo "History mining started in background (PID $!)"
 ```
 

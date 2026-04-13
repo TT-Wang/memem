@@ -3,19 +3,19 @@ import logging
 import subprocess
 from pathlib import Path
 
-from miner_protocol import (
+from cortex_server.miner_protocol import (
     MINER_STATE_VERSION,
     STATUS_COMPLETE,
     STATUS_FAILED,
     STATUS_IN_PROGRESS,
 )
-from session_state import (
+from cortex_server.session_state import (
     find_settled_sessions,
     load_mined_session_state,
     session_is_complete,
     update_session_state,
 )
-from storage import (
+from cortex_server.storage import (
     ObsidianUnavailableError,
     _consolidate_project,
     _deprecate_memory,
@@ -30,7 +30,7 @@ from storage import (
     _stable_mined_memory_id,
     _update_memory,
 )
-from transcripts import _extract_conversation
+from cortex_server.transcripts import _extract_conversation
 
 log = logging.getLogger("cortex-miner")
 

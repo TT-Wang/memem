@@ -4,8 +4,8 @@ import os
 import time
 from pathlib import Path
 
-from miner_protocol import MINER_STATE_VERSION, STATUS_COMPLETE
-from storage import CORTEX_DIR, _now
+from cortex_server.miner_protocol import MINER_STATE_VERSION, STATUS_COMPLETE
+from cortex_server.storage import CORTEX_DIR, _now
 
 MINED_SESSIONS_FILE = CORTEX_DIR / ".mined_sessions"
 SESSIONS_DIRS = [Path.home() / ".claude" / "projects"]

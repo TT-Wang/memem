@@ -10,10 +10,10 @@ import logging
 import subprocess
 from datetime import UTC, datetime
 
-from models import PLAYBOOK_DIR, PLAYBOOK_STAGING_DIR, now_iso
-from obsidian_store import _atomic_write
-from security import scan_memory_content
-from telemetry import _log_event
+from cortex_server.models import PLAYBOOK_DIR, PLAYBOOK_STAGING_DIR, now_iso
+from cortex_server.obsidian_store import _atomic_write
+from cortex_server.security import scan_memory_content
+from cortex_server.telemetry import _log_event
 
 log = logging.getLogger("cortex-playbook")
 

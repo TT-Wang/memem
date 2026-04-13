@@ -50,12 +50,10 @@ if input_file:
     except OSError:
         pass
 
-# Resolve server.py path
+# Resolve plugin root for PYTHONPATH (package runs via `python -m cortex_server.server`)
 plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
-if plugin_root:
-    server_path = str(Path(plugin_root) / "cortex-mcp-server" / "server.py")
-else:
-    server_path = str(Path(index_path).resolve().parent / "cortex-mcp-server" / "server.py")
+if not plugin_root:
+    plugin_root = str(Path(index_path).resolve().parent)
 
 # Extract user message from hook input
 message = ""
@@ -73,9 +71,11 @@ memory_count = len(list(memories_dir.glob("*.md"))) if memories_dir.exists() els
 assembled = ""
 if message and memory_count > 0:
     try:
+        sub_env = os.environ.copy()
+        sub_env["PYTHONPATH"] = plugin_root + os.pathsep + sub_env.get("PYTHONPATH", "")
         result = subprocess.run(
-            [sys.executable, server_path, "--assemble-context", message, "default"],
-            capture_output=True, text=True, timeout=30
+            [sys.executable, "-m", "cortex_server.server", "--assemble-context", message, "default"],
+            capture_output=True, text=True, timeout=30, env=sub_env,
         )
         if result.returncode == 0 and result.stdout.strip():
             assembled = result.stdout.strip()

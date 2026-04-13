@@ -18,7 +18,7 @@ Print this banner:
   persistent memory for AI
 ```
 
-Then run `python3 "${CLAUDE_PLUGIN_ROOT}/cortex-mcp-server/server.py" --status` to get current system status.
+Then run `PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python3 -m cortex_server.server --status` to get current system status.
 
 Then show this help:
 

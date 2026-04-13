@@ -11,13 +11,14 @@ This file is the thin runtime entrypoint. Core behavior lives in:
   cli.py        command dispatch for non-MCP entrypoints
 """
 
-from cli import dispatch_cli
 from mcp.server.fastmcp import FastMCP
-from operations import memory_import as _memory_import
-from operations import memory_save as _memory_save
-from recall import memory_list as _memory_list
-from recall import memory_recall as _memory_recall
-from transcripts import transcript_search as _transcript_search
+
+from cortex_server.cli import dispatch_cli
+from cortex_server.operations import memory_import as _memory_import
+from cortex_server.operations import memory_save as _memory_save
+from cortex_server.recall import memory_list as _memory_list
+from cortex_server.recall import memory_recall as _memory_recall
+from cortex_server.transcripts import transcript_search as _transcript_search
 
 mcp = FastMCP("cortex")
 
@@ -54,11 +55,15 @@ def context_assemble(query: str, project: str = "default") -> str:
     Uses memories, playbooks, and session history to produce a comprehensive
     briefing for the given query. Returns formatted markdown.
     """
-    from storage import context_assemble as _assemble
+    from cortex_server.storage import context_assemble as _assemble
     return _assemble(query, project)
 
 
-if __name__ == "__main__":
+def main() -> None:
     import sys
 
     dispatch_cli(sys.argv, mcp)
+
+
+if __name__ == "__main__":
+    main()

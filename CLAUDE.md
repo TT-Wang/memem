@@ -36,7 +36,7 @@ Call `mcp__plugin_cortex_cortex__memory_save` with:
 By default, Cortex only mines sessions created after installation. When a user asks to mine their existing history (e.g. "mine my existing sessions", "mine my history"), run this in the background:
 
 ```bash
-nohup python3 "${CLAUDE_PLUGIN_ROOT}/cortex-mcp-server/server.py" --mine-all > /dev/null 2>&1 &
+nohup PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python3 -m cortex_server.server --mine-all > /dev/null 2>&1 &
 ```
 
 The `--mine-all` flag clears the install-time gate so all historical sessions are included. Tell the user it's running in the background and they can continue working normally.
