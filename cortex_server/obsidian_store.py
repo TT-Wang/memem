@@ -16,6 +16,7 @@ import tempfile
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 
 def _atomic_write(path: Path, content: str) -> None:
@@ -63,9 +64,16 @@ def _slugify(text: str, max_len: int = 60) -> str:
 
 
 def _yaml_escape(value: str) -> str:
-    """Quote YAML values that contain special characters."""
+    """Quote YAML values that contain special characters.
+
+    Newlines and carriage returns are collapsed to spaces — a raw newline
+    inside a frontmatter value would otherwise let a malicious title inject
+    fake frontmatter fields (`value\\n---\\ncreated: 1970-01-01`).
+    """
     if not value:
         return '""'
+    # Strip control characters that could break YAML framing
+    value = value.replace("\r\n", " ").replace("\n", " ").replace("\r", " ").replace("\t", " ")
     if any(ch in value for ch in (':', '#', '{', '}', '[', ']', ',', '&', '*', '?', '|', '-', '<', '>', '=', '!', '%', '@', '`', '"', "'")):
         escaped = value.replace('\\', '\\\\').replace('"', '\\"')
         return f'"{escaped}"'
@@ -198,7 +206,7 @@ def _parse_obsidian_memory_file(md_file: Path) -> dict | None:
         return None
 
     body = content.strip()
-    mem = {
+    mem: dict[str, Any] = {
         "id": _extract_memory_id_from_filename(md_file),
         "title": md_file.stem,
         "project": "general",
@@ -520,8 +528,9 @@ def _check_contradictions(content: str, scope_id: str = "default") -> list[dict]
         from cortex_server.search_index import _search_fts
         fts_ids = _search_fts(content[:200], scope_id, 5)
         candidates = [m for mid in fts_ids if (m := _find_memory(mid))]
-    except Exception:
-        # FTS unavailable — use content match
+    except Exception as exc:
+        # FTS unavailable — log and fall back to content match
+        log.warning("contradiction-check FTS lookup failed: %s", exc)
         match, score = _find_best_match(content, scope_id)
         candidates = [match] if match and score > 0.2 else []
 
@@ -558,20 +567,19 @@ def _save_memory(mem: dict):
     if contradictions:
         mem["contradicts"] = [c["memory_id"] for c in contradictions]
 
-    _write_obsidian_memory(mem)
-    if INDEX_PATH.exists():
-        _append_or_update_index_line(mem)
-    _log_event("save", mem.get("id", ""), title=mem.get("title", ""))
-    _index_memory(mem)
-
-    # Compute and store related memory links
+    # Compute related links first so we only write the memory once.
     content = mem.get("essence", "")
     mem_id = mem.get("id", "")
     if content and mem_id:
         related = _find_related(content, exclude_id=mem_id, scope_id=mem.get("project", "default"))
         if related:
             mem["related"] = related
-            _write_obsidian_memory(mem)  # Rewrite with related field
+
+    _write_obsidian_memory(mem)
+    if INDEX_PATH.exists():
+        _append_or_update_index_line(mem)
+    _log_event("save", mem.get("id", ""), title=mem.get("title", ""))
+    _index_memory(mem)
 
 
 def _update_memory(memory_id: str, new_content: str, new_title: str = "") -> None:

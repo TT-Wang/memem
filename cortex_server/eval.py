@@ -9,6 +9,7 @@ Usage: python3 eval.py
 """
 
 import random
+from typing import Any
 
 
 def run_eval(sample_size: int = 10) -> dict:
@@ -24,7 +25,7 @@ def run_eval(sample_size: int = 10) -> dict:
     from cortex_server.session_state import SESSIONS_DIRS
     from cortex_server.transcripts import _extract_conversation
 
-    results = {
+    results: dict[str, Any] = {
         "sessions_sampled": 0,
         "extraction_attempted": 0,
         "extraction_returned": 0,

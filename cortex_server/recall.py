@@ -28,6 +28,11 @@ def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 1
         if not fts_ids:
             return []
 
+        # Preserve FTS order as a position map so scoring is O(1) and
+        # immune to ValueError if a memory id ever falls out of fts_ids.
+        fts_rank_by_id = {mid: i for i, mid in enumerate(fts_ids)}
+        total_fts = len(fts_ids)
+
         results = []
         for mid in fts_ids:
             mem = _find_memory(mid)
@@ -52,8 +57,11 @@ def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 1
             access_boost = min(tel.get("access_count", 0) / 10.0, 1.0)
             importance = mem.get("importance", 3) / 5.0
 
-            # FTS already ranked by relevance, add temporal/importance boost
-            fts_rank = 1.0 - (fts_ids.index(mem.get("id", "")) / len(fts_ids))  # 1.0 for top, 0.0 for bottom
+            # FTS already ranked by relevance, add temporal/importance boost.
+            # Falls back to mid-rank (0.5) if the id is unexpectedly missing.
+            mem_id = mem.get("id", "")
+            rank_pos = fts_rank_by_id.get(mem_id, total_fts // 2)
+            fts_rank = 1.0 - (rank_pos / total_fts) if total_fts else 0.5
             score = 0.5 * fts_rank + 0.15 * recency + 0.15 * access_boost + 0.2 * importance
             tel_scored.append((score, mem))
 
@@ -255,7 +263,7 @@ def smart_recall(prompt: str, scope_id: str = "default") -> str:
     if not picked_files:
         return memory_recall(prompt, scope_id=scope_id, limit=10)
 
-    by_project = {}
+    by_project: dict[str, list[dict]] = {}
     for mem in picked_files:
         by_project.setdefault(mem["project"], []).append(mem)
 

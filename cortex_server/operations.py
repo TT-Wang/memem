@@ -18,7 +18,7 @@ def memory_save(content: str, title: str = "", scope_id: str = "default", tags: 
 
     try:
         existing = _is_duplicate(content, scope_id=scope_id, return_match=True)
-        if existing:
+        if isinstance(existing, dict):
             return f'Memory already exists (similar to: "{existing.get("title", "")[:60]}"). Not saved.'
 
         mem = _make_memory(

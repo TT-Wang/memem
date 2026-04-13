@@ -76,9 +76,9 @@ def _extract_text_only(content) -> str:
 
 def _parse_jsonl_session(jsonl_path: str) -> list[dict]:
     """Parse JSONL session into user/assistant exchange pairs."""
-    user_texts = []
-    assistant_texts = []
-    pairs = []
+    user_texts: list[str] = []
+    assistant_texts: list[str] = []
+    pairs: list[dict] = []
 
     def _flush():
         if user_texts and assistant_texts:

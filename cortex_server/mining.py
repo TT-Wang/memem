@@ -201,13 +201,12 @@ def _summarize_session_haiku(messages: list[str]) -> list[dict]:
     if not output:
         raise TransientMiningError("empty response from Haiku")
 
-    # Extract JSON array (preferred) or object from output
+    # Extract JSON array (preferred) or object from output.
+    # _extract_json_string returns the literal "[]" for legitimate empty output,
+    # which flows through the parse path below; None means malformed and stays
+    # retryable so the session is re-mined on the next pass.
     json_str = _extract_json_string(output)
     if json_str is None:
-        # Legitimate empty — Haiku explicitly signalled nothing to extract
-        if output.strip() in ("[]", "[ ]"):
-            return []
-        # Malformed output — raise transient so the session stays unmined and retries
         raise TransientMiningError(
             f"Haiku returned non-JSON output (first 200 chars): {output[:200]}"
         )

@@ -74,8 +74,12 @@ def save_mined_session_state(states: dict[str, dict]) -> None:
         state["session_id"] = session_id
         lines.append(json.dumps(state, sort_keys=True))
     content = ("\n".join(lines) + "\n") if lines else ""
-    temp_path.write_text(content)
-    temp_path.replace(MINED_SESSIONS_FILE)
+    # Atomic write: fsync before rename so a crash can't leave an empty file.
+    with open(temp_path, "w") as fh:
+        fh.write(content)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(temp_path, MINED_SESSIONS_FILE)
 
 
 def update_session_state(path: Path, status: str, message: str = "") -> dict:
