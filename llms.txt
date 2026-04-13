@@ -1,0 +1,80 @@
+# Cortex
+
+> Cortex is a Claude Code plugin that gives Claude persistent memory across every session. It auto-extracts decisions, conventions, and lessons from completed sessions via a background miner, stores them as markdown files in an Obsidian vault, and assembles query-tailored context briefings at the start of each new session — so you stop re-explaining your project every time.
+
+Cortex is **local-first**: no cloud services, no vendor lock-in, no API keys required. Memories live as human-readable markdown in `~/obsidian-brain/cortex/memories/`. A SQLite FTS5 index provides fast machine search. Claude Haiku (via the `claude` CLI) handles query-tailored assembly and mining, but gracefully degrades to FTS-only keyword recall when the CLI isn't available.
+
+Install is one command (`/plugin install cortex`) and the plugin self-heals its Python dependencies via a `uv`-backed bootstrap shim on first run — no separate `pip install` step.
+
+## When to use Cortex
+
+- You use Claude Code daily and keep re-explaining your project to every new session
+- You want durable, searchable, human-readable memory your AI can use across all projects
+- You already use Obsidian or like the idea of a browsable markdown knowledge graph
+- You want local-first AI memory with zero vendor lock-in
+
+## When NOT to use Cortex
+
+- You already have CLAUDE.md working well and don't want background processes
+- You want cloud-synced memory across machines (Cortex is local-only)
+- You don't have Python 3.11+ available
+
+## Docs
+
+- [README](https://github.com/TT-Wang/cortex-plugin/blob/master/README.md): install, usage, MCP tool reference
+- [CHANGELOG](https://github.com/TT-Wang/cortex-plugin/blob/master/CHANGELOG.md): version history
+- [CONTRIBUTING](https://github.com/TT-Wang/cortex-plugin/blob/master/CONTRIBUTING.md): dev setup
+
+## Install
+
+```bash
+/plugin marketplace add TT-Wang/cortex-plugin
+/plugin install cortex
+```
+
+First-session MCP spawn runs `bootstrap.sh` which installs `uv`, syncs deps into a plugin-local `.venv`, verifies directory writability, probes for the `claude` CLI, and writes `~/.cortex/.capabilities`. Total first-run overhead: ~5 seconds. Warm start: ~100ms.
+
+## How it differs from vanilla CLAUDE.md
+
+- Automatic extraction instead of manual editing
+- Query-tailored context at session start instead of a static dump
+- Self-evolving corpus (merges redundant memories, deprecates outdated ones)
+- Cross-project (one shared knowledge graph, not per-repo)
+- Security scanning on every write (prompt injection, credential exfil)
+- Browsable Obsidian vault with graph view and backlinks
+
+## Key concepts
+
+- **Miner daemon**: background process that polls completed Claude Code session JSONL files, extracts durable lessons via Haiku, and writes them as markdown
+- **Context assembly**: on session start, a UserPromptSubmit hook sends the user's first message + relevant memories to Haiku, which synthesizes a focused briefing
+- **Playbook**: per-project curated knowledge file that grows and refines over time (inspired by the ACE paper)
+- **AUDN pipeline**: Add / Update / Deprecate / Noop — how new mined memories evolve the existing corpus
+- **Degraded mode**: when `claude` CLI is missing, Cortex falls back to FTS-only keyword recall instead of failing
+
+## MCP tools exposed to the LLM
+
+- `memory_save(content, title, tags)`: store a lesson (security-scanned)
+- `memory_recall(query, limit)`: search memories (FTS5 + temporal + importance ranking)
+- `memory_list()`: list all memories with stats
+- `memory_import(source_path)`: import from files, directories, chat exports
+- `transcript_search(query)`: search raw Claude Code session logs
+- `context_assemble(query, project)`: on-demand query-tailored briefing from all knowledge
+
+## Slash commands
+
+- `/cortex`: welcome + status + help
+- `/cortex-status`: memory count, projects, miner health
+- `/cortex-doctor`: preflight health check with fix instructions
+- `/cortex-mine`: start the miner daemon
+- `/cortex-mine-history`: opt-in to mine pre-install sessions
+
+## Requirements
+
+- Claude Code
+- Python 3.11+
+- `uv` (auto-installed by bootstrap.sh if missing)
+- `claude` CLI on PATH (optional — required for Haiku-powered assembly; FTS-only degraded mode works without it)
+
+## License
+
+MIT
