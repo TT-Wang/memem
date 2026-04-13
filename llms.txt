@@ -2,6 +2,8 @@
 
 > Cortex is a Claude Code plugin that gives Claude persistent memory across every session. It auto-extracts decisions, conventions, and lessons from completed sessions via a background miner, stores them as markdown files in an Obsidian vault, and assembles query-tailored context briefings at the start of each new session — so you stop re-explaining your project every time.
 
+Quality: validated by the [Glama MCP registry](https://glama.ai/mcp/servers/TT-Wang/cortex-plugin) — ![score](https://glama.ai/mcp/servers/TT-Wang/cortex-plugin/badges/score.svg)
+
 Cortex is **local-first**: no cloud services, no vendor lock-in, no API keys required. Memories live as human-readable markdown in `~/obsidian-brain/cortex/memories/`. A SQLite FTS5 index provides fast machine search. Claude Haiku (via the `claude` CLI) handles query-tailored assembly and mining, but gracefully degrades to FTS-only keyword recall when the CLI isn't available.
 
 Install is one command (`/plugin install cortex`) and the plugin self-heals its Python dependencies via a `uv`-backed bootstrap shim on first run — no separate `pip install` step.

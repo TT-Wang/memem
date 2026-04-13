@@ -2,6 +2,8 @@
 
 **Persistent, self-evolving memory for Claude Code.** Stop re-explaining your project every session.
 
+[![cortex-plugin MCP server](https://glama.ai/mcp/servers/TT-Wang/cortex-plugin/badges/score.svg)](https://glama.ai/mcp/servers/TT-Wang/cortex-plugin)
+
 > For LLM/AI tool discovery, see [llms.txt](./llms.txt).
 
 ```
