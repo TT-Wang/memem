@@ -55,7 +55,7 @@ def context_assemble(query: str, project: str = "default") -> str:
     Uses memories, playbooks, and session history to produce a comprehensive
     briefing for the given query. Returns formatted markdown.
     """
-    from cortex_server.storage import context_assemble as _assemble
+    from cortex_server.assembly import context_assemble as _assemble
     return _assemble(query, project)
 
 

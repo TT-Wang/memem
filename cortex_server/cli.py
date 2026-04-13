@@ -5,9 +5,14 @@ from pathlib import Path
 
 from cortex_server.miner_protocol import FATAL_EXIT_CODE, TRANSIENT_EXIT_CODE
 from cortex_server.mining import FatalMiningError, MiningError, mine_all, mine_session
+from cortex_server.models import INDEX_PATH
+from cortex_server.obsidian_store import (
+    _generate_index,
+    purge_mined_memories,
+)
 from cortex_server.recall import memory_recall, smart_recall
 from cortex_server.session_state import MINED_SESSIONS_FILE
-from cortex_server.storage import INDEX_PATH, _generate_index, _register_server_pid, purge_mined_memories
+from cortex_server.storage import _register_server_pid
 
 
 def dispatch_cli(argv: list[str], mcp) -> None:
@@ -66,7 +71,8 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         return
 
     if cmd == "--rebuild-playbooks":
-        from cortex_server.storage import _obsidian_memories, _playbook_refine
+        from cortex_server.obsidian_store import _obsidian_memories
+        from cortex_server.playbook import _playbook_refine
         seen = set()
         count = 0
         for mem in _obsidian_memories():
@@ -80,7 +86,7 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         return
 
     if cmd == "--rebuild-search-index":
-        from cortex_server.storage import _rebuild_search_index
+        from cortex_server.search_index import _rebuild_search_index
         count = _rebuild_search_index()
         print(f"Search index rebuilt: {count} memories indexed")
         return
@@ -123,7 +129,7 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         return
 
     if cmd == "--events":
-        from cortex_server.storage import EVENT_LOG
+        from cortex_server.models import EVENT_LOG
         if not EVENT_LOG.exists():
             print("No events yet.")
             return
@@ -149,19 +155,19 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         if not query:
             print("No query provided.")
             return
-        from cortex_server.storage import context_assemble
+        from cortex_server.assembly import context_assemble
         print(context_assemble(query, project))
         return
 
     if cmd == "--status":
-        from cortex_server.storage import (
+        from cortex_server.models import (
             CORTEX_DIR,
             EVENT_LOG,
             OBSIDIAN_VAULT,
             PLAYBOOK_DIR,
             SEARCH_DB,
-            _obsidian_memories,
         )
+        from cortex_server.obsidian_store import _obsidian_memories
         # Memory stats
         all_mems = _obsidian_memories(include_deprecated=True)
         active = sum(1 for m in all_mems if m.get("status", "active") == "active")

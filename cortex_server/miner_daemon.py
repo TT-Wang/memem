@@ -21,13 +21,13 @@ import time
 from pathlib import Path
 
 from cortex_server.miner_protocol import FATAL_EXIT_CODE, TRANSIENT_EXIT_CODE
+from cortex_server.models import CORTEX_DIR
 from cortex_server.session_state import (
     MINED_SESSIONS_FILE,
     SETTLE_SECONDS,
     find_settled_sessions,
     load_mined_session_state,
 )
-from cortex_server.storage import CORTEX_DIR
 
 PID_FILE = CORTEX_DIR / "miner.pid"
 LOG_FILE = CORTEX_DIR / "miner.log"

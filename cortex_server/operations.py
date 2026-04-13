@@ -3,7 +3,12 @@ import os
 import re
 from pathlib import Path
 
-from cortex_server.storage import _is_duplicate, _make_memory, _normalize_scope_id, _save_memory
+from cortex_server.models import _normalize_scope_id
+from cortex_server.obsidian_store import (
+    _is_duplicate,
+    _make_memory,
+    _save_memory,
+)
 
 
 def memory_save(content: str, title: str = "", scope_id: str = "default", tags: str = "") -> str:
