@@ -91,22 +91,13 @@ Vanilla Claude Code gives you `CLAUDE.md` — a single file you edit by hand. Co
 - **Security scanning** — blocks prompt injection, credential leaks
 - **Obsidian integration** — browse your AI's knowledge visually
 
-## Why not use Mem0?
+## Who it's for
 
-Mem0 is a production-grade memory service. Cortex is different:
-
-| | Cortex | Mem0 |
-|---|--------|------|
-| Storage | Local files (Obsidian + SQLite) | Vector DB + cloud |
-| Deployment | Zero infrastructure | Managed service or self-host |
-| Context assembly | Haiku-synthesized briefings | Raw search results |
-| Human interface | Obsidian vault | API only |
-| Cost at scale | Pay Anthropic for Haiku | Pay for embedding + vector DB |
-| Multi-framework | Claude Code plugin | Works everywhere |
-
-**Use Mem0 if:** you're building a production app for end users with millions of memories, need enterprise features, or want vector search quality.
-
-**Use Cortex if:** you're a developer using Claude Code daily, want local-first storage, care about human-readable memories, and like the Obsidian ecosystem.
+Cortex is for developers who:
+- Use Claude Code daily and keep re-explaining their project
+- Want local-first storage — no cloud services, no API keys, no vendor lock-in
+- Care about human-readable memories they can browse and edit
+- Like the Obsidian ecosystem
 
 ## Commands
 
@@ -200,15 +191,6 @@ Cortex works without Obsidian — it just writes markdown files. But Obsidian ma
 | Search DB | `~/.cortex/search.db` | SQLite FTS5 index |
 | Telemetry | `~/.cortex/telemetry.json` | Access tracking |
 | Event log | `~/.cortex/events.jsonl` | Audit trail |
-
-## Comparison to similar projects
-
-- **[Mem0](https://github.com/mem0ai/mem0)** — production memory service with vector search. Use for scale.
-- **[claude-mem](https://github.com/thedotmack/claude-mem)** — Claude Code memory via SQLite + progressive disclosure.
-- **[Hermes Agent](https://github.com/NousResearch/hermes-agent)** — self-improving agent with bounded markdown memory.
-- **[Letta](https://github.com/letta-ai/letta)** — agent runtime with OS-style memory hierarchy.
-
-Cortex is the Obsidian-native, context-assembly-first, local-first option for Claude Code users who want their memories as readable markdown.
 
 ## Contributing
 
