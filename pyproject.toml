@@ -1,0 +1,64 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cortex-plugin"
+version = "0.5.0"
+description = "Persistent memory and context assembly for Claude Code"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "TT-Wang"}
+]
+requires-python = ">=3.11"
+keywords = ["memory", "context", "knowledge", "claude-code", "obsidian"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "mcp>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "pre-commit>=3.8",
+]
+
+[project.urls]
+Homepage = "https://github.com/TT-Wang/cortex-plugin"
+Repository = "https://github.com/TT-Wang/cortex-plugin"
+Issues = "https://github.com/TT-Wang/cortex-plugin/issues"
+Changelog = "https://github.com/TT-Wang/cortex-plugin/blob/main/CHANGELOG.md"
+
+[tool.hatch.build.targets.wheel]
+packages = ["cortex-mcp-server"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4", "RET", "SIM"]
+ignore = ["E501", "N806", "N803"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = false
+warn_unused_configs = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"

@@ -192,9 +192,34 @@ Cortex works without Obsidian — it just writes markdown files. But Obsidian ma
 | Telemetry | `~/.cortex/telemetry.json` | Access tracking |
 | Event log | `~/.cortex/events.jsonl` | Audit trail |
 
+## Development
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, testing, and PR process.
+
+```bash
+git clone https://github.com/TT-Wang/cortex-plugin.git
+cd cortex-plugin
+pip install -e ".[dev]"
+pytest
+```
+
+See [CHANGELOG.md](CHANGELOG.md) for version history.
+
+## Architecture
+
+Cortex is split into focused modules:
+- `models.py` — data types, constants, path definitions
+- `security.py` — threat scanning (prompt injection, credential exfil)
+- `telemetry.py` — access tracking, event log
+- `search_index.py` — SQLite FTS5
+- `obsidian_store.py` — memory I/O, dedup, scoring
+- `playbook.py` — grow and refine
+- `assembly.py` — context assembly
+- `storage.py` — thin facade re-exporting the above
+
 ## Contributing
 
-Issues, PRs, and ideas welcome. This is an active project.
+Issues, PRs, and ideas welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

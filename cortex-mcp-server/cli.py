@@ -85,6 +85,38 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         print(f"Search index rebuilt: {count} memories indexed")
         return
 
+    if cmd == "--migrate-schema":
+        from obsidian_store import _obsidian_memories, _write_obsidian_memory
+        from telemetry import _log_event
+
+        migrated = 0
+        already = 0
+        for mem in _obsidian_memories(include_deprecated=True):
+            current_version = mem.get("schema_version", 0)
+            if current_version >= 1:
+                already += 1
+                continue
+            # Upgrade: set schema_version, fill missing fields
+            mem["schema_version"] = 1
+            if "status" not in mem:
+                mem["status"] = "active"
+            if "source_type" not in mem:
+                # Infer from tags
+                if "mined" in mem.get("domain_tags", []):
+                    mem["source_type"] = "mined"
+                elif "imported" in mem.get("domain_tags", []):
+                    mem["source_type"] = "import"
+                else:
+                    mem["source_type"] = "user"
+            if "importance" not in mem:
+                mem["importance"] = 3
+            _write_obsidian_memory(mem)
+            _log_event("migrate", mem.get("id", ""), from_version=current_version, to_version=1)
+            migrated += 1
+
+        print(f"Schema migration: {migrated} upgraded, {already} already at v1")
+        return
+
     if cmd == "--eval":
         from eval import run_eval
         run_eval()
