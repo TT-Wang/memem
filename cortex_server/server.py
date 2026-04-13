@@ -5,9 +5,11 @@ Cortex MCP Server — persistent memory for Claude Code.
 This file is the thin runtime entrypoint. Core behaviour lives in the split
 modules (obsidian_store, recall, transcripts, mining, operations, assembly, cli).
 
-FastMCP is imported lazily inside ``_build_mcp`` so that CLI-only commands
-(``--status``, ``--rebuild-index``, etc.) can run without the optional
-``mcp`` dependency installed.
+FastMCP is imported lazily inside ``_build_mcp`` so non-MCP CLI commands
+(``--status``, ``--rebuild-index``, etc.) avoid paying the FastMCP import
+cost and can run even when ``mcp`` is uninstallable on the host (e.g. a
+minimal diagnostic environment). ``mcp`` remains a required dependency
+declared in ``pyproject.toml`` — this is purely an import-time deferral.
 """
 
 import sys

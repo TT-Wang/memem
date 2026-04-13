@@ -125,12 +125,30 @@ _MAX_PROMPT_CHARS = 50000
 
 
 def _extract_json_string(output: str) -> str | None:
-    """Extract a JSON array or object from raw output using bracket-depth matching.
+    """Extract a JSON array or object from raw output.
 
-    Prefers arrays (`[`), falls back to objects (`{`). Returns the extracted
-    JSON string, or None if no opener is found.
+    Prefers using ``json.JSONDecoder.raw_decode`` so string literals that
+    contain unbalanced `[` or `]` characters (e.g. a title like
+    ``"see [note"``) don't fool the scanner. Falls back to a bracket-depth
+    scan only if no balanced JSON is found at any prefix.
     """
-    # Try array first, then object
+    import json as _json
+
+    decoder = _json.JSONDecoder()
+
+    # Try raw_decode at every `{` or `[` offset — respects string literals.
+    for opener in ("[", "{"):
+        start = output.find(opener)
+        while start != -1:
+            try:
+                _, end_offset = decoder.raw_decode(output[start:])
+                return output[start:start + end_offset]
+            except _json.JSONDecodeError:
+                start = output.find(opener, start + 1)
+
+    # Fallback: naive bracket-depth scan (used only when the output is
+    # truncated mid-structure so raw_decode fails everywhere — the repair
+    # step downstream may still salvage it).
     for opener, closer in [("[", "]"), ("{", "}")]:
         start = output.find(opener)
         if start == -1:

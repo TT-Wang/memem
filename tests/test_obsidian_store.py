@@ -46,3 +46,53 @@ def test_synonym_expansion():
     ws = _word_set("auth and database config")
     assert "authentication" in ws
     assert "db" in ws or "database" in ws
+
+
+def test_purge_mined_memories_clears_fts_and_index(tmp_vault, tmp_cortex_dir):
+    """Regression guard: --purge-mined must also clear FTS5 + _index.md entries."""
+    import importlib
+    from pathlib import Path
+
+    from cortex_server import models, obsidian_store, search_index
+    # Order matters: models first (paths), then search_index (uses the paths),
+    # then obsidian_store (imports _index_memory from search_index at module load).
+    importlib.reload(models)
+    importlib.reload(search_index)
+    importlib.reload(obsidian_store)
+
+    mined = obsidian_store._make_memory(
+        content="This is a mined insight about cortex architecture decisions.",
+        title="Mined insight",
+        tags=["mined"],
+        source_type="mined",
+    )
+    user = obsidian_store._make_memory(
+        content="This is a user-saved memory that must survive purge.",
+        title="User memory",
+        tags=["note"],
+        source_type="user",
+    )
+    obsidian_store._save_memory(mined)
+    obsidian_store._save_memory(user)
+
+    # Verify the mined memory is in FTS before purge
+    fts_pre = set(search_index._search_fts("mined insight", mined.get("project", "general"), 10))
+    assert mined["id"] in fts_pre, f"FTS pre-state missing mined id; got {fts_pre}"
+
+    mined_sessions = tmp_cortex_dir / ".mined_sessions"
+    mined_sessions.write_text("")
+    result = obsidian_store.purge_mined_memories(mined_sessions)
+    assert result["deleted"] == 1
+
+    # FTS should no longer return the mined memory
+    fts_post = set(search_index._search_fts("mined insight", mined.get("project", "general"), 10))
+    assert mined["id"] not in fts_post
+
+    # User memory must still exist
+    assert obsidian_store._find_memory(user["id"]) is not None
+    assert obsidian_store._find_memory(mined["id"]) is None
+
+    # _index.md must not list the mined memory id
+    index_path = Path(obsidian_store.INDEX_PATH)
+    if index_path.exists():
+        assert mined["id"][:8] not in index_path.read_text()

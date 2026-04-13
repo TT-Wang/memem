@@ -33,14 +33,28 @@ PID_FILE = CORTEX_DIR / "miner.pid"
 LOG_FILE = CORTEX_DIR / "miner.log"
 POLL_INTERVAL = 60
 
-_handler = logging.handlers.RotatingFileHandler(
-    str(LOG_FILE), maxBytes=5 * 1024 * 1024, backupCount=2,
-)
-_handler.setFormatter(logging.Formatter(
-    "%(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S",
-))
-logging.basicConfig(level=logging.INFO, handlers=[_handler])
 log = logging.getLogger("cortex-miner")
+
+
+def _configure_logging() -> None:
+    """Attach the rotating file handler — called only when the daemon actually starts.
+
+    Deferring this out of module scope keeps ``import cortex_server.miner_daemon``
+    side-effect-free so tests and tooling can import it without creating the
+    real ``~/.cortex/miner.log`` file or clobbering the host process root logger.
+    """
+    if any(isinstance(h, logging.handlers.RotatingFileHandler) for h in log.handlers):
+        return  # Already configured
+    CORTEX_DIR.mkdir(parents=True, exist_ok=True)
+    handler = logging.handlers.RotatingFileHandler(
+        str(LOG_FILE), maxBytes=5 * 1024 * 1024, backupCount=2,
+    )
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+    log.addHandler(handler)
+    log.setLevel(logging.INFO)
+    log.propagate = False
 
 
 class FatalMinerError(RuntimeError):
@@ -74,6 +88,7 @@ def _cleanup(signum=None, frame=None):
 
 
 def start_daemon():
+    _configure_logging()
     existing = _read_pid()
     if existing:
         print(f"Miner daemon already running (PID {existing})")
@@ -82,8 +97,14 @@ def start_daemon():
     # First fork — detach from parent
     pid = os.fork()
     if pid > 0:
-        time.sleep(0.5)
-        child_pid = _read_pid()
+        # Poll for the grandchild's PID file instead of a blind sleep — avoids
+        # false "Failed to start" messages on slow/cold-start hosts.
+        child_pid = None
+        for _ in range(20):  # up to 2s total
+            time.sleep(0.1)
+            child_pid = _read_pid()
+            if child_pid:
+                break
         if child_pid:
             print(f"Miner daemon started (PID {child_pid})")
         else:
@@ -226,6 +247,7 @@ if __name__ == "__main__":
     elif cmd == "status":
         status_daemon()
     elif cmd == "run":
+        _configure_logging()
         _write_pid()
         signal.signal(signal.SIGTERM, _cleanup)
         signal.signal(signal.SIGINT, _cleanup)

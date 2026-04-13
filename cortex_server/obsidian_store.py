@@ -9,6 +9,7 @@ This module owns all interactions with the Obsidian vault:
 """
 
 import fcntl
+import functools
 import logging
 import os
 import re
@@ -167,17 +168,32 @@ def _write_obsidian_memory(mem: dict):
     clean_title = re.sub(r"^\[[^\]]+\]\s*", "", mem.get("title", "Untitled"))
     project = mem.get("project", "general")
 
+    # Sanitize tags and related ids so a hallucinated or hostile value
+    # containing `]`, `[`, `,`, or newlines cannot corrupt the frontmatter
+    # by introducing phantom fields or truncating the list early.
+    def _safe_tag(value: str) -> str:
+        return (
+            value.replace("\r", " ")
+            .replace("\n", " ")
+            .replace("[", "")
+            .replace("]", "")
+            .replace(",", "")
+            .strip()
+        )
+
+    safe_tags = [_safe_tag(t) for t in tags if _safe_tag(t)]
     frontmatter = (
         f"---\n"
         f"id: {mem['id']}\n"
         f"schema_version: {mem.get('schema_version', 1)}\n"
         f"title: {_yaml_escape(clean_title)}\n"
-        f"project: {project}\n"
-        f"tags: [{', '.join(tags)}]\n"
+        f"project: {_safe_tag(project)}\n"
+        f"tags: [{', '.join(safe_tags)}]\n"
     )
     related = mem.get("related", [])
     if related:
-        frontmatter += f"related: [{', '.join(related)}]\n"
+        safe_related = [_safe_tag(r) for r in related if _safe_tag(r)]
+        frontmatter += f"related: [{', '.join(safe_related)}]\n"
     frontmatter += (
         f"created: {mem.get('created_at', '')[:10]}\n"
         f"updated: {mem.get('updated_at', '')[:10]}\n"
@@ -534,16 +550,22 @@ def _check_contradictions(content: str, scope_id: str = "default") -> list[dict]
         match, score = _find_best_match(content, scope_id)
         candidates = [match] if match and score > 0.2 else []
 
+    # Only flag when the existing memory and the new content share a meaningful
+    # topic overlap — previously any FTS match with any negation word in the
+    # new content was treated as a contradiction, which caused wrongful mass
+    # deprecations during consolidation.
+    new_words = _word_set(content)
     contradictions = []
     for mem in candidates:
         if not mem:
             continue
-        mem_lower = mem.get("essence", "").lower()
-        # Check if existing memory and new content have opposing signals
-        # New says "removed X" and old says "use X" (or vice versa)
+        mem_essence = mem.get("essence", "")
+        mem_lower = mem_essence.lower()
+        overlap = _containment(new_words, _word_set(mem_essence))
+        if overlap < 0.3:
+            continue  # Too little topic overlap to be a real contradiction
         for signal in _NEGATION_SIGNALS:
             if signal in content_lower and signal not in mem_lower:
-                # New content negates something, existing doesn't — possible contradiction
                 contradictions.append({
                     "memory_id": mem.get("id", "")[:8],
                     "title": mem.get("title", "")[:60],
@@ -724,6 +746,7 @@ def _recount_index_sections(lines: list[str]) -> list[str]:
 
 def _with_index_lock(func):
     """Decorator: acquire exclusive lock on index file during read-modify-write."""
+    @functools.wraps(func)
     def wrapper(*args, **kwargs):
         lock_path = INDEX_PATH.with_suffix(".lock")
         lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -782,12 +805,18 @@ def _remove_index_line(memory_id: str):
 # ---------------------------------------------------------------------------
 
 def purge_mined_memories(mined_sessions_file: Path) -> dict:
+    from cortex_server.search_index import _remove_from_index
+
     deleted = 0
     for mem in _obsidian_memories():
         if "mined" in (mem.get("domain_tags") or []):
             obsidian_path = Path(mem.get("file", ""))
             if obsidian_path.exists():
                 obsidian_path.unlink()
+                mem_id = mem.get("id", "")
+                if mem_id:
+                    _remove_from_index(mem_id)
+                    _remove_index_line(mem_id)
                 deleted += 1
 
     if mined_sessions_file.exists():
