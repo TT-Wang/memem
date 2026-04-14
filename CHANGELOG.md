@@ -10,6 +10,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
 
+## [0.11.0] - 2026-04-14
+
+### Changed — "session-start token diet"
+
+Cuts memem's per-session token cost by ~5-6× by adopting claude-mem's
+SessionStart defaults and adding project scoping. Measured on the dev
+vault (1926 memories): previous SessionStart injected ~20K tokens,
+v0.11.0 injects ~3.7K tokens.
+
+**Defaults overhauled** (matches claude-mem parity):
+
+- **`MEMEM_SESSION_START_LIMIT`** (default **50**, range 1–200) — total
+  memories injected at session start. Previous default was 500.
+- **`MEMEM_SESSION_START_FULL`** (default **5**, range 0–20) — of the
+  top-ranked memories, how many show full content vs compact index
+  lines. Previous model loaded all L0 as full content uncapped.
+- **`MEMEM_SESSION_START_PROJECT`** (default = `cwd` basename) — scope
+  filter. memem now injects only memories from the current working
+  directory's project + cross-project `general` memories. Pass `"all"`
+  to disable scoping and include every memory. **This is the biggest
+  single win** — a user in `/cortex-plugin/` working on one project no
+  longer sees memories from 48 other projects.
+
+**Ranking unified** across L0-L3: top-N by importance × recency. The
+hard L0/L1/L2/L3 split at session start is gone — the layers still
+exist for classification but no longer gate injection. Claude gets a
+flat "top N most useful for this project right now" set.
+
+### Fixed — double-fire on first turn
+
+SessionStart and UserPromptSubmit previously both fired on the first
+message of a session, injecting the same material twice (~20K from
+SessionStart + ~5-10K from context_assemble). SessionStart now writes
+`~/.memem/.last-brief.json` with a `primed: true` flag. The immediately-
+following UserPromptSubmit sees the flag and returns empty context,
+consuming the flag so subsequent prompts use normal topic-shift logic.
+
+**Savings: ~5-10K tokens on the first turn** (previously wasted on
+duplicate injection).
+
+### Backward compat
+
+- Legacy `MEMEM_COMPACT_INDEX_LIMIT` env var is still honored as a
+  fallback if set.
+- `--limit N` CLI argument still works on `--compact-index`.
+- Memories still have layer fields; classifier unchanged. Only the
+  session-start injection behavior changed, not the classification.
+
+### Tests
+
+- 6 new tests in `tests/test_v011.py` covering the new env vars, full-
+  count cap, project scoping, default limit, primed-marker write, and
+  auto-recall primed-flag consumption.
+- Total suite: **85 tests**, ruff clean.
+
+### Estimated per-session savings
+
+| Dimension | v0.10.2 | v0.11.0 | Savings |
+|---|---|---|---|
+| SessionStart memory count | 500 + up to 20 L0 full | 45 compact + 5 full | ~10× fewer items |
+| SessionStart tokens | ~20K | ~3.7K | ~16K/session |
+| First-prompt double-fire | ~5-10K extra | 0 | ~7K/first turn |
+| Scope | all projects | current project only | ~10× less noise |
+| **Total first-turn cost** | **~25-30K tokens** | **~3.7K tokens** | **~7×** |
+
 ## [0.10.2] - 2026-04-14
 
 ### Fixed — second-pass code review

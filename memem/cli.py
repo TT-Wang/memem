@@ -19,27 +19,60 @@ def dispatch_cli(argv: list[str], mcp) -> None:
     cmd = argv[1] if len(argv) >= 2 else None
 
     if cmd == "--compact-index":
-        # Parse optional --limit N flag. Default 500 keeps session-start
-        # injection under ~25K tokens on vaults with thousands of memories.
-        # Override: MEMEM_COMPACT_INDEX_LIMIT env var or --limit N arg.
+        # v0.11.0 "session-start token diet" — matches claude-mem's defaults.
+        #
+        # MEMEM_SESSION_START_LIMIT (default 50, range 1-200): total memories
+        # injected at session start (full + compact combined).
+        # MEMEM_SESSION_START_FULL (default 5, range 0-20): of the top
+        # ranked memories, how many show full content vs compact.
+        # MEMEM_SESSION_START_PROJECT (default = cwd basename): scope filter.
+        # "all" disables scoping and includes every memory.
+        #
+        # Ranking: importance × recency, uniform across L0-L3. Per-project
+        # scoping massively reduces noise for users working in one project.
         import os
 
-        from memem.models import LAYER_L0
         from memem.obsidian_store import _obsidian_memories
         from memem.recall import _format_compact_index_line
-        default_limit = int(os.environ.get("MEMEM_COMPACT_INDEX_LIMIT", "500"))
-        limit = default_limit
+
+        def _env_int(name: str, default: int, lo: int, hi: int) -> int:
+            try:
+                val = int(os.environ.get(name, str(default)))
+            except ValueError:
+                return default
+            return max(lo, min(hi, val))
+
+        # Legacy env var MEMEM_COMPACT_INDEX_LIMIT still honored as a fallback
+        legacy_limit = os.environ.get("MEMEM_COMPACT_INDEX_LIMIT")
+        default_limit = int(legacy_limit) if legacy_limit else 50
+        total_limit = _env_int("MEMEM_SESSION_START_LIMIT", default_limit, 1, 200)
+        full_count = _env_int("MEMEM_SESSION_START_FULL", 5, 0, 20)
+        full_count = min(full_count, total_limit)
+
+        # --limit N arg overrides env (legacy path for manual CLI use)
         if "--limit" in argv:
             try:
-                limit = int(argv[argv.index("--limit") + 1])
+                total_limit = max(1, min(200, int(argv[argv.index("--limit") + 1])))
             except (ValueError, IndexError):
                 pass
 
-        memories = _obsidian_memories()
-        l0 = [m for m in memories if m.get("layer", 2) == LAYER_L0]
-        others = [m for m in memories if m.get("layer", 2) != LAYER_L0]
+        # Project scope — default to cwd basename, override via env var,
+        # pass "all" to disable scoping.
+        scope = os.environ.get("MEMEM_SESSION_START_PROJECT", "").strip()
+        if not scope:
+            scope = os.path.basename(os.getcwd()) or "all"
 
-        # Rank non-L0 by importance + recency so the cap picks the best.
+        memories = _obsidian_memories()
+
+        # Filter by scope unless "all". Always include cross-project "general"
+        # memories alongside project-scoped ones.
+        if scope != "all":
+            memories = [
+                m for m in memories
+                if m.get("project") == scope or m.get("project") == "general"
+            ]
+
+        # Rank by importance × recency (uniform across layers).
         def _rank_key(m: dict) -> tuple:
             importance = m.get("importance", 3)
             if not isinstance(importance, int | float):
@@ -47,24 +80,34 @@ def dispatch_cli(argv: list[str], mcp) -> None:
             updated = m.get("updated_at") or m.get("created_at", "")
             return (importance, updated)
 
-        others.sort(key=_rank_key, reverse=True)
-        truncated = len(others) > limit
-        others = others[:limit]
+        memories.sort(key=_rank_key, reverse=True)
+        selected = memories[:total_limit]
 
-        # Print L0 full content first
-        if l0:
-            print("## Session memory — always-loaded (L0)\n")
-            for mem in l0:
-                print(f"### {mem.get('title', 'Untitled')}")
-                print(mem.get("essence", "") or mem.get("full_record", ""))
+        full_memories = selected[:full_count]
+        compact_memories = selected[full_count:]
+
+        # Print full-content section first (top N ranked)
+        if full_memories:
+            print(f"## memem — top {len(full_memories)} memories (scope: {scope})\n")
+            for mem in full_memories:
+                title = mem.get("title", "Untitled")
+                layer = mem.get("layer", 2)
+                essence = mem.get("essence", "") or mem.get("full_record", "")
+                print(f"### [L{layer}] {title}")
+                print(essence)
                 print()
-        # Then compact index of L1-L3 (capped)
-        if others:
-            header = f"## Memory index ({len(others)} memories, use memory_get to drill)"
-            if truncated:
-                header += f" — showing top {limit} by importance+recency"
-            print(header + "\n")
-            for mem in others:
+        # Then compact index for the rest
+        if compact_memories:
+            total_in_scope = len(memories)
+            header = (
+                f"## Memory index ({len(compact_memories)} compact"
+                + (f", {total_in_scope} in scope" if total_in_scope > total_limit else "")
+                + ")"
+            )
+            print(header)
+            print("_Use `memory_get(ids=[...])` to fetch full content, "
+                  "or `memory_search(query=...)` for more._\n")
+            for mem in compact_memories:
                 print(_format_compact_index_line(mem))
         return
 

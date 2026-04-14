@@ -99,6 +99,23 @@ if last_brief.exists():
 
 last_keywords = set(last_data.get("keywords", []))
 last_session  = last_data.get("session_id", "")
+last_primed   = last_data.get("primed", False)
+
+# v0.11.0: if SessionStart just primed us for this session, the first
+# UserPromptSubmit should skip context_assemble — SessionStart already
+# injected the same material, doing it twice doubles the token cost.
+# Consume the primed flag (rewrite .last-brief.json without it) so the
+# next prompt uses normal topic-shift logic.
+if last_primed and last_session == session_id:
+    try:
+        last_brief.write_text(json.dumps({
+            "session_id": session_id,
+            "keywords": sorted(current_keywords),
+            "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }))
+    except Exception:
+        pass
+    emit_empty()
 
 # Compute overlap ratio
 if last_keywords and last_session == session_id:
