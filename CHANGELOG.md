@@ -10,6 +10,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
 
+## [0.9.3] - 2026-04-14
+
+### Fixed — playbook drift
+Playbooks are now derived directly from memories with a staleness hash,
+eliminating the drift bug where projects with many memories ended up
+with no playbook. Investigation showed 12 projects with ≥10 memories
+had no playbook (polymarket-weather with 186 memories, vibereader with
+164, techfeed with 131, etc.) because the old staging layer only
+populated during active mining batches — projects mined long ago and
+not re-touched never got their playbook refreshed.
+
+- **`_playbook_refine(project)` reads memories directly.** The staging
+  layer (`_playbook_append` + per-project staging jsonl files) is
+  removed entirely. Playbooks are always built from the current
+  memory set, never a stale snapshot.
+- **Source-hash staleness check.** Each playbook stores a
+  `<!-- memem-source-hash:XYZ -->` marker covering all project memory
+  ids + content. Re-running refine with unchanged memories is a
+  cheap no-op — no Haiku call, no I/O.
+- **`_playbook_sweep()`** refines every project with ≥5 memories in a
+  single pass. Mining now calls the sweep at end-of-batch instead of
+  iterating only `seen_projects`, so no project is ever left without
+  a playbook due to batch-gating.
+- **Minimum threshold** of 5 memories per project before a playbook is
+  written. Tiny projects (typos, one-off experiments) stay unrefined.
+- **`--rebuild-playbooks`** now uses the sweep and takes an optional
+  `--force` flag to bypass the staleness check.
+- **Removed:** `_playbook_append`, `PLAYBOOK_STAGING_DIR` usage from
+  mining. Staging jsonl files under `~/obsidian-brain/memem/playbooks/.staging/`
+  are no longer written; existing ones can be deleted.
+
+### Migration
+On the next mining batch (or manual `--rebuild-playbooks` run), the
+sweep will detect all drifted projects, rebuild their playbooks from
+current memories, and write the source-hash marker. Expect one-time
+Haiku cost proportional to the number of large missing-playbook
+projects (~12 calls for a typical drifted install).
+
 ## [0.9.2] - 2026-04-14
 
 ### Changed

@@ -92,18 +92,17 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         return
 
     if cmd == "--rebuild-playbooks":
-        from memem.obsidian_store import _obsidian_memories
-        from memem.playbook import _playbook_refine
-        seen = set()
-        count = 0
-        for mem in _obsidian_memories():
-            project = mem.get("project", "general")
-            if project not in seen:
-                seen.add(project)
-                _playbook_refine(project)
-                count += 1
-                print(f"  Refined: {project}")
-        print(f"Refined {count} playbooks")
+        from memem.playbook import _playbook_sweep
+        force = "--force" in argv
+        print("Sweeping playbooks" + (" (force)" if force else "") + "...")
+        totals = _playbook_sweep(force=force)
+        print(
+            f"Playbook sweep complete: "
+            f"refreshed={totals['refreshed']} "
+            f"unchanged={totals['noop']} "
+            f"below-threshold={totals['skipped']} "
+            f"failed={totals['failed']}"
+        )
         return
 
     if cmd == "--rebuild-search-index":

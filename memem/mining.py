@@ -22,7 +22,6 @@ from memem.obsidian_store import (
     _update_memory,
 )
 from memem.playbook import (
-    _playbook_append,
     _playbook_refine,
 )
 from memem.session_state import (
@@ -357,7 +356,6 @@ def mine_session(jsonl_path: str) -> dict:
                     _update_memory(existing["id"], merged, insight["title"])
                     memories_merged += 1
                     _log_event("merge", existing["id"], merged_with=insight["title"])
-                    _playbook_append(project, {"title": insight["title"], "essence": merged})
                 except (TransientMiningError, ValueError) as exc:
                     # Merge failed — skip this insight entirely, don't duplicate
                     log.warning("Merge failed, skipping insight: %s", exc)
@@ -381,7 +379,6 @@ def mine_session(jsonl_path: str) -> dict:
                 mem["id"] = _stable_mined_memory_id(session_id, insight["title"], content)
                 _save_memory(mem)
                 memories_saved += 1
-                _playbook_append(project, mem)
                 if mem.get("contradicts"):
                     log.warning("Memory %s contradicts: %s", mem["id"][:8], mem["contradicts"])
             except ObsidianUnavailableError as exc:
@@ -458,12 +455,20 @@ def mine_all() -> dict:
         except Exception as exc:
             log.warning("Consolidation failed: %s", exc)
 
-        # Refine playbooks — reorganize, deduplicate, clean up
+        # Refine playbooks — sweep ALL projects with enough memories, not just
+        # seen_projects. The staleness hash in _playbook_refine makes this
+        # cheap for untouched projects (they skip Haiku entirely), and it
+        # guarantees no project with ≥5 memories is ever left without a
+        # playbook due to batch-gating drift.
         try:
-            for project in seen_projects:
-                _playbook_refine(project)
+            from memem.playbook import _playbook_sweep
+            totals = _playbook_sweep()
+            log.info(
+                "Playbook sweep: refreshed=%d noop=%d skipped=%d failed=%d",
+                totals["refreshed"], totals["noop"], totals["skipped"], totals["failed"],
+            )
         except Exception as exc:
-            log.warning("Playbook refinement failed: %s", exc)
+            log.warning("Playbook sweep failed: %s", exc)
 
     return {
         "total_sessions": total,
