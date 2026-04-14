@@ -10,6 +10,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
 
+## [0.7.1] - 2026-04-14
+
+### Fixed
+- **bootstrap: harden `PLUGIN_ROOT` fallback against unexpanded `${CLAUDE_PLUGIN_ROOT}`.**
+  In some Claude Code spawn paths the env var was passed through literally
+  instead of substituted, causing `bootstrap.sh` to source a venv at the
+  literal path `${CLAUDE_PLUGIN_ROOT}/.venv` and exit before the MCP server
+  started — surfacing as a silent "MCP unconnected" for the user. Bootstrap
+  now validates the candidate is non-empty, not the literal unexpanded
+  string, and points to an existing directory; otherwise it falls back to
+  `$SCRIPT_DIR`.
+
+### Docs
+- README: removed the "Skip memem if" section.
+- README: expanded "What does memem save?" from 5 to 10 categories with
+  concrete examples (env/tooling, project invariants, failure patterns,
+  third-party quirks, domain knowledge).
+
 ## [0.7.0] - 2026-04-14
 
 ### Renamed
