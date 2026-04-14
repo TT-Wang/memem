@@ -31,15 +31,30 @@ Call `mcp__memem__memory_save` with:
 - Completed-work logs or TODO state
 - Trivial or obvious facts easily re-discovered from code
 
-## Mining existing sessions
+## Starting the miner (opt-in)
 
-By default, memem only mines sessions created after installation. When a user asks to mine their existing history (e.g. "mine my existing sessions", "mine my history"), run this in the background:
+memem is **opt-in** as of v0.9.0 — install does not start any background processes. The miner daemon only runs once the user explicitly enables it. Opt-in is tracked by the marker file `~/.memem/.miner-opted-in`.
 
+When the user asks to start memem, start mining, enable memory extraction, or similar — **identify which of the two modes they want** and run the matching commands:
+
+**Mode 1 — "start mining new sessions" / "start the miner" / "enable memem" / "start memem"** (no history):
 ```bash
-nohup PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python3 -m memem.server --mine-all > /dev/null 2>&1 &
+mkdir -p ~/.memem && touch ~/.memem/.miner-opted-in
+bash "${CLAUDE_PLUGIN_ROOT}/memem/miner-wrapper.sh" start
 ```
+Then tell the user: the miner is running, it will mine new sessions automatically ~5 min after they end, and it will auto-start on future Claude Code launches.
 
-The `--mine-all` flag clears the install-time gate so all historical sessions are included. Tell the user it's running in the background and they can continue working normally.
+**Mode 2 — "mine everything" / "mine history" / "mine all my past sessions" / "include history"** (full history + ongoing):
+```bash
+mkdir -p ~/.memem && touch ~/.memem/.miner-opted-in
+nohup PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python3 -m memem.server --mine-all > ~/.memem/mine-all.log 2>&1 &
+bash "${CLAUDE_PLUGIN_ROOT}/memem/miner-wrapper.sh" start
+```
+Then tell the user: history mining is running in the background (log at `~/.memem/mine-all.log`), the ongoing miner is also running, and they can continue working normally. Warn them if the session count is large that this may take up to an hour and uses Haiku API credits.
+
+**If unsure which mode the user wants, ask.** Don't default — the difference matters (API cost, time).
+
+**To stop / opt out:** `python3 -m memem.server --miner-opt-out` (stops daemon and removes marker so it won't auto-start next time).
 
 ## Available tools
 

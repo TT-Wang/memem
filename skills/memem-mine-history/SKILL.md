@@ -4,26 +4,29 @@ description: Mine ALL existing Claude Code sessions, including history from befo
 allowed-tools: [Bash]
 ---
 
-Mine all historical Claude Code sessions for knowledge. This includes sessions from before memem was installed — by default only new sessions are mined.
+Mine all historical Claude Code sessions for knowledge. This includes sessions from before memem was installed — by default only new sessions are mined. This also opts the user into the ongoing miner daemon, so new sessions are mined automatically going forward.
 
 1. Show how many sessions exist:
 ```bash
 find ~/.claude/projects/ -name "*.jsonl" ! -path "*/subagents/*" -size +5k | wc -l
 ```
 
-2. Tell the user approximately how long it will take (~3-5 seconds per session).
+2. Tell the user approximately how long it will take (~3-5 seconds per session, plus Haiku API costs).
 
 3. Confirm with the user before starting — this can take hours for large histories and makes many API calls.
 
-4. Start the mining in the background:
+4. Record the opt-in, start mining history in the background, and start the ongoing miner daemon:
 ```bash
-nohup PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python3 -m memem.server --mine-all > /dev/null 2>&1 &
+mkdir -p ~/.memem && touch ~/.memem/.miner-opted-in
+nohup PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python3 -m memem.server --mine-all > ~/.memem/mine-all.log 2>&1 &
 echo "History mining started in background (PID $!)"
+bash "${CLAUDE_PLUGIN_ROOT}/memem/miner-wrapper.sh" start
 ```
 
 5. Tell the user:
-- History mining is running in the background
+- History mining is running in the background (log at `~/.memem/mine-all.log`)
+- The ongoing miner daemon is now running — new sessions will be mined automatically too
 - They can continue working normally
 - New memories will appear as they're extracted
 - Run `/memem-status` to check progress
-- The miner daemon continues mining new sessions in parallel
+- To stop everything: `python3 -m memem.server --miner-opt-out`

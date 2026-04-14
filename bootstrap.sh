@@ -257,30 +257,6 @@ if ! "$PYBIN" -c "from memem.capabilities import write_capabilities; write_capab
     log "warning: capabilities probe failed — server will run without status banner"
 fi
 
-# ---- 6.5. Auto-mine existing Claude Code sessions (first run only) ----------
-# One-shot: if the user has prior Claude Code history, extract memories from it
-# in the background so session 2 already has warm context. Opt-out via
-# MEMEM_NO_AUTO_MINE=1. Idempotent via marker file.
-AUTO_MINE_MARKER="$MEMEM_DIR/.auto-mined"
-if [ ! -f "$AUTO_MINE_MARKER" ] && [ "${MEMEM_NO_AUTO_MINE:-0}" != "1" ]; then
-    CLAUDE_PROJECTS_DIR="$HOME/.claude/projects"
-    SESSION_COUNT=0
-    if [ -d "$CLAUDE_PROJECTS_DIR" ]; then
-        SESSION_COUNT=$(find "$CLAUDE_PROJECTS_DIR" -name "*.jsonl" -type f 2>/dev/null | wc -l | tr -d ' ')
-    fi
-    if [ "${SESSION_COUNT:-0}" -ge 5 ]; then
-        log "auto-mine: found $SESSION_COUNT past sessions — spawning --mine-all in background"
-        touch "$AUTO_MINE_MARKER"
-        nohup "$PYBIN" -m memem.server --mine-all >> "$MEMEM_DIR/auto-mine.log" 2>&1 &
-        disown 2>/dev/null || true
-    else
-        log "auto-mine: only $SESSION_COUNT past sessions (threshold 5) — skipping"
-        touch "$AUTO_MINE_MARKER"
-    fi
-elif [ "${MEMEM_NO_AUTO_MINE:-0}" = "1" ]; then
-    log "auto-mine: MEMEM_NO_AUTO_MINE=1 set — skipping"
-fi
-
 # Clear any stale error-surface file — we made it this far, so bootstrap succeeded.
 rm -f "$MEMEM_DIR/last-error.md" 2>/dev/null || true
 

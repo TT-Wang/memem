@@ -45,16 +45,21 @@ def _ensure_vault_exists():
     MEMEM_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def _auto_start_miner():
-    """Start the miner daemon if not already running, and verify it came up.
+MINER_OPT_IN_MARKER = MEMEM_DIR / ".miner-opted-in"
 
-    Previously this was fire-and-forget Popen with no verification — if
-    ``setsid`` was missing, the wrapper was unexecutable, or the daemon
-    crashed on startup, the failure was silent and the user discovered it
-    hours later via ``--status``. Now we Popen, then poll the miner PID
-    file for up to 2 seconds and log a clear warning if the daemon did
-    not come up.
+
+def _auto_start_miner():
+    """Start the miner daemon if the user has explicitly opted in.
+
+    v0.9.0 onwards the miner is strictly opt-in: install no longer starts
+    any background processes. The marker ``~/.memem/.miner-opted-in`` is
+    created by ``/memem-mine``, ``/memem-mine-history``, or the
+    ``--miner-opt-in`` / ``--mine-all`` CLI flags. Without the marker this
+    function is a silent no-op — the MCP server still runs, memories are
+    still readable, but nothing mines in the background.
     """
+    if not MINER_OPT_IN_MARKER.exists():
+        return
     try:
         miner_pid_file = MEMEM_DIR / "miner.pid"
         if miner_pid_file.exists():

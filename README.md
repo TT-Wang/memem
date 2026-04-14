@@ -63,12 +63,16 @@ That's it. On first run, `bootstrap.sh` self-heals everything:
 3. Syncs deps into a plugin-local `.venv` (hash-cached against `uv.lock`)
 4. Creates and canary-tests `~/.memem/` and `~/obsidian-brain/`
 5. Writes `~/.memem/.capabilities` (used for degraded-mode decisions)
-6. **Auto-mines your existing Claude Code history in the background** (if you have ≥5 past sessions) so session 2 already has warm context. One-shot, idempotent, runs silently.
-7. Execs the real MCP server
+6. Execs the real MCP server
 
-**First run:** ~5 seconds (plus background mining if applicable). **Every run after:** ~100ms. No separate `pip install` step.
+**First run:** ~5 seconds. **Every run after:** ~100ms. No separate `pip install` step.
 
-**Opt out of auto-mining:** set `MEMEM_NO_AUTO_MINE=1` in your shell profile before installing. Any other time, just type `/memem` to see status and help.
+**Nothing mines until you opt in.** memem is strictly opt-in as of v0.9.0 — install does not start the miner or touch your sessions. Type `/memem` to see status and choose what to do next. You can start mining two ways:
+
+- `/memem-mine` — mine **new sessions only** (from now on)
+- `/memem-mine-history` — mine **everything, including past history** (uses Haiku API credits)
+
+Or just tell Claude "start mining new sessions" / "start mining everything including history" — it knows what to do.
 
 ## What happens on my first Claude Code session?
 

@@ -10,6 +10,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
 
+## [0.9.0] - 2026-04-14
+
+### Changed — "opt-in mining"
+Install no longer starts any background processes. The miner daemon is
+strictly opt-in, tracked by the marker file `~/.memem/.miner-opted-in`.
+Users get a clean silent install, type `/memem` to see the welcome and
+mining options, and explicitly choose whether to start mining.
+
+- **Miner is opt-in.** `storage._auto_start_miner()` now early-returns if
+  `~/.memem/.miner-opted-in` is absent. The MCP server boots and memories
+  are readable, but no background daemon spawns until the user opts in.
+- **Opt-in paths** (all create the marker):
+  - `/memem-mine` — start the daemon, mine new sessions only
+  - `/memem-mine-history` — start the daemon + run `--mine-all` for full history
+  - `python3 -m memem.server --miner-opt-in` — CLI opt-in
+  - `python3 -m memem.server --mine-all` — implicit opt-in
+  - `python3 -m memem.server --miner-start` — implicit opt-in
+- **Opt-out:** `python3 -m memem.server --miner-opt-out` stops the daemon
+  and removes the marker.
+- **Auto-mine on install removed.** The bootstrap auto-mine block added in
+  v0.8.0 is gone. Install runs only the environment checks.
+- **`/memem` welcome shows miner state.** Branches on whether the user
+  has opted in — if not, prominently shows the two options (new sessions
+  vs full history) with natural-language trigger phrases and slash
+  command alternatives.
+- **CLAUDE.md teaches Claude the two modes.** When the user says "start
+  mining" or similar, the assistant now knows to identify mode 1 (new
+  sessions) vs mode 2 (history + ongoing) and run the right commands —
+  or ask if unsure.
+
+### Migration
+**Existing users who already had the miner running:** your miner will
+keep running for the current session, but on next server boot it won't
+auto-start unless you create the marker. Run `/memem-mine` once to
+opt in and preserve the old behaviour.
+
 ## [0.8.0] - 2026-04-14
 
 ### Changed — "quiet onboarding"

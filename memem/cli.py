@@ -39,13 +39,34 @@ def dispatch_cli(argv: list[str], mcp) -> None:
 
     if cmd == "--mine-all":
         from memem.session_state import clear_installed_at
+        from memem.storage import MINER_OPT_IN_MARKER
         clear_installed_at()  # Mine ALL sessions, including pre-install history
+        # Explicit --mine-all is an opt-in signal; create the marker so the
+        # miner daemon will also auto-start on future server boots.
+        MINER_OPT_IN_MARKER.parent.mkdir(parents=True, exist_ok=True)
+        MINER_OPT_IN_MARKER.touch()
         try:
             print(json.dumps(mine_all()))
         except MiningError as exc:
             print(str(exc), file=sys.stderr)
             exit_code = FATAL_EXIT_CODE if isinstance(exc, FatalMiningError) else TRANSIENT_EXIT_CODE
             raise SystemExit(exit_code)
+        return
+
+    if cmd == "--miner-opt-in":
+        from memem.storage import MINER_OPT_IN_MARKER, _auto_start_miner
+        MINER_OPT_IN_MARKER.parent.mkdir(parents=True, exist_ok=True)
+        MINER_OPT_IN_MARKER.touch()
+        _auto_start_miner()
+        print("memem miner opted in and started. Future server boots will auto-start it.")
+        return
+
+    if cmd == "--miner-opt-out":
+        from memem.storage import MINER_OPT_IN_MARKER
+        wrapper = str(Path(__file__).resolve().parent / "miner-wrapper.sh")
+        subprocess.run(["bash", wrapper, "stop"], capture_output=True)
+        MINER_OPT_IN_MARKER.unlink(missing_ok=True)
+        print("memem miner opted out and stopped. It will not auto-start until you run --miner-opt-in or /memem-mine.")
         return
 
     if cmd == "--purge-mined":
@@ -205,8 +226,13 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         return
 
     if cmd in ("--miner-start", "--miner-stop", "--miner-status"):
+        from memem.storage import MINER_OPT_IN_MARKER
         wrapper = str(Path(__file__).resolve().parent / "miner-wrapper.sh")
         action = cmd.replace("--miner-", "")
+        if action == "start":
+            # Starting the miner is an opt-in signal.
+            MINER_OPT_IN_MARKER.parent.mkdir(parents=True, exist_ok=True)
+            MINER_OPT_IN_MARKER.touch()
         subprocess.run(["bash", wrapper, action])
         return
 
