@@ -5,6 +5,127 @@ All notable changes to Cortex will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-04-14
+
+### Added
+- **Self-healing bootstrap shim** (`bootstrap.sh` at repo root) — first MCP spawn
+  installs `uv` if missing, hash-caches a `uv sync` against the committed
+  `uv.lock` into a plugin-local `.venv`, canary-tests directory writability,
+  writes `~/.cortex/.capabilities`, and exec's the server. ~5s on first run,
+  ~100ms on every subsequent run. No separate `pip install` step required.
+- `cortex_server/capabilities.py` — runtime feature detection (Python version,
+  `mcp` importability, `claude` CLI presence, `uv` availability, vault and
+  cortex-dir writability) with atomic JSON serialization to
+  `~/.cortex/.capabilities`.
+- **`/cortex-doctor` slash command** — preflight health check that runs the
+  same probe as the bootstrap shim and pretty-prints a HEALTHY / DEGRADED /
+  FAILING report with explicit fix instructions for each blocker.
+- **SessionStart status banner** — `hooks/auto-recall.sh` now prepends a
+  one-line status to the assembled context: `[Cortex] N memories · miner OK ·
+  assembly OK|degraded`.
+- `--doctor` CLI command.
+- Committed `uv.lock` for deterministic dep installs across machines.
+- `.dockerignore` and a minimal `Dockerfile` (used only by Glama for sandbox
+  validation; not a normal install path).
+- `tests/test_bootstrap.py` (6 subprocess-level smoke tests for the shim).
+- `tests/test_packaging.py` runtime tests for `miner-wrapper.sh status`,
+  `mine-cron.sh` execution, and `auto-recall.sh` with missing
+  `CLAUDE_PLUGIN_ROOT`.
+- `tests/test_obsidian_store.py::test_purge_mined_memories_clears_fts_and_index`
+  regression guard.
+- `llms.txt` at repo root for LLM crawler discovery.
+- `SECURITY.md` with vulnerability reporting policy and defence-in-depth
+  summary.
+- Glama A-tier score badge, CI status badge, MIT license badge, and Python
+  version badge in the README.
+- Comprehensive MCP tool descriptions: every tool now has a multi-paragraph
+  docstring with `Behaviour:` block (read/write classification, auth, rate
+  limits, data scope, idempotency, failure modes), `typing.Annotated[...,
+  pydantic.Field(description=...)]` on every parameter with length/range
+  constraints, explicit sibling differentiation, and worked examples.
+  Glama TDQS tier: D → A.
+
+### Changed
+- `.claude-plugin/plugin.json` MCP `command` is now `bash bootstrap.sh`
+  (previously `python3 -m cortex_server.server` directly). This is the
+  load-bearing change that enables install-as-launch.
+- `cortex_server/storage.py::_auto_start_miner` is now poll-and-log instead
+  of fire-and-forget — Popens the wrapper, then polls the miner PID file for
+  up to 2s and logs a clear warning if the daemon doesn't come up. Falls
+  back to plain `bash` when `setsid` is missing.
+- `cortex_server/assembly.py::context_assemble` and
+  `cortex_server/recall.py::smart_recall` enter graceful **degraded mode**
+  when `claude` CLI is missing — return raw playbook+memories materials
+  instead of failing or returning empty.
+- `cortex_server/server.py` builds the FastMCP instance lazily via
+  `_build_mcp()`, only called when no CLI args are supplied — non-MCP
+  commands (`--status`, `--rebuild-index`, `--doctor`, etc.) no longer
+  require the `mcp` package to be importable.
+- Renamed `cortex-mcp-server/` → `cortex_server/` (a real Python package
+  identifier, dashes are not allowed in module names).
+- Renamed `miner-daemon.py` → `miner_daemon.py` (subprocess module target).
+- All intra-package imports rewritten to `from cortex_server.X import Y`.
+- README rewritten with Q&A section structure for LLM retrieval (sections
+  match the exact phrasing an LLM uses internally to search), and a Glama
+  badge + CI badge + license badge row added at the top.
+- CI now removes the `mypy || true` escape hatch — mypy must pass cleanly.
+- CI adds a `build` job that builds a wheel and smoke-tests it in a clean
+  venv on every push.
+- Tag and `related` field values written to YAML frontmatter are now
+  sanitized (newlines, brackets, commas stripped) to prevent frontmatter
+  injection from hallucinated or hostile values.
+- `_extract_json_string` in mining now uses `json.JSONDecoder.raw_decode`
+  to respect string literals, fixing a class of false-negative parse
+  failures on Haiku output containing unbalanced brackets inside titles.
+- `_check_contradictions` requires word-set containment ≥ 0.3 between new
+  and existing content before flagging a contradiction (previously over-
+  eager, could trigger wrongful mass deprecations).
+- `purge_mined_memories` now removes deleted memories from the FTS5 index
+  and `_index.md` (previously orphaned both, leaving phantom hits).
+- `save_mined_session_state` now `fsync`s the temp file before rename,
+  closing a crash-window data-loss path.
+- `_record_access` (telemetry) now uses atomic `tmp + fsync + os.replace`
+  writes; corrupt JSON is preserved as `<file>.corrupt.<mtime>` instead
+  of being silently overwritten.
+- `_save_memory` writes the memory once (computes related links first)
+  instead of writing twice with a stale-index window between writes.
+- `_yaml_escape` now strips control characters (`\r`, `\n`, `\t`) from
+  values before quoting, preventing frontmatter injection via titles.
+
+### Fixed
+- Miner could mark malformed-Haiku-output sessions as `STATUS_COMPLETE`,
+  causing silent data loss on broken sessions. Now raises
+  `TransientMiningError` so failed sessions stay retryable.
+- `hooks/auto-recall.sh` no longer guesses a wrong fallback path when
+  `CLAUDE_PLUGIN_ROOT` is missing — logs to stderr and skips assembly
+  cleanly instead.
+- `_auto_start_miner` no longer swallows exceptions silently; logs with
+  `exc_info=True` on failure.
+- `recall.py` no longer raises `ValueError` on memories with missing IDs
+  (replaced `list.index()` with O(1) dict lookup with safe fallback).
+- Removed dead `[]` branch in `mining._summarize_session_haiku` that was
+  unreachable after the JSON parser change.
+- Module-level `RotatingFileHandler` and `basicConfig` in `miner_daemon.py`
+  moved into `_configure_logging()` so importing the module is now a
+  no-op side-effect-free operation (was clobbering the host process root
+  logger and creating real `~/.cortex/miner.log` files from test imports).
+- `start_daemon` blind 0.5s sleep replaced with a 10×100ms poll loop on
+  the grandchild PID file, eliminating false "Failed to start daemon"
+  messages on slow hosts.
+
+### Discovery / packaging
+- Submitted to the Anthropic Claude Code plugin marketplace.
+- Submitted to `awesome-mcp-servers` (`punkpeye/awesome-mcp-servers`
+  PR #4612, awaiting merge).
+- Submitted to `awesome-claude-code`
+  (`hesreallyhim/awesome-claude-code`, 7-day cooldown, resubmission
+  window opens 2026-04-16).
+- Validated and listed on Glama at
+  https://glama.ai/mcp/servers/TT-Wang/cortex-plugin with **A-tier scores
+  across all three dimensions** (license · security · TDQS).
+- Repo About description, homepage URL, and 10 GitHub topics set for
+  search discoverability.
+
 ## [0.5.0] - 2026-04-13
 
 ### Added
@@ -104,6 +225,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keyword search with containment scoring
 - CLAUDE.md integration for LLM instructions
 
+[0.6.0]: https://github.com/TT-Wang/cortex-plugin/releases/tag/v0.6.0
 [0.5.0]: https://github.com/TT-Wang/cortex-plugin/releases/tag/v0.5.0
 [0.4.1]: https://github.com/TT-Wang/cortex-plugin/releases/tag/v0.4.1
 [0.4.0]: https://github.com/TT-Wang/cortex-plugin/releases/tag/v0.4.0
