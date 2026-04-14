@@ -70,7 +70,7 @@ def classify_layer(mem: dict, all_memories: list[dict]) -> int:
 
     Pure function; no I/O, no subprocess, no network.
     """
-    tags = {t.lower() for t in (mem.get("tags") or [])}
+    tags = {t.lower() for t in (mem.get("domain_tags") or mem.get("tags") or [])}
     title_lower = (mem.get("title") or "").lower()
     importance = mem.get("importance", 3)
     if not isinstance(importance, int | float):
@@ -415,6 +415,9 @@ def mine_session(jsonl_path: str) -> dict:
         memories_merged = 0
         duplicates_skipped = 0
         memories_deleted = 0
+        # Hoist the vault snapshot once per session so classify_layer doesn't
+        # rescan all markdown files per insight (O(N²) regression fixed in v0.10.1).
+        vault_snapshot = _obsidian_memories()
         for insight in insights:
             project = insight["project"]
             content = insight["content"]
@@ -454,8 +457,9 @@ def mine_session(jsonl_path: str) -> dict:
                     source_session=session_id[:8],
                 )
                 mem["id"] = _stable_mined_memory_id(session_id, insight["title"], content)
-                mem["layer"] = classify_layer(mem, _obsidian_memories())
+                mem["layer"] = classify_layer(mem, vault_snapshot)
                 _save_memory(mem)
+                vault_snapshot.append(mem)  # keep snapshot current for L0 cap accounting
                 memories_saved += 1
                 if mem.get("contradicts"):
                     log.warning("Memory %s contradicts: %s", mem["id"][:8], mem["contradicts"])

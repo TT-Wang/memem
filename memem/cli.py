@@ -19,12 +19,38 @@ def dispatch_cli(argv: list[str], mcp) -> None:
     cmd = argv[1] if len(argv) >= 2 else None
 
     if cmd == "--compact-index":
+        # Parse optional --limit N flag. Default 500 keeps session-start
+        # injection under ~25K tokens on vaults with thousands of memories.
+        # Override: MEMEM_COMPACT_INDEX_LIMIT env var or --limit N arg.
+        import os
+
         from memem.models import LAYER_L0
         from memem.obsidian_store import _obsidian_memories
         from memem.recall import _format_compact_index_line
+        default_limit = int(os.environ.get("MEMEM_COMPACT_INDEX_LIMIT", "500"))
+        limit = default_limit
+        if "--limit" in argv:
+            try:
+                limit = int(argv[argv.index("--limit") + 1])
+            except (ValueError, IndexError):
+                pass
+
         memories = _obsidian_memories()
         l0 = [m for m in memories if m.get("layer", 2) == LAYER_L0]
         others = [m for m in memories if m.get("layer", 2) != LAYER_L0]
+
+        # Rank non-L0 by importance + recency so the cap picks the best.
+        def _rank_key(m: dict) -> tuple:
+            importance = m.get("importance", 3)
+            if not isinstance(importance, int | float):
+                importance = 3
+            updated = m.get("updated_at") or m.get("created_at", "")
+            return (importance, updated)
+
+        others.sort(key=_rank_key, reverse=True)
+        truncated = len(others) > limit
+        others = others[:limit]
+
         # Print L0 full content first
         if l0:
             print("## Session memory — always-loaded (L0)\n")
@@ -32,9 +58,12 @@ def dispatch_cli(argv: list[str], mcp) -> None:
                 print(f"### {mem.get('title', 'Untitled')}")
                 print(mem.get("essence", "") or mem.get("full_record", ""))
                 print()
-        # Then compact index of L1-L3
+        # Then compact index of L1-L3 (capped)
         if others:
-            print(f"## Memory index ({len(others)} memories, use memory_get to drill)\n")
+            header = f"## Memory index ({len(others)} memories, use memory_get to drill)"
+            if truncated:
+                header += f" — showing top {limit} by importance+recency"
+            print(header + "\n")
             for mem in others:
                 print(_format_compact_index_line(mem))
         return

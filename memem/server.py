@@ -245,7 +245,7 @@ def _build_mcp():
                     "Anchor memory ID (8-char prefix supported). The timeline "
                     "is built around this memory."
                 ),
-                min_length=4,
+                min_length=8,
                 max_length=64,
             ),
         ],

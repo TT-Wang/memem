@@ -10,6 +10,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
 
+## [0.10.1] - 2026-04-14
+
+### Fixed — v0.10.0 code-review findings
+
+Post-ship forge code review found six bugs missed by the test suite
+(because the tests mocked around the real data paths). All fixed here.
+
+**Correctness:**
+- **`memory_timeline` chronological sort was dead code.** Read
+  `mem.get("created")` but the parser stores the field as `created_at`.
+  Every timestamp parsed as `0.0`, so the **Before** section of every
+  timeline was always empty and **After** got all same-project memories
+  in undefined order. Fixed six call sites in `memory_timeline` to use
+  `created_at`.
+- **`pre-tool-use.sh` drained stdin before the Python helper read it.**
+  `INPUT=$(cat)` consumed stdin, then the heredoc tried `json.load(sys.stdin)`
+  on an empty pipe → `JSONDecodeError` → silent fallthrough to empty
+  context. `MEMEM_PRETOOL_GATING=1` was a no-op for every user. Fixed by
+  writing stdin to a tempfile and passing the path via argv to the
+  Python helper.
+- **`classify_layer` read `tags` instead of `domain_tags`.** Memories
+  from `_make_memory` and `_parse_obsidian_memory_file` both store the
+  tag list under `domain_tags`. The tag-based L0 structural match and
+  L1 generic-pattern match never fired — only the title substring
+  fallback worked. Fixed to read `mem.get("domain_tags") or mem.get("tags") or []`.
+- **`_format_full_memory` (`memory_get` display) had the same bug.**
+  Always rendered an empty `**tags:**` line because it read `mem.get("tags", [])`.
+  Same fix.
+
+**Performance:**
+- **`classify_layer(mem, _obsidian_memories())` inside the mining
+  loop.** Each insight re-read all 1895 markdown files from disk. Hoisted
+  the snapshot once per session and appended new memories to the
+  snapshot for L0 cap accounting.
+- **`--compact-index` was unbounded.** With 1895 memories the output
+  was 290 KB (~72K tokens) — injected at every session start, eating
+  ~36% of Claude's context window before the user typed anything. Added
+  a `--limit N` flag (default 500, override via `MEMEM_COMPACT_INDEX_LIMIT`
+  env var), ranked by importance + recency. Session-start output is now
+  ~79 KB / ~20K tokens for typical vaults.
+
+**Graph traversal:**
+- **FTS path silently did 2-hop traversal.** `_search_memories` (FTS
+  branch) already expanded linked memories, then `memory_search` called
+  `_linked_memories` again on the combined result. Docs, tests, and the
+  helper docstring all say "one hop". Added an `expand_links` parameter
+  to `_search_memories` — `memory_recall` keeps its existing behavior
+  (backward compat), `memory_search` passes `expand_links=False` and
+  does its own single-hop expansion via `_linked_memories`.
+
+**MCP schema:**
+- **`memory_timeline` `min_length=4`** in the MCP `Field` annotation
+  but `_find_memory` requires 8-char prefixes. Claude would follow the
+  schema, send 4-char IDs, and get "Anchor memory not found" back.
+  Fixed to `min_length=8`.
+
+**Scope filtering:**
+- **`memory_timeline`'s `scope_id` parameter was accepted but unused.**
+  `_obsidian_memories()` was called without passing `scope_id`, so
+  timelines leaked cross-project memories. Fixed.
+
+### Known trade-off
+- **PreToolUse hook has ~5s cold-start latency** because each invocation
+  spawns a fresh `python -m memem.server --recall` subprocess that
+  imports the full memory index. This is why it's opt-in via
+  `MEMEM_PRETOOL_GATING=1`. A future release will query `search.db`
+  directly via a lightweight helper without importing `memem.server`.
+
 ## [0.10.0] - 2026-04-14
 
 ### Changed — "layered recall"

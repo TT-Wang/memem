@@ -82,22 +82,31 @@ def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 1
         return []  # Fallback: caller will use file scan
 
 
-def _search_memories(query: str, scope_id: str | None = None, limit: int = 10, record_access: bool = True) -> list[dict]:
+def _search_memories(
+    query: str,
+    scope_id: str | None = None,
+    limit: int = 10,
+    record_access: bool = True,
+    expand_links: bool = True,
+) -> list[dict]:
     # Try FTS-first path
     fts_results = _search_memories_fts(query, scope_id, limit)
     if fts_results:
-        # Expand linked memories
-        seen_ids = {mem.get("id", "")[:8] for mem in fts_results}
-        linked = []
-        for mem in fts_results:
-            for related_id in mem.get("related", []):
-                if related_id in seen_ids:
-                    continue
-                seen_ids.add(related_id)
-                related_mem = _find_memory(related_id)
-                if related_mem:
-                    linked.append(related_mem)
-        results = (fts_results + linked)[:limit * 2]
+        if expand_links:
+            # Expand linked memories (for memory_recall backward-compat path)
+            seen_ids = {mem.get("id", "")[:8] for mem in fts_results}
+            linked = []
+            for mem in fts_results:
+                for related_id in mem.get("related", []):
+                    if related_id in seen_ids:
+                        continue
+                    seen_ids.add(related_id)
+                    related_mem = _find_memory(related_id)
+                    if related_mem:
+                        linked.append(related_mem)
+            results = (fts_results + linked)[:limit * 2]
+        else:
+            results = fts_results[:limit]
         if record_access:
             for mem in results:
                 mem_id = mem.get("id", "")
@@ -149,20 +158,22 @@ def _search_memories(query: str, scope_id: str | None = None, limit: int = 10, r
     scored.sort(key=lambda item: item[0], reverse=True)
     primary = [mem for _, mem in scored[:limit]]
 
-    # Expand linked memories
-    seen_ids = {mem.get("id", "")[:8] for mem in primary}
-    linked = []
-    for mem in primary:
-        for related_id in mem.get("related", []):
-            if related_id in seen_ids:
-                continue
-            seen_ids.add(related_id)
-            related_mem = _find_memory(related_id)
-            if related_mem:
-                linked.append(related_mem)
-
-    max_total = limit * 2
-    results = (primary + linked)[:max_total]
+    if expand_links:
+        # Expand linked memories (for memory_recall backward-compat path)
+        seen_ids = {mem.get("id", "")[:8] for mem in primary}
+        linked = []
+        for mem in primary:
+            for related_id in mem.get("related", []):
+                if related_id in seen_ids:
+                    continue
+                seen_ids.add(related_id)
+                related_mem = _find_memory(related_id)
+                if related_mem:
+                    linked.append(related_mem)
+        max_total = limit * 2
+        results = (primary + linked)[:max_total]
+    else:
+        results = primary[:limit]
 
     # Track access for returned memories (skip for internal/assembly calls)
     if record_access:
@@ -196,7 +207,7 @@ def _format_full_memory(mem: dict) -> str:
     mid = mem.get("id", "")[:8]
     layer = mem.get("layer", DEFAULT_LAYER)
     title = mem.get("title", "Untitled")
-    tags = mem.get("tags", [])
+    tags = mem.get("domain_tags") or mem.get("tags") or []
     related = mem.get("related", [])
     source = mem.get("source_type", "unknown")
     project = mem.get("project", "general")
@@ -247,7 +258,9 @@ def memory_search(query: str, limit: int = 10, scope_id: str = "default") -> str
     then a one-hop graph-traversed section of related memories. Use this
     FIRST to narrow candidates, then drill into specific IDs via memory_get.
     """
-    memories = _search_memories(query, scope_id=scope_id, limit=limit, record_access=False)
+    memories = _search_memories(
+        query, scope_id=scope_id, limit=limit, record_access=False, expand_links=False
+    )
     if not memories:
         return f"No memories found for: {query}"
 
@@ -324,9 +337,9 @@ def memory_timeline(
 
     anchor_id8 = anchor.get("id", "")[:8]
     anchor_project = anchor.get("project", "general")
-    anchor_created = _parse_ts(anchor.get("created", ""))
+    anchor_created = _parse_ts(anchor.get("created_at", ""))
 
-    all_mems = _obsidian_memories()
+    all_mems = _obsidian_memories(scope_id=scope_id)
 
     # Forward links
     forward_ids = {r[:8] for r in anchor.get("related", []) or []}
@@ -353,14 +366,14 @@ def memory_timeline(
     before: list[dict] = []
     after: list[dict] = []
     for mem in candidates.values():
-        created = _parse_ts(mem.get("created", ""))
+        created = _parse_ts(mem.get("created_at", ""))
         if created < anchor_created:
             before.append(mem)
         else:
             after.append(mem)
 
-    before.sort(key=lambda m: _parse_ts(m.get("created", "")))
-    after.sort(key=lambda m: _parse_ts(m.get("created", "")))
+    before.sort(key=lambda m: _parse_ts(m.get("created_at", "")))
+    after.sort(key=lambda m: _parse_ts(m.get("created_at", "")))
     before = before[-depth_before:] if depth_before > 0 else []
     after = after[:depth_after] if depth_after > 0 else []
 
@@ -369,16 +382,16 @@ def memory_timeline(
     if before:
         lines.append(f"**Before ({len(before)}):**")
         for mem in before:
-            ts = mem.get("created", "")[:10]
+            ts = mem.get("created_at", "")[:10]
             lines.append(f"- {ts}  {_format_compact_index_line(mem)}")
         lines.append("")
     lines.append("**Anchor:**")
-    lines.append(f"- {anchor.get('created', '')[:10]}  {_format_compact_index_line(anchor)}")
+    lines.append(f"- {anchor.get('created_at', '')[:10]}  {_format_compact_index_line(anchor)}")
     lines.append("")
     if after:
         lines.append(f"**After ({len(after)}):**")
         for mem in after:
-            ts = mem.get("created", "")[:10]
+            ts = mem.get("created_at", "")[:10]
             lines.append(f"- {ts}  {_format_compact_index_line(mem)}")
         lines.append("")
     return "\n".join(lines)
