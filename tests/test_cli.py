@@ -1,7 +1,7 @@
-"""Tests for the cortex_server CLI dispatcher.
+"""Tests for the memem CLI dispatcher.
 
 These tests invoke `dispatch_cli` in-process with a real MCP stub, isolated
-Cortex/vault dirs, and captured stdout. No subprocess spawning.
+state/vault dirs, and captured stdout. No subprocess spawning.
 """
 
 import importlib
@@ -10,10 +10,10 @@ from types import SimpleNamespace
 
 def _dispatch(argv, capsys):
     """Reload cli each call so patched env vars propagate into its imports."""
-    from cortex_server import cli
+    from memem import cli
     importlib.reload(cli)
     mcp_stub = SimpleNamespace(run=lambda **_: None)
-    cli.dispatch_cli(["cortex-server", *argv], mcp_stub)
+    cli.dispatch_cli(["memem", *argv], mcp_stub)
     return capsys.readouterr()
 
 
@@ -34,7 +34,7 @@ def test_events_empty(tmp_cortex_dir, capsys):
 
 
 def test_events_after_log(tmp_cortex_dir, capsys):
-    from cortex_server import models, storage, telemetry
+    from memem import models, storage, telemetry
     importlib.reload(models)
     importlib.reload(telemetry)
     importlib.reload(storage)
@@ -50,7 +50,7 @@ def test_migrate_schema_no_memories(tmp_vault, capsys):
 
 
 def test_migrate_schema_upgrades_v0(tmp_vault, capsys):
-    from cortex_server import obsidian_store
+    from memem import obsidian_store
     importlib.reload(obsidian_store)
 
     # Write a v0 memory directly (no schema_version)

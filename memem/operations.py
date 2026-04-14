@@ -3,8 +3,8 @@ import os
 import re
 from pathlib import Path
 
-from cortex_server.models import _normalize_scope_id
-from cortex_server.obsidian_store import (
+from memem.models import _normalize_scope_id
+from memem.obsidian_store import (
     _is_duplicate,
     _make_memory,
     _save_memory,

@@ -1,9 +1,73 @@
 # Changelog
 
-All notable changes to Cortex will be documented in this file.
+All notable changes to memem (formerly Cortex) will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+> **Note:** the project was renamed from `cortex` to `memem` in v0.7.0.
+> Pre-v0.7.0 entries below describe what was called Cortex at the time —
+> they have been left untouched as historical record. See the v0.7.0 entry
+> for the rename details, backward-compat strategy, and migration path.
+
+## [0.7.0] - 2026-04-14
+
+### Renamed
+- **Project renamed from `cortex` to `memem`.** Same code, same architecture,
+  same behaviour — new identifier across every surface to escape the crowded
+  "cortex" namespace in the AI tooling space.
+
+### Added
+- `memem/migrate.py` and bootstrap shim hook: one-time copy of
+  `~/.cortex/` → `~/.memem/` and `~/obsidian-brain/cortex/` →
+  `~/obsidian-brain/memem/` on first run after upgrade. Idempotent via a
+  `.migrated_from_cortex` marker file. Copies (not moves) so the legacy
+  paths stay intact as a safety net.
+- Backward-compatible env var fallback: every `MEMEM_*` env var falls back
+  to the corresponding `CORTEX_*` if unset. Existing shell profiles keep
+  working with no changes.
+- `tests/test_bootstrap.py::test_bootstrap_legacy_cortex_env_fallback`
+  regression guard for the env var fallback.
+
+### Changed
+- Package directory: `cortex_server/` → `memem/`
+- All intra-package imports: `from cortex_server.X import Y` →
+  `from memem.X import Y` (124 occurrences across 19 source files)
+- FastMCP server name: `FastMCP("cortex")` → `FastMCP("memem")`
+- All log channel names: `cortex-storage`, `cortex-recall`, `cortex-miner`,
+  `cortex-telemetry`, `cortex-search`, `cortex-playbook`, `cortex-obsidian`,
+  `cortex-assembly`, `cortex-capabilities` → `memem-*`
+- Console-script entry point: `cortex-server` → `memem`
+- PyPI package name: `cortex-plugin` → `memem`
+- Plugin name in `plugin.json`: `cortex` → `memem`
+- MCP tool namespace seen by Claude Code: `mcp__cortex__*` → `mcp__memem__*`
+- Skill directories: `skills/cortex*/` → `skills/memem*/`
+- Slash commands: `/cortex`, `/cortex-status`, `/cortex-mine`,
+  `/cortex-mine-history`, `/cortex-doctor` → `/memem*`
+- State directory: `~/.cortex/` → `~/.memem/` (with auto-migration)
+- Vault subdirectory: `~/obsidian-brain/cortex/` → `~/obsidian-brain/memem/`
+  (with auto-migration)
+- Capabilities JSON key: `writable_cortex_dir` → `writable_state_dir`
+- Status banner: `[Cortex] N memories` → `[memem] N memories`
+- GitHub repo names: `TT-Wang/cortex-plugin` (private) and the public
+  mirror are renamed to `TT-Wang/memem`. GitHub redirects old URLs for
+  ~12 months so existing badge embeds keep working.
+- Glama listing slug coordination required (manual; see migration notes
+  in the release announcement).
+- `awesome-mcp-servers` entry follow-up PR filed to update the slug
+  (the Knowledge & Memory section entry).
+
+### Notes
+- All 55 tests still pass (54 → 55 with the new fallback regression test).
+- Ruff clean. Mypy clean.
+- Total file touch count: ~80.
+- The rename is genuinely cosmetic at the code level — no logic changed,
+  no behaviour changed, no schema migration required for memory frontmatter.
+- This is a **non-breaking** release for users who run the bootstrap shim,
+  thanks to the env-var fallback and the auto-migration. It IS breaking for
+  users who hardcoded `import cortex_server` or the `cortex-server` console
+  script in their own scripts — they should either pin to v0.6.0 or update
+  their imports to `import memem`.
 
 ## [0.6.0] - 2026-04-14
 
@@ -225,7 +289,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keyword search with containment scoring
 - CLAUDE.md integration for LLM instructions
 
-[0.6.0]: https://github.com/TT-Wang/cortex-plugin/releases/tag/v0.6.0
+[0.7.0]: https://github.com/TT-Wang/memem/releases/tag/v0.7.0
+[0.6.0]: https://github.com/TT-Wang/memem/releases/tag/v0.6.0
 [0.5.0]: https://github.com/TT-Wang/cortex-plugin/releases/tag/v0.5.0
 [0.4.1]: https://github.com/TT-Wang/cortex-plugin/releases/tag/v0.4.1
 [0.4.0]: https://github.com/TT-Wang/cortex-plugin/releases/tag/v0.4.0

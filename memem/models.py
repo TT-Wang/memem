@@ -1,24 +1,65 @@
-"""Core data types, constants, and path definitions for Cortex."""
+"""Core data types, constants, and path definitions for memem."""
 
 import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypedDict
 
+
+def _env(*names: str, default: str = "") -> str:
+    """Return the first env var that is set among `names`, else `default`.
+
+    Used to provide backward-compatible fallbacks for the v0.6.x → v0.7.x
+    rename: callers can read MEMEM_DIR or fall back to CORTEX_DIR if a
+    legacy shell profile still exports the old name.
+    """
+    for name in names:
+        v = os.environ.get(name)
+        if v:
+            return v
+    return default
+
+
 # ============================================================================
 # Path constants
 # ============================================================================
 
-CORTEX_DIR = Path(os.environ.get("CORTEX_DIR", os.path.expanduser("~/.cortex")))
-SERVER_PID_FILE = CORTEX_DIR / "mcp-server.pid"
-TELEMETRY_FILE = CORTEX_DIR / "telemetry.json"
-EVENT_LOG = CORTEX_DIR / "events.jsonl"
-SEARCH_DB = CORTEX_DIR / "search.db"
+# State dir: prefer the new ~/.memem/, fall back to existing ~/.cortex/ if
+# present (so dogfooding users with real data don't lose access on upgrade).
+_state_env = _env("MEMEM_DIR", "CORTEX_DIR")
+if _state_env:
+    MEMEM_DIR = Path(_state_env)
+else:
+    _new_default = Path.home() / ".memem"
+    _legacy_default = Path.home() / ".cortex"
+    # If only the legacy dir exists and the new one doesn't, use legacy until
+    # migration runs. The bootstrap shim's first-run migration will move data.
+    MEMEM_DIR = _legacy_default if (_legacy_default.exists() and not _new_default.exists()) else _new_default
 
-OBSIDIAN_VAULT = Path(os.environ.get("CORTEX_OBSIDIAN_VAULT", str(Path.home() / "obsidian-brain")))
-OBSIDIAN_MEMORIES_DIR = OBSIDIAN_VAULT / "cortex" / "memories"
-INDEX_PATH = OBSIDIAN_VAULT / "cortex" / "_index.md"
-PLAYBOOK_DIR = OBSIDIAN_VAULT / "cortex" / "playbooks"
+# Backward-compat alias kept for any external code reading the old name.
+CORTEX_DIR = MEMEM_DIR
+
+SERVER_PID_FILE = MEMEM_DIR / "mcp-server.pid"
+TELEMETRY_FILE = MEMEM_DIR / "telemetry.json"
+EVENT_LOG = MEMEM_DIR / "events.jsonl"
+SEARCH_DB = MEMEM_DIR / "search.db"
+
+# Vault root: same fallback pattern.
+OBSIDIAN_VAULT = Path(
+    _env("MEMEM_OBSIDIAN_VAULT", "CORTEX_OBSIDIAN_VAULT", "MEMEM_VAULT", "CORTEX_VAULT",
+         default=str(Path.home() / "obsidian-brain"))
+)
+
+# Per-project subdir within the vault. Same fallback for the dogfooding case:
+# if `~/obsidian-brain/cortex/` exists and `~/obsidian-brain/memem/` doesn't,
+# read from the legacy path until migration runs.
+_new_subdir = OBSIDIAN_VAULT / "memem"
+_legacy_subdir = OBSIDIAN_VAULT / "cortex"
+_VAULT_SUBDIR = _legacy_subdir if (_legacy_subdir.exists() and not _new_subdir.exists()) else _new_subdir
+
+OBSIDIAN_MEMORIES_DIR = _VAULT_SUBDIR / "memories"
+INDEX_PATH = _VAULT_SUBDIR / "_index.md"
+PLAYBOOK_DIR = _VAULT_SUBDIR / "playbooks"
 PLAYBOOK_STAGING_DIR = PLAYBOOK_DIR / ".staging"
 
 

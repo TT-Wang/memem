@@ -9,12 +9,13 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 export PYTHONPATH="$PLUGIN_ROOT${PYTHONPATH:+:$PYTHONPATH}"
-DAEMON_CMD="python3 -m cortex_server.miner_daemon"
-CORTEX_DIR="${CORTEX_DIR:-$HOME/.cortex}"
-WRAPPER_PID_FILE="$CORTEX_DIR/miner-wrapper.pid"
-LOG_FILE="$CORTEX_DIR/miner.log"
+DAEMON_CMD="python3 -m memem.miner_daemon"
+# Prefer MEMEM_DIR, fall back to legacy CORTEX_DIR if a user's shell still exports it.
+MEMEM_DIR="${MEMEM_DIR:-${CORTEX_DIR:-$HOME/.memem}}"
+WRAPPER_PID_FILE="$MEMEM_DIR/miner-wrapper.pid"
+LOG_FILE="$MEMEM_DIR/miner.log"
 
-mkdir -p "$CORTEX_DIR"
+mkdir -p "$MEMEM_DIR"
 
 start_wrapper() {
     # Check if wrapper already running

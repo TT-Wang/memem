@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Cortex auto-recall hook — injects memory index into context.
+# memem auto-recall hook — injects memory index into context.
 # Fires on UserPromptSubmit. Only runs once per session (first message).
 #
-# Flow: inject _index.md → Opus reads it → calls memory tools if needed
+# Flow: inject _index.md → assistant reads it → calls memory tools if needed
 
 set -euo pipefail
 
-CORTEX_DIR="$HOME/.cortex"
-SESSION_MARKER_DIR="$CORTEX_DIR/.sessions"
+MEMEM_DIR="${MEMEM_DIR:-${CORTEX_DIR:-$HOME/.memem}}"
+SESSION_MARKER_DIR="$MEMEM_DIR/.sessions"
 mkdir -p "$SESSION_MARKER_DIR"
 
 # Read hook input from stdin
@@ -25,22 +25,35 @@ fi
 # Clean up old session markers (older than 7 days)
 find "$SESSION_MARKER_DIR" -type f -mtime +7 -delete 2>/dev/null || true
 
-# Inject the memory index directly — let Opus decide what to read deeper
-VAULT="${CORTEX_OBSIDIAN_VAULT:-$HOME/obsidian-brain}"
-INDEX="$VAULT/cortex/_index.md"
-if [ -f "$INDEX" ]; then
+# Inject the memory index directly — let the assistant decide what to read deeper
+VAULT="${MEMEM_OBSIDIAN_VAULT:-${CORTEX_OBSIDIAN_VAULT:-$HOME/obsidian-brain}}"
+# Prefer new layout (~/obsidian-brain/memem/) but fall back to legacy (~/.../cortex/)
+if [ -f "$VAULT/memem/_index.md" ]; then
+  INDEX="$VAULT/memem/_index.md"
+  VAULT_SUBDIR="memem"
+elif [ -f "$VAULT/cortex/_index.md" ]; then
+  INDEX="$VAULT/cortex/_index.md"
+  VAULT_SUBDIR="cortex"
+else
+  INDEX="$VAULT/memem/_index.md"
+  VAULT_SUBDIR="memem"
+fi
+
+if [ -f "$INDEX" ] || [ -d "$VAULT/$VAULT_SUBDIR/memories" ]; then
   # Write INPUT to temp file to avoid argv size limits on large prompts
   INPUT_FILE=$(mktemp)
   trap 'rm -f "$INPUT_FILE"' EXIT
   echo "$INPUT" > "$INPUT_FILE"
 
-  python3 - "$INDEX" "$VAULT" "$INPUT_FILE" << 'HOOKPY'
+  python3 - "$INDEX" "$VAULT" "$INPUT_FILE" "$VAULT_SUBDIR" "$MEMEM_DIR" << 'HOOKPY'
 import sys, json, subprocess, os
 from pathlib import Path
 
 index_path = sys.argv[1]
 vault = sys.argv[2]
 input_file = sys.argv[3] if len(sys.argv) > 3 else ""
+vault_subdir = sys.argv[4] if len(sys.argv) > 4 else "memem"
+memem_dir = sys.argv[5] if len(sys.argv) > 5 else os.path.expanduser("~/.memem")
 
 # Read hook input from temp file
 input_data = ""
@@ -50,12 +63,12 @@ if input_file:
     except OSError:
         pass
 
-# Resolve plugin root for PYTHONPATH (package runs via `python -m cortex_server.server`)
+# Resolve plugin root for PYTHONPATH (package runs via `python -m memem.server`)
 plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
 if not plugin_root:
     # No sensible fallback — without plugin root we cannot locate the package.
     # Surface it on stderr instead of silently guessing the wrong directory.
-    print("cortex auto-recall: CLAUDE_PLUGIN_ROOT not set, skipping assembly", file=sys.stderr)
+    print("memem auto-recall: CLAUDE_PLUGIN_ROOT not set, skipping assembly", file=sys.stderr)
     plugin_root = None
 
 # Extract user message from hook input
@@ -67,7 +80,7 @@ except (json.JSONDecodeError, TypeError):
     pass
 
 # Check if memories exist before calling expensive assembly
-memories_dir = Path(vault) / "cortex" / "memories"
+memories_dir = Path(vault) / vault_subdir / "memories"
 memory_count = len(list(memories_dir.glob("*.md"))) if memories_dir.exists() else 0
 
 # Try context assembly if we have a message AND memories exist AND we know where the package lives
@@ -77,25 +90,29 @@ if message and memory_count > 0 and plugin_root:
         sub_env = os.environ.copy()
         sub_env["PYTHONPATH"] = plugin_root + os.pathsep + sub_env.get("PYTHONPATH", "")
         result = subprocess.run(
-            [sys.executable, "-m", "cortex_server.server", "--assemble-context", message, "default"],
+            [sys.executable, "-m", "memem.server", "--assemble-context", message, "default"],
             capture_output=True, text=True, timeout=30, env=sub_env,
         )
         if result.returncode == 0 and result.stdout.strip():
             assembled = result.stdout.strip()
         elif result.returncode != 0:
-            print(f"cortex auto-recall: assemble-context failed (rc={result.returncode}): {result.stderr.strip()[:200]}", file=sys.stderr)
+            print(f"memem auto-recall: assemble-context failed (rc={result.returncode}): {result.stderr.strip()[:200]}", file=sys.stderr)
     except Exception as exc:
-        print(f"cortex auto-recall: assemble-context errored: {exc}", file=sys.stderr)
+        print(f"memem auto-recall: assemble-context errored: {exc}", file=sys.stderr)
 
-# Build a one-line status banner from ~/.cortex/.capabilities (written by
+# Build a one-line status banner from <state>/.capabilities (written by
 # bootstrap.sh and the --doctor command). Silent no-op if the file is missing
-# or the schema is older than we expect.
+# or the schema is older than we expect. Reads the new path first, then legacy.
 def _build_status_banner(memories_dir_path):
     try:
         import json as _json
-        caps_path = Path.home() / ".cortex" / ".capabilities"
+        caps_path = Path(memem_dir) / ".capabilities"
         if not caps_path.exists():
-            return None
+            legacy = Path.home() / ".cortex" / ".capabilities"
+            if legacy.exists():
+                caps_path = legacy
+            else:
+                return None
         caps = _json.loads(caps_path.read_text())
         if not isinstance(caps, dict) or caps.get("schema_version", 0) < 1:
             return None
@@ -105,18 +122,19 @@ def _build_status_banner(memories_dir_path):
 
         # Check miner state via pidfile (avoid shelling out)
         miner_ok = False
-        miner_pid = Path.home() / ".cortex" / "miner.pid"
-        if miner_pid.exists():
-            try:
-                pid = int(miner_pid.read_text().strip())
-                os.kill(pid, 0)
-                miner_ok = True
-            except (OSError, ValueError):
-                miner_ok = False
+        for pid_path in (Path(memem_dir) / "miner.pid", Path.home() / ".cortex" / "miner.pid"):
+            if pid_path.exists():
+                try:
+                    pid = int(pid_path.read_text().strip())
+                    os.kill(pid, 0)
+                    miner_ok = True
+                    break
+                except (OSError, ValueError):
+                    continue
 
         miner_glyph = "OK" if miner_ok else "DOWN"
         assembly_glyph = "OK" if caps.get("claude_cli") else "degraded"
-        parts = [f"[Cortex] {count} memories", f"miner {miner_glyph}", f"assembly {assembly_glyph}"]
+        parts = [f"[memem] {count} memories", f"miner {miner_glyph}", f"assembly {assembly_glyph}"]
         if not caps.get("claude_cli", True):
             parts.append("(claude CLI missing — FTS-only recall)")
         if not caps.get("writable_vault", True):
@@ -129,19 +147,17 @@ def _build_status_banner(memories_dir_path):
 if assembled:
     # Assembly succeeded — inject the tailored brief
     suffix = (
-        "Above is a query-tailored context briefing assembled by Cortex. "
-        "For deeper recall, use Cortex MCP tools (memory_recall, memory_list, "
+        "Above is a query-tailored context briefing assembled by memem. "
+        "For deeper recall, use the memem MCP tools (memory_recall, memory_list, "
         "context_assemble). When saving memories, ALWAYS dual-write: save to "
-        "Cortex (via memory_save) AND to Claude Code's built-in auto memory system."
+        "memem (via memory_save) AND to Claude Code's built-in auto memory system."
     )
     banner = _build_status_banner(memories_dir)
     banner_prefix = (banner + "\n\n") if banner else ""
-    output = banner_prefix + "Cortex context briefing:\n\n" + assembled + "\n\n---\n" + suffix
+    output = banner_prefix + "memem context briefing:\n\n" + assembled + "\n\n---\n" + suffix
 else:
     # Fallback — check if memories exist at all
     index = Path(index_path).read_text() if Path(index_path).exists() else ""
-    memories_dir = Path(vault) / "cortex" / "memories"
-    memory_count = len(list(memories_dir.glob("*.md"))) if memories_dir.exists() else 0
 
     if memory_count == 0:
         # Count existing session logs for the mine-existing option
@@ -156,24 +172,24 @@ else:
         if existing_sessions > 0:
             mine_option = (
                 f"\n**You have {existing_sessions} past Claude Code sessions.**\n"
-                "Cortex can mine your existing history for knowledge — decisions, "
+                "memem can mine your existing history for knowledge — decisions, "
                 "preferences, lessons, and conventions from past conversations.\n\n"
-                "- **To mine your history:** type `/cortex-mine-history`\n"
-                "- **To skip:** do nothing — Cortex will automatically mine all new sessions going forward\n\n"
+                "- **To mine your history:** type `/memem-mine-history`\n"
+                "- **To skip:** do nothing — memem will automatically mine all new sessions going forward\n\n"
                 "History mining runs in the background and may take a few hours for large histories.\n"
             )
 
         output = (
             "```\n"
-            "  ██████╗ ██████╗ ██████╗ ████████╗███████╗██╗  ██╗\n"
-            " ██╔════╝██╔═══██╗██╔══██╗╚══██╔══╝██╔════╝╚██╗██╔╝\n"
-            " ██║     ██║   ██║██████╔╝   ██║   █████╗   ╚███╔╝ \n"
-            " ██║     ██║   ██║██╔══██╗   ██║   ██╔══╝   ██╔██╗ \n"
-            " ╚██████╗╚██████╔╝██║  ██║   ██║   ███████╗██╔╝ ██╗\n"
-            "  ╚═════╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ╚══════╝╚═╝  ╚═╝\n"
-            "  persistent memory for AI\n"
+            "  ███╗   ███╗███████╗███╗   ███╗███████╗███╗   ███╗\n"
+            "  ████╗ ████║██╔════╝████╗ ████║██╔════╝████╗ ████║\n"
+            "  ██╔████╔██║█████╗  ██╔████╔██║█████╗  ██╔████╔██║\n"
+            "  ██║╚██╔╝██║██╔══╝  ██║╚██╔╝██║██╔══╝  ██║╚██╔╝██║\n"
+            "  ██║ ╚═╝ ██║███████╗██║ ╚═╝ ██║███████╗██║ ╚═╝ ██║\n"
+            "  ╚═╝     ╚═╝╚══════╝╚═╝     ╚═╝╚══════╝╚═╝     ╚═╝\n"
+            "  persistent memory for Claude Code\n"
             "```\n\n"
-            "Welcome to Cortex! This is your first session with persistent memory enabled.\n\n"
+            "Welcome to memem! This is your first session with persistent memory enabled.\n\n"
             "**How it works:**\n"
             "- Every session you have builds your memory. Decisions, preferences, lessons, "
             "and conventions are automatically extracted and stored.\n"
@@ -181,7 +197,7 @@ else:
             "- The more you work, the smarter it gets.\n\n"
             + mine_option +
             "\n**Getting started:**\n"
-            "1. Just work normally — Cortex runs in the background\n"
+            "1. Just work normally — memem runs in the background\n"
             "2. To save something important now: use `memory_save`\n"
             "3. To search past knowledge: use `memory_recall`\n"
             "4. To get a tailored briefing: use `context_assemble`\n\n"
@@ -192,35 +208,37 @@ else:
             "**Browse your memories with Obsidian (optional):**\n"
             "- Download Obsidian: https://obsidian.md (free)\n"
             "- Open `~/obsidian-brain` as a vault\n"
-            "- Memories appear in `cortex/memories/`, playbooks in `cortex/playbooks/`\n"
+            "- Memories appear in `memem/memories/`, playbooks in `memem/playbooks/`\n"
             "- Use Graph View to see how memories link to each other\n\n"
             "Available tools: `memory_save`, `memory_recall`, `memory_list`, "
             "`memory_import`, `transcript_search`, `context_assemble`"
         )
     else:
         # Has memories but assembly failed — dump index + playbook
-        playbook_dir = Path(vault) / "cortex" / "playbooks"
+        playbook_dir = Path(vault) / vault_subdir / "playbooks"
         playbook_text = ""
         if playbook_dir.exists():
             for pb_file in sorted(playbook_dir.glob("*.md")):
                 content = pb_file.read_text().strip()
                 if content:
                     lines = content.split("\n")
-                    if lines and (lines[-1].strip().startswith("<!-- cortex-hash:") or lines[-1].strip().startswith("<!-- refined:")):
+                    if lines and (lines[-1].strip().startswith("<!-- cortex-hash:")
+                                  or lines[-1].strip().startswith("<!-- memem-hash:")
+                                  or lines[-1].strip().startswith("<!-- refined:")):
                         content = "\n".join(lines[:-1]).strip()
                     project_name = pb_file.stem
                     playbook_text += f"\n## Project Playbook: {project_name}\n\n{content}\n\n"
 
         suffix = (
-            "Above is your memory index. Use Cortex MCP tools (memory_recall, "
+            "Above is your memory index. Use the memem MCP tools (memory_recall, "
             "memory_list, context_assemble) for deeper recall. "
             "Save lessons with memory_save as you work."
         )
 
         parts = []
         if playbook_text:
-            parts.append("Cortex project playbooks (curated knowledge):\n" + playbook_text + "---\n")
-        parts.append("Cortex memory index (" + str(memory_count) + " memories):\n\n" + index + "\n\n---\n" + suffix)
+            parts.append("memem project playbooks (curated knowledge):\n" + playbook_text + "---\n")
+        parts.append("memem memory index (" + str(memory_count) + " memories):\n\n" + index + "\n\n---\n" + suffix)
         output = "\n".join(parts)
 
 print(json.dumps({

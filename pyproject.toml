@@ -3,16 +3,16 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "cortex-plugin"
-version = "0.6.0"
-description = "Persistent memory and context assembly for Claude Code"
+name = "memem"
+version = "0.7.0"
+description = "Persistent, self-evolving memory for Claude Code — local-first, browsable Obsidian vault."
 readme = "README.md"
 license = {text = "MIT"}
 authors = [
     {name = "TT-Wang"}
 ]
 requires-python = ">=3.11"
-keywords = ["memory", "context", "knowledge", "claude-code", "obsidian"]
+keywords = ["memory", "context", "knowledge", "claude-code", "obsidian", "mcp", "persistent-memory"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -26,7 +26,7 @@ dependencies = [
 ]
 
 [project.scripts]
-cortex-server = "cortex_server.server:main"
+memem = "memem.server:main"
 
 [project.optional-dependencies]
 dev = [
@@ -38,13 +38,13 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/TT-Wang/cortex-plugin"
-Repository = "https://github.com/TT-Wang/cortex-plugin"
-Issues = "https://github.com/TT-Wang/cortex-plugin/issues"
-Changelog = "https://github.com/TT-Wang/cortex-plugin/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/TT-Wang/memem"
+Repository = "https://github.com/TT-Wang/memem"
+Issues = "https://github.com/TT-Wang/memem/issues"
+Changelog = "https://github.com/TT-Wang/memem/blob/master/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
-packages = ["cortex_server"]
+packages = ["memem"]
 
 [tool.ruff]
 line-length = 120
@@ -64,7 +64,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"cortex_server/__init__.py" = ["F401"]
+"memem/__init__.py" = ["F401"]
 
 [tool.mypy]
 python_version = "3.11"

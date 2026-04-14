@@ -3,10 +3,11 @@
 These tests shell out to a real child Python process to verify that the
 package is invocable the same way the plugin + miner wrapper invoke it
 in production. Catches regressions in plugin.json entry points,
-PYTHONPATH wiring, and the `python -m cortex_server.server` runner that
+PYTHONPATH wiring, and the `python -m memem.server` runner that
 in-process unit tests cannot see.
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -23,7 +24,7 @@ def _run_module(args, env_extra=None, timeout=30):
     if env_extra:
         env.update(env_extra)
     return subprocess.run(
-        [sys.executable, "-m", "cortex_server.server", *args],
+        [sys.executable, "-m", "memem.server", *args],
         capture_output=True,
         text=True,
         timeout=timeout,
@@ -33,37 +34,36 @@ def _run_module(args, env_extra=None, timeout=30):
 
 
 def test_module_invocation_unknown_command_exits_nonzero():
-    """`python -m cortex_server.server --bogus` must surface as nonzero exit."""
+    """`python -m memem.server --bogus` must surface as nonzero exit."""
     result = _run_module(["--bogus-flag"])
     assert result.returncode != 0
     assert "Unknown command" in (result.stderr + result.stdout)
 
 
 def test_module_invocation_status_runs(tmp_path):
-    """`python -m cortex_server.server --status` must execute against an isolated vault."""
+    """`python -m memem.server --status` must execute against an isolated vault."""
     env_extra = {
-        "CORTEX_DIR": str(tmp_path / ".cortex"),
-        "CORTEX_OBSIDIAN_VAULT": str(tmp_path / "obsidian-brain"),
+        "MEMEM_DIR": str(tmp_path / ".memem"),
+        "MEMEM_OBSIDIAN_VAULT": str(tmp_path / "obsidian-brain"),
     }
-    (tmp_path / "obsidian-brain" / "cortex" / "memories").mkdir(parents=True)
-    (tmp_path / "obsidian-brain" / "cortex" / "playbooks").mkdir(parents=True)
+    (tmp_path / "obsidian-brain" / "memem" / "memories").mkdir(parents=True)
+    (tmp_path / "obsidian-brain" / "memem" / "playbooks").mkdir(parents=True)
     result = _run_module(["--status"], env_extra=env_extra)
     assert result.returncode == 0, f"stderr: {result.stderr}"
-    assert "Cortex Status" in result.stdout
     assert "0 active" in result.stdout
 
 
 def test_module_invocation_rebuild_index(tmp_path):
     """`--rebuild-index` must write an index file in the isolated vault."""
     env_extra = {
-        "CORTEX_DIR": str(tmp_path / ".cortex"),
-        "CORTEX_OBSIDIAN_VAULT": str(tmp_path / "obsidian-brain"),
+        "MEMEM_DIR": str(tmp_path / ".memem"),
+        "MEMEM_OBSIDIAN_VAULT": str(tmp_path / "obsidian-brain"),
     }
-    (tmp_path / "obsidian-brain" / "cortex" / "memories").mkdir(parents=True)
-    (tmp_path / "obsidian-brain" / "cortex" / "playbooks").mkdir(parents=True)
+    (tmp_path / "obsidian-brain" / "memem" / "memories").mkdir(parents=True)
+    (tmp_path / "obsidian-brain" / "memem" / "playbooks").mkdir(parents=True)
     result = _run_module(["--rebuild-index"], env_extra=env_extra)
     assert result.returncode == 0, f"stderr: {result.stderr}"
-    assert (tmp_path / "obsidian-brain" / "cortex" / "_index.md").exists()
+    assert (tmp_path / "obsidian-brain" / "memem" / "_index.md").exists()
 
 
 @pytest.mark.skipif(
@@ -71,9 +71,9 @@ def test_module_invocation_rebuild_index(tmp_path):
     reason="console-script test requires editable install; skipped when no venv",
 )
 def test_console_script_entry_exists_in_pyproject():
-    """Regression guard: pyproject.toml must declare the cortex-server entry point."""
+    """Regression guard: pyproject.toml must declare the memem entry point."""
     content = (REPO_ROOT / "pyproject.toml").read_text()
-    assert 'cortex-server = "cortex_server.server:main"' in content
+    assert 'memem = "memem.server:main"' in content
 
 
 def test_plugin_json_points_at_bootstrap_shim():
@@ -81,36 +81,35 @@ def test_plugin_json_points_at_bootstrap_shim():
 
     The shim is what makes first-run self-healing possible via uv sync.
     """
-    import json
     plugin_json = json.loads((REPO_ROOT / ".claude-plugin" / "plugin.json").read_text())
-    mcp = plugin_json["mcpServers"]["cortex"]
+    mcp = plugin_json["mcpServers"]["memem"]
     assert mcp["command"] == "bash"
     assert any("bootstrap.sh" in a for a in mcp["args"]), f"expected bootstrap.sh in args, got {mcp['args']}"
     assert (REPO_ROOT / "bootstrap.sh").exists(), "bootstrap.sh referenced in plugin.json but missing"
 
 
 def test_hook_references_new_package_path():
-    """Regression guard: auto-recall.sh must not contain the old cortex-mcp-server path."""
+    """Regression guard: auto-recall.sh must reference memem and not the legacy cortex_server path."""
     hook = (REPO_ROOT / "hooks" / "auto-recall.sh").read_text()
-    assert "cortex-mcp-server" not in hook
-    assert "cortex_server" in hook
+    assert "cortex_server" not in hook
+    assert "memem.server" in hook
 
 
 def test_miner_wrapper_uses_module_form():
     """Regression guard: miner-wrapper.sh must invoke daemon via `python3 -m`."""
-    wrapper = (REPO_ROOT / "cortex_server" / "miner-wrapper.sh").read_text()
-    assert "python3 -m cortex_server.miner_daemon" in wrapper
+    wrapper = (REPO_ROOT / "memem" / "miner-wrapper.sh").read_text()
+    assert "python3 -m memem.miner_daemon" in wrapper
     assert "PYTHONPATH" in wrapper
 
 
 def test_miner_wrapper_status_runtime(tmp_path):
     """Actually execute miner-wrapper.sh status — catches PYTHONPATH / import regressions."""
     env = os.environ.copy()
-    env["CORTEX_DIR"] = str(tmp_path / ".cortex")
-    env["CORTEX_OBSIDIAN_VAULT"] = str(tmp_path / "obsidian-brain")
-    (tmp_path / ".cortex").mkdir()
+    env["MEMEM_DIR"] = str(tmp_path / ".memem")
+    env["MEMEM_OBSIDIAN_VAULT"] = str(tmp_path / "obsidian-brain")
+    (tmp_path / ".memem").mkdir()
     result = subprocess.run(
-        ["bash", str(REPO_ROOT / "cortex_server" / "miner-wrapper.sh"), "status"],
+        ["bash", str(REPO_ROOT / "memem" / "miner-wrapper.sh"), "status"],
         capture_output=True, text=True, timeout=15, env=env,
     )
     # Wrapper should not crash — either reports "not running" or "running", but exits 0
@@ -125,33 +124,35 @@ def test_mine_cron_script_runs(tmp_path):
     """Actually execute mine-cron.sh — catches the PYTHONPATH bug that broke the cron path."""
     env = os.environ.copy()
     env["HOME"] = str(tmp_path)  # redirect log directory into the tmpdir
-    env["CORTEX_DIR"] = str(tmp_path / ".cortex")
-    env["CORTEX_OBSIDIAN_VAULT"] = str(tmp_path / "obsidian-brain")
-    (tmp_path / "obsidian-brain" / "cortex" / "memories").mkdir(parents=True)
-    (tmp_path / "obsidian-brain" / "cortex" / "playbooks").mkdir(parents=True)
+    env["MEMEM_DIR"] = str(tmp_path / ".memem")
+    env["MEMEM_OBSIDIAN_VAULT"] = str(tmp_path / "obsidian-brain")
+    (tmp_path / "obsidian-brain" / "memem" / "memories").mkdir(parents=True)
+    (tmp_path / "obsidian-brain" / "memem" / "playbooks").mkdir(parents=True)
     result = subprocess.run(
-        ["bash", str(REPO_ROOT / "cortex_server" / "mine-cron.sh")],
+        ["bash", str(REPO_ROOT / "memem" / "mine-cron.sh")],
         capture_output=True, text=True, timeout=60, env=env,
     )
     # The script may exit nonzero when there are no sessions to mine, but it
     # must not blow up with ModuleNotFoundError before the miner even starts.
-    log = (tmp_path / ".cortex" / "logs" / "mine-cron.log").read_text() if (tmp_path / ".cortex" / "logs" / "mine-cron.log").exists() else ""
+    log_path = tmp_path / ".memem" / "logs" / "mine-cron.log"
+    log = log_path.read_text() if log_path.exists() else ""
     combined = result.stdout + result.stderr + log
     assert "ModuleNotFoundError" not in combined, f"cron script has broken import: {combined}"
-    assert "No module named 'cortex_server'" not in combined
+    assert "No module named 'memem'" not in combined
 
 
 def test_hook_handles_missing_plugin_root(tmp_path):
     """auto-recall.sh must not crash or guess a wrong path when CLAUDE_PLUGIN_ROOT is missing."""
     # Create a minimal memory index the hook can find
     vault = tmp_path / "obsidian-brain"
-    (vault / "cortex" / "memories").mkdir(parents=True)
-    (vault / "cortex" / "playbooks").mkdir(parents=True)
-    (vault / "cortex" / "_index.md").write_text("# Test Index\n\n- Entry\n")
+    (vault / "memem" / "memories").mkdir(parents=True)
+    (vault / "memem" / "playbooks").mkdir(parents=True)
+    (vault / "memem" / "_index.md").write_text("# Test Index\n\n- Entry\n")
 
     env = os.environ.copy()
     env.pop("CLAUDE_PLUGIN_ROOT", None)
-    env["CORTEX_OBSIDIAN_VAULT"] = str(vault)
+    env["MEMEM_OBSIDIAN_VAULT"] = str(vault)
+    env["MEMEM_DIR"] = str(tmp_path / ".memem")
     env["HOME"] = str(tmp_path)
     hook_input = '{"session_id": "test-missing-root", "message": "hello"}'
     result = subprocess.run(

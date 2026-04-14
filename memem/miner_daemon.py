@@ -20,32 +20,32 @@ import sys
 import time
 from pathlib import Path
 
-from cortex_server.miner_protocol import FATAL_EXIT_CODE, TRANSIENT_EXIT_CODE
-from cortex_server.models import CORTEX_DIR
-from cortex_server.session_state import (
+from memem.miner_protocol import FATAL_EXIT_CODE, TRANSIENT_EXIT_CODE
+from memem.models import MEMEM_DIR
+from memem.session_state import (
     MINED_SESSIONS_FILE,
     SETTLE_SECONDS,
     find_settled_sessions,
     load_mined_session_state,
 )
 
-PID_FILE = CORTEX_DIR / "miner.pid"
-LOG_FILE = CORTEX_DIR / "miner.log"
+PID_FILE = MEMEM_DIR / "miner.pid"
+LOG_FILE = MEMEM_DIR / "miner.log"
 POLL_INTERVAL = 60
 
-log = logging.getLogger("cortex-miner")
+log = logging.getLogger("memem-miner")
 
 
 def _configure_logging() -> None:
     """Attach the rotating file handler — called only when the daemon actually starts.
 
-    Deferring this out of module scope keeps ``import cortex_server.miner_daemon``
+    Deferring this out of module scope keeps ``import memem.miner_daemon``
     side-effect-free so tests and tooling can import it without creating the
     real ``~/.cortex/miner.log`` file or clobbering the host process root logger.
     """
     if any(isinstance(h, logging.handlers.RotatingFileHandler) for h in log.handlers):
         return  # Already configured
-    CORTEX_DIR.mkdir(parents=True, exist_ok=True)
+    MEMEM_DIR.mkdir(parents=True, exist_ok=True)
     handler = logging.handlers.RotatingFileHandler(
         str(LOG_FILE), maxBytes=5 * 1024 * 1024, backupCount=2,
     )
@@ -159,7 +159,7 @@ def _run_server_command(args: list[str], expect_json: bool = True):
     env = os.environ.copy()
     env["PYTHONPATH"] = plugin_root + os.pathsep + env.get("PYTHONPATH", "")
     result = subprocess.run(
-        [sys.executable, "-m", "cortex_server.server", *args],
+        [sys.executable, "-m", "memem.server", *args],
         capture_output=True,
         text=True,
         timeout=300,
@@ -236,7 +236,7 @@ def _run_loop():
 
 
 if __name__ == "__main__":
-    CORTEX_DIR.mkdir(parents=True, exist_ok=True)
+    MEMEM_DIR.mkdir(parents=True, exist_ok=True)
 
     cmd = sys.argv[1] if len(sys.argv) > 1 else "status"
 

@@ -16,14 +16,14 @@ def run_eval(sample_size: int = 10) -> dict:
     """Run memory system evaluation and return scorecard."""
     import time
 
-    from cortex_server.mining import _is_agent_session
-    from cortex_server.obsidian_store import (
+    from memem.mining import _is_agent_session
+    from memem.obsidian_store import (
         _obsidian_memories,
         _word_set,
     )
-    from cortex_server.security import scan_memory_content
-    from cortex_server.session_state import SESSIONS_DIRS
-    from cortex_server.transcripts import _extract_conversation
+    from memem.security import scan_memory_content
+    from memem.session_state import SESSIONS_DIRS
+    from memem.transcripts import _extract_conversation
 
     results: dict[str, Any] = {
         "sessions_sampled": 0,
@@ -96,7 +96,7 @@ def run_eval(sample_size: int = 10) -> dict:
     for text_a, text_b, should_match in test_pairs:
         results["dedup_tests"] += 1
         # Use the real scoring engine, not a hand-rolled formula
-        from cortex_server.obsidian_store import (
+        from memem.obsidian_store import (
             _containment,
             _ngram_set,
         )

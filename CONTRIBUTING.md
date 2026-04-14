@@ -1,12 +1,12 @@
-# Contributing to Cortex
+# Contributing to memem
 
 Thanks for your interest in contributing!
 
 ## Dev setup
 
 ```bash
-git clone https://github.com/TT-Wang/cortex-plugin.git
-cd cortex-plugin
+git clone https://github.com/TT-Wang/memem.git
+cd memem
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
@@ -18,7 +18,7 @@ pre-commit install
 ```bash
 pytest                          # run all tests
 pytest -v                       # verbose
-pytest --cov=cortex_server  # with coverage
+pytest --cov=memem  # with coverage
 pytest tests/test_security.py   # single file
 ```
 
@@ -31,7 +31,7 @@ pytest tests/test_security.py   # single file
 ```bash
 ruff check .
 ruff format .
-mypy cortex_server
+mypy memem
 ```
 
 ## PR process
@@ -58,7 +58,7 @@ Example: `feat: add schema_version field to memory frontmatter`
 
 ## Architecture notes
 
-Cortex has three layers:
+memem has three layers:
 
 1. **Storage** — Obsidian markdown (source of truth) + SQLite FTS5 (search index)
 2. **Mining** — Background daemon extracts knowledge from session JSONL files

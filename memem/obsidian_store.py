@@ -37,7 +37,7 @@ def _atomic_write(path: Path, content: str) -> None:
             pass
         raise
 
-from cortex_server.models import (
+from memem.models import (
     INDEX_PATH,
     OBSIDIAN_MEMORIES_DIR,
     OBSIDIAN_VAULT,
@@ -45,11 +45,11 @@ from cortex_server.models import (
     _normalize_scope_id,
     now_iso,
 )
-from cortex_server.search_index import _index_memory, _remove_from_index
-from cortex_server.security import scan_memory_content
-from cortex_server.telemetry import _log_event
+from memem.search_index import _index_memory, _remove_from_index
+from memem.security import scan_memory_content
+from memem.telemetry import _log_event
 
-log = logging.getLogger("cortex-obsidian")
+log = logging.getLogger("memem-obsidian")
 
 # Alias for backward compat
 _now = now_iso
@@ -541,7 +541,7 @@ def _check_contradictions(content: str, scope_id: str = "default") -> list[dict]
 
     # Find similar existing memories
     try:
-        from cortex_server.search_index import _search_fts
+        from memem.search_index import _search_fts
         fts_ids = _search_fts(content[:200], scope_id, 5)
         candidates = [m for mid in fts_ids if (m := _find_memory(mid))]
     except Exception as exc:
@@ -805,7 +805,7 @@ def _remove_index_line(memory_id: str):
 # ---------------------------------------------------------------------------
 
 def purge_mined_memories(mined_sessions_file: Path) -> dict:
-    from cortex_server.search_index import _remove_from_index
+    from memem.search_index import _remove_from_index
 
     deleted = 0
     for mem in _obsidian_memories():

@@ -1,40 +1,40 @@
-# Cortex
+# memem
 
-> Cortex is a Claude Code plugin that gives Claude persistent memory across every session. It auto-extracts decisions, conventions, and lessons from completed sessions via a background miner, stores them as markdown files in an Obsidian vault, and assembles query-tailored context briefings at the start of each new session — so you stop re-explaining your project every time.
+> memem is a Claude Code plugin that gives Claude persistent memory across every session. It auto-extracts decisions, conventions, and lessons from completed sessions via a background miner, stores them as markdown files in an Obsidian vault, and assembles query-tailored context briefings at the start of each new session — so you stop re-explaining your project every time.
 
-Quality: validated by the [Glama MCP registry](https://glama.ai/mcp/servers/TT-Wang/cortex-plugin) — ![score](https://glama.ai/mcp/servers/TT-Wang/cortex-plugin/badges/score.svg?v=2)
+Quality: validated by the [Glama MCP registry](https://glama.ai/mcp/servers/TT-Wang/memem) — ![score](https://glama.ai/mcp/servers/TT-Wang/memem/badges/score.svg?v=2)
 
-Cortex is **local-first**: no cloud services, no vendor lock-in, no API keys required. Memories live as human-readable markdown in `~/obsidian-brain/cortex/memories/`. A SQLite FTS5 index provides fast machine search. Claude Haiku (via the `claude` CLI) handles query-tailored assembly and mining, but gracefully degrades to FTS-only keyword recall when the CLI isn't available.
+memem is **local-first**: no cloud services, no vendor lock-in, no API keys required. Memories live as human-readable markdown in `~/obsidian-brain/memem/memories/`. A SQLite FTS5 index provides fast machine search. Claude Haiku (via the `claude` CLI) handles query-tailored assembly and mining, but gracefully degrades to FTS-only keyword recall when the CLI isn't available.
 
-Install is one command (`/plugin install cortex`) and the plugin self-heals its Python dependencies via a `uv`-backed bootstrap shim on first run — no separate `pip install` step.
+Install is one command (`/plugin install memem`) and the plugin self-heals its Python dependencies via a `uv`-backed bootstrap shim on first run — no separate `pip install` step.
 
-## When to use Cortex
+## When to use memem
 
 - You use Claude Code daily and keep re-explaining your project to every new session
 - You want durable, searchable, human-readable memory your AI can use across all projects
 - You already use Obsidian or like the idea of a browsable markdown knowledge graph
 - You want local-first AI memory with zero vendor lock-in
 
-## When NOT to use Cortex
+## When NOT to use memem
 
 - You already have CLAUDE.md working well and don't want background processes
-- You want cloud-synced memory across machines (Cortex is local-only)
+- You want cloud-synced memory across machines (memem is local-only)
 - You don't have Python 3.11+ available
 
 ## Docs
 
-- [README](https://github.com/TT-Wang/cortex-plugin/blob/master/README.md): install, usage, MCP tool reference
-- [CHANGELOG](https://github.com/TT-Wang/cortex-plugin/blob/master/CHANGELOG.md): version history
-- [CONTRIBUTING](https://github.com/TT-Wang/cortex-plugin/blob/master/CONTRIBUTING.md): dev setup
+- [README](https://github.com/TT-Wang/memem/blob/master/README.md): install, usage, MCP tool reference
+- [CHANGELOG](https://github.com/TT-Wang/memem/blob/master/CHANGELOG.md): version history
+- [CONTRIBUTING](https://github.com/TT-Wang/memem/blob/master/CONTRIBUTING.md): dev setup
 
 ## Install
 
 ```bash
-/plugin marketplace add TT-Wang/cortex-plugin
-/plugin install cortex
+/plugin marketplace add TT-Wang/memem
+/plugin install memem
 ```
 
-First-session MCP spawn runs `bootstrap.sh` which installs `uv`, syncs deps into a plugin-local `.venv`, verifies directory writability, probes for the `claude` CLI, and writes `~/.cortex/.capabilities`. Total first-run overhead: ~5 seconds. Warm start: ~100ms.
+First-session MCP spawn runs `bootstrap.sh` which installs `uv`, syncs deps into a plugin-local `.venv`, verifies directory writability, probes for the `claude` CLI, and writes `~/.memem/.capabilities`. Total first-run overhead: ~5 seconds. Warm start: ~100ms.
 
 ## How it differs from vanilla CLAUDE.md
 
@@ -51,7 +51,7 @@ First-session MCP spawn runs `bootstrap.sh` which installs `uv`, syncs deps into
 - **Context assembly**: on session start, a UserPromptSubmit hook sends the user's first message + relevant memories to Haiku, which synthesizes a focused briefing
 - **Playbook**: per-project curated knowledge file that grows and refines over time (inspired by the ACE paper)
 - **AUDN pipeline**: Add / Update / Deprecate / Noop — how new mined memories evolve the existing corpus
-- **Degraded mode**: when `claude` CLI is missing, Cortex falls back to FTS-only keyword recall instead of failing
+- **Degraded mode**: when `claude` CLI is missing, memem falls back to FTS-only keyword recall instead of failing
 
 ## MCP tools exposed to the LLM
 
@@ -64,11 +64,11 @@ First-session MCP spawn runs `bootstrap.sh` which installs `uv`, syncs deps into
 
 ## Slash commands
 
-- `/cortex`: welcome + status + help
-- `/cortex-status`: memory count, projects, miner health
-- `/cortex-doctor`: preflight health check with fix instructions
-- `/cortex-mine`: start the miner daemon
-- `/cortex-mine-history`: opt-in to mine pre-install sessions
+- `/memem`: welcome + status + help
+- `/memem-status`: memory count, projects, miner health
+- `/memem-doctor`: preflight health check with fix instructions
+- `/memem-mine`: start the miner daemon
+- `/memem-mine-history`: opt-in to mine pre-install sessions
 
 ## Requirements
 

@@ -1,8 +1,8 @@
-# Cortex
+# memem
 
 **Persistent, self-evolving memory for Claude Code.** Stop re-explaining your project every session.
 
-[![CI](https://github.com/TT-Wang/cortex-plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/TT-Wang/cortex-plugin/actions/workflows/ci.yml) [![cortex-plugin MCP server](https://glama.ai/mcp/servers/TT-Wang/cortex-plugin/badges/score.svg?v=2)](https://glama.ai/mcp/servers/TT-Wang/cortex-plugin) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![CI](https://github.com/TT-Wang/memem/actions/workflows/ci.yml/badge.svg)](https://github.com/TT-Wang/memem/actions/workflows/ci.yml) [![memem MCP server](https://glama.ai/mcp/servers/TT-Wang/memem/badges/score.svg?v=2)](https://glama.ai/mcp/servers/TT-Wang/memem) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
 > For LLM/AI tool discovery, see [llms.txt](./llms.txt).
 
@@ -15,28 +15,28 @@
   ╚═════╝ ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ╚══════╝╚═╝  ╚═╝
 ```
 
-## What is Cortex?
+## What is memem?
 
-Cortex is a Claude Code plugin that gives Claude persistent memory across sessions. A background miner extracts durable lessons (decisions, conventions, bug fixes, preferences) from your completed sessions, stores them as markdown in an Obsidian vault, and automatically surfaces relevant ones at the start of each new session via a query-tailored briefing.
+memem is a Claude Code plugin that gives Claude persistent memory across sessions. A background miner extracts durable lessons (decisions, conventions, bug fixes, preferences) from your completed sessions, stores them as markdown in an Obsidian vault, and automatically surfaces relevant ones at the start of each new session via a query-tailored briefing.
 
-It's **local-first**: no cloud services, no API keys required, no vendor lock-in. Everything lives in `~/obsidian-brain/cortex/memories/` as human-readable markdown.
+It's **local-first**: no cloud services, no API keys required, no vendor lock-in. Everything lives in `~/obsidian-brain/memem/memories/` as human-readable markdown.
 
-## When should I use Cortex?
+## When should I use memem?
 
-Use Cortex if:
+Use memem if:
 - You use Claude Code daily and keep re-explaining your project to every new session
 - You want durable memory you can browse and edit as markdown
 - You like local-first tools with zero vendor lock-in
-- You already use Obsidian (Cortex plugs straight into your vault)
+- You already use Obsidian (memem plugs straight into your vault)
 
-Skip Cortex if:
+Skip memem if:
 - `CLAUDE.md` works fine for you and you don't want a background daemon
-- You need cloud-synced memory across machines (Cortex is local-only)
+- You need cloud-synced memory across machines (memem is local-only)
 - You're on Python < 3.11
 
-## How is Cortex different from CLAUDE.md?
+## How is memem different from CLAUDE.md?
 
-`CLAUDE.md` is a single hand-edited file per project. Cortex gives you:
+`CLAUDE.md` is a single hand-edited file per project. memem gives you:
 
 - **Automatic extraction** — no manual note-taking, the miner captures lessons from every completed session
 - **Query-aware context** — only the memories relevant to your current question get injected, not a static dump
@@ -45,11 +45,11 @@ Skip Cortex if:
 - **Security scanning** — every write is scanned for prompt injection and credential exfiltration
 - **Browsable** — Obsidian vault with graph view and backlinks for free
 
-## How do I install Cortex?
+## How do I install memem?
 
 ```bash
-/plugin marketplace add TT-Wang/cortex-plugin
-/plugin install cortex
+/plugin marketplace add TT-Wang/memem
+/plugin install memem
 ```
 
 That's it. On first run, `bootstrap.sh` self-heals everything:
@@ -57,21 +57,21 @@ That's it. On first run, `bootstrap.sh` self-heals everything:
 1. Verifies Python ≥ 3.11
 2. Installs `uv` if missing (via the official Astral installer)
 3. Syncs deps into a plugin-local `.venv` (hash-cached against `uv.lock`)
-4. Creates and canary-tests `~/.cortex/` and `~/obsidian-brain/`
-5. Writes `~/.cortex/.capabilities` (used for degraded-mode decisions)
+4. Creates and canary-tests `~/.memem/` and `~/obsidian-brain/`
+5. Writes `~/.memem/.capabilities` (used for degraded-mode decisions)
 6. Execs the real MCP server
 
 **First run:** ~5 seconds. **Every run after:** ~100ms. No separate `pip install` step.
 
 ## What happens on my first Claude Code session?
 
-You type your first message. The UserPromptSubmit hook fires and sees zero memories (you just installed it), so it injects a welcome banner into Claude's context. Claude reads the banner, tells you Cortex is active, and — if you have pre-existing Claude Code sessions — offers to mine them via `/cortex-mine-history`.
+You type your first message. The UserPromptSubmit hook fires and sees zero memories (you just installed it), so it injects a welcome banner into Claude's context. Claude reads the banner, tells you memem is active, and — if you have pre-existing Claude Code sessions — offers to mine them via `/memem-mine-history`.
 
 You work normally. The miner daemon runs silently in the background. When your session ends and settles for 5 minutes, the miner extracts memories from the transcript using Claude Haiku and writes them to your vault.
 
-**Session 2 onwards:** the hook sends your first message to `context_assemble`, which gives Haiku the relevant memories and asks it to synthesize a tailored briefing. You see a status banner like `[Cortex] 12 memories · miner OK · assembly OK` followed by the brief. Claude starts with full context — no re-explaining.
+**Session 2 onwards:** the hook sends your first message to `context_assemble`, which gives Haiku the relevant memories and asks it to synthesize a tailored briefing. You see a status banner like `[memem] 12 memories · miner OK · assembly OK` followed by the brief. Claude starts with full context — no re-explaining.
 
-## What does Cortex save?
+## What does memem save?
 
 It saves durable knowledge, not session logs:
 
@@ -87,19 +87,19 @@ It does NOT save:
 - Trivial or obvious facts
 - Session outcomes ("today I worked on X")
 
-## Where does Cortex store my memories?
+## Where does memem store my memories?
 
 | Store | Path | Purpose |
 |-------|------|---------|
-| Memories | `~/obsidian-brain/cortex/memories/*.md` | Source of truth (human-readable markdown) |
-| Playbooks | `~/obsidian-brain/cortex/playbooks/*.md` | Per-project curated briefings |
-| Search DB | `~/.cortex/search.db` | SQLite FTS5 index (machine-fast lookup) |
-| Telemetry | `~/.cortex/telemetry.json` | Access tracking (atomic writes) |
-| Event log | `~/.cortex/events.jsonl` | Append-only audit trail |
-| Capabilities | `~/.cortex/.capabilities` | Degraded-mode flags written by bootstrap |
-| Bootstrap log | `~/.cortex/bootstrap.log` | First-run diagnostics |
+| Memories | `~/obsidian-brain/memem/memories/*.md` | Source of truth (human-readable markdown) |
+| Playbooks | `~/obsidian-brain/memem/playbooks/*.md` | Per-project curated briefings |
+| Search DB | `~/.memem/search.db` | SQLite FTS5 index (machine-fast lookup) |
+| Telemetry | `~/.memem/telemetry.json` | Access tracking (atomic writes) |
+| Event log | `~/.memem/events.jsonl` | Append-only audit trail |
+| Capabilities | `~/.memem/.capabilities` | Degraded-mode flags written by bootstrap |
+| Bootstrap log | `~/.memem/bootstrap.log` | First-run diagnostics |
 
-You can point Cortex elsewhere via `CORTEX_DIR` and `CORTEX_OBSIDIAN_VAULT` env vars.
+You can point memem elsewhere via `MEMEM_DIR` and `MEMEM_OBSIDIAN_VAULT` env vars.
 
 ## What are the MCP tools Claude can call?
 
@@ -112,31 +112,31 @@ You can point Cortex elsewhere via `CORTEX_DIR` and `CORTEX_OBSIDIAN_VAULT` env 
 | `transcript_search(query)` | Search raw Claude Code session JSONL logs (not the mined memories). |
 | `context_assemble(query, project)` | On-demand query-tailored briefing from playbooks + memories + transcripts. |
 
-## What slash commands does Cortex add?
+## What slash commands does memem add?
 
-- `/cortex` — welcome, status, help
-- `/cortex-status` — memory count, projects, search DB size, miner health
-- `/cortex-doctor` — preflight health check with fix instructions for any blocker
-- `/cortex-mine` — start the miner daemon manually (normally auto-starts)
-- `/cortex-mine-history` — opt-in: mine all your pre-install Claude Code sessions
+- `/memem` — welcome, status, help
+- `/memem-status` — memory count, projects, search DB size, miner health
+- `/memem-doctor` — preflight health check with fix instructions for any blocker
+- `/memem-mine` — start the miner daemon manually (normally auto-starts)
+- `/memem-mine-history` — opt-in: mine all your pre-install Claude Code sessions
 
 ## What if the `claude` CLI isn't on my PATH?
 
-Cortex enters **degraded mode** — it still works, just without Haiku-powered context assembly and smart recall. You get FTS-only keyword recall instead of query-tailored briefings. Every session shows `[Cortex] N memories · miner OK · assembly degraded (claude CLI missing — FTS-only recall)` at the top of the context, so you know why.
+memem enters **degraded mode** — it still works, just without Haiku-powered context assembly and smart recall. You get FTS-only keyword recall instead of query-tailored briefings. Every session shows `[memem] N memories · miner OK · assembly degraded (claude CLI missing — FTS-only recall)` at the top of the context, so you know why.
 
 This is by design: missing optional dependencies should degrade, not fail.
 
 ## How do I diagnose problems?
 
-Run `/cortex-doctor`. It runs the same preflight the bootstrap shim runs (Python version, `mcp` importable, `claude` CLI on PATH, directory writability, `uv` available), then prints a report labelled **HEALTHY**, **DEGRADED**, or **FAILING** with explicit fix instructions for each blocker.
+Run `/memem-doctor`. It runs the same preflight the bootstrap shim runs (Python version, `mcp` importable, `claude` CLI on PATH, directory writability, `uv` available), then prints a report labelled **HEALTHY**, **DEGRADED**, or **FAILING** with explicit fix instructions for each blocker.
 
 For deeper debugging:
 
 ```bash
-tail -f ~/.cortex/bootstrap.log   # first-run shim log
-tail -f ~/.cortex/miner.log       # miner daemon log
-cat ~/.cortex/events.jsonl        # memory operation audit trail
-python3 -m cortex_server.server --status   # detailed status dump
+tail -f ~/.memem/bootstrap.log   # first-run shim log
+tail -f ~/.memem/miner.log       # miner daemon log
+cat ~/.memem/events.jsonl        # memory operation audit trail
+python3 -m memem.server --status   # detailed status dump
 ```
 
 ## How does the mining pipeline work?
@@ -149,24 +149,24 @@ Session ends → miner daemon sees the JSONL file in ~/.claude/projects/
   → Haiku returns JSON array of memory candidates
   → Each candidate runs: security scan → dedup check → contradiction detection → save
   → Index rebuilt, per-project playbooks grown and refined
-  → Session marked COMPLETE in ~/.cortex/.mined_sessions
+  → Session marked COMPLETE in ~/.memem/.mined_sessions
 ```
 
 ## How does the recall pipeline work?
 
 ```
 First message in a new session → auto-recall.sh hook fires
-  → Reads ~/.cortex/.capabilities for status banner
+  → Reads ~/.memem/.capabilities for status banner
   → If claude CLI is available → sends (message, memories) to Haiku
       → Haiku synthesizes a focused briefing (300-800 tokens usually)
-      → Brief injected into Claude's context as "Cortex context briefing"
+      → Brief injected into Claude's context as "memem context briefing"
   → If claude CLI is missing → falls back to FTS-only keyword recall
   → Either way, Claude starts its reply with relevant context already loaded
 ```
 
 ## Architecture
 
-Cortex is split into small, focused modules:
+memem is split into small, focused modules:
 
 - `models.py` — data types, path constants
 - `security.py` — prompt injection + credential exfil scanning
@@ -211,19 +211,19 @@ contradicts: [id1]            # flagged conflicts
 
 | Env var | Default | Purpose |
 |---------|---------|---------|
-| `CORTEX_DIR` | `~/.cortex` | State directory (PID files, search DB, logs) |
-| `CORTEX_OBSIDIAN_VAULT` | `~/obsidian-brain` | Vault location |
-| `CORTEX_EXTRA_SESSION_DIRS` | (none) | Colon-separated extra session dirs to mine |
-| `CORTEX_MINER_SETTLE_SECONDS` | `300` | Seconds to wait before mining a completed session |
-| `CORTEX_SKIP_SYNC` | `0` | Bootstrap skips `uv sync` when set to `1` (dev only) |
+| `MEMEM_DIR` | `~/.memem` | State directory (PID files, search DB, logs) |
+| `MEMEM_OBSIDIAN_VAULT` | `~/obsidian-brain` | Vault location |
+| `MEMEM_EXTRA_SESSION_DIRS` | (none) | Colon-separated extra session dirs to mine |
+| `MEMEM_MINER_SETTLE_SECONDS` | `300` | Seconds to wait before mining a completed session |
+| `MEMEM_SKIP_SYNC` | `0` | Bootstrap skips `uv sync` when set to `1` (dev only) |
 
 ## Setup Obsidian (optional, recommended)
 
-Cortex works without Obsidian — it just writes markdown. But Obsidian gives you graph view and backlinks for free:
+memem works without Obsidian — it just writes markdown. But Obsidian gives you graph view and backlinks for free:
 
 1. Download: https://obsidian.md (free)
 2. Open `~/obsidian-brain` as a vault
-3. Memories appear in `cortex/memories/`, playbooks in `cortex/playbooks/`
+3. Memories appear in `memem/memories/`, playbooks in `memem/playbooks/`
 4. Use Graph View to see how memories link via the `related` field
 
 ## Requirements
@@ -236,12 +236,12 @@ Cortex works without Obsidian — it just writes markdown. But Obsidian gives yo
 ## Development
 
 ```bash
-git clone https://github.com/TT-Wang/cortex-plugin.git
-cd cortex-plugin
+git clone https://github.com/TT-Wang/memem.git
+cd memem
 pip install -e ".[dev]"
 pytest             # 54 tests
 ruff check .       # lint
-mypy cortex_server # type check (strict)
+mypy memem # type check (strict)
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the PR process and [CHANGELOG.md](CHANGELOG.md) for version history.

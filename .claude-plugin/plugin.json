@@ -1,16 +1,16 @@
 {
-  "name": "cortex",
-  "version": "0.6.0",
-  "description": "Intelligent cross-session memory and context assembly for Claude Code",
+  "name": "memem",
+  "version": "0.7.0",
+  "description": "Persistent, self-evolving memory for Claude Code. Local-first, no cloud, browsable Obsidian vault.",
   "author": {
     "name": "TT-Wang",
     "url": "https://github.com/TT-Wang"
   },
-  "repository": "https://github.com/TT-Wang/cortex-plugin",
+  "repository": "https://github.com/TT-Wang/memem",
   "license": "MIT",
-  "keywords": ["memory", "context", "knowledge", "recall", "learning"],
+  "keywords": ["memory", "context", "knowledge", "recall", "learning", "persistent-memory", "obsidian"],
   "mcpServers": {
-    "cortex": {
+    "memem": {
       "command": "bash",
       "args": ["${CLAUDE_PLUGIN_ROOT}/bootstrap.sh"],
       "env": {

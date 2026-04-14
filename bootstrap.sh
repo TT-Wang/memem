@@ -1,19 +1,27 @@
 #!/usr/bin/env bash
-# Cortex bootstrap shim — runs every time Claude Code spawns the MCP server.
+# memem bootstrap shim — runs every time Claude Code spawns the MCP server.
 #
 # Responsibilities (in order):
 #   1. Verify Python 3.11+
 #   2. Install `uv` if missing (via the official installer)
 #   3. Sync the plugin-local .venv against uv.lock, short-circuited by a
 #      sha256 hash of uv.lock so warm starts are fast
-#   4. Create ~/.cortex and the obsidian vault dir, canary-test writability
-#   5. Detect the `claude` CLI and write ~/.cortex/.capabilities
-#   6. Exec the real MCP server: `python -m cortex_server.server "$@"`
+#   4. One-time migration: if ~/.cortex/ exists and ~/.memem/ doesn't,
+#      copy the data over (idempotent via .migrated_from_cortex marker)
+#   5. Create ~/.memem and the obsidian vault dir, canary-test writability
+#   6. Detect the `claude` CLI and write ~/.memem/.capabilities
+#   7. Exec the real MCP server: `python -m memem.server "$@"`
 #
 # On any unrecoverable error the shim prints a clear one-line diagnostic to
 # stderr and exits with a distinct code so the host (Claude Code) can surface
 # it. Degraded mode (missing `claude` CLI) is NOT an error — it's recorded
 # in .capabilities and the server degrades gracefully.
+#
+# Backward compatibility:
+#   - `MEMEM_*` env vars take precedence; `CORTEX_*` are read as fallbacks
+#     so users with legacy shell-profile exports keep working.
+#   - State data under ~/.cortex/ is migrated to ~/.memem/ on first run
+#     (copy, not move — the legacy dir stays as a safety net).
 
 set -euo pipefail
 
@@ -23,8 +31,14 @@ VENV_DIR="$PLUGIN_ROOT/.venv"
 LOCK_HASH_FILE="$VENV_DIR/.lock-hash"
 UV_LOCK="$PLUGIN_ROOT/uv.lock"
 PYPROJECT="$PLUGIN_ROOT/pyproject.toml"
-CORTEX_DIR="${CORTEX_DIR:-$HOME/.cortex}"
-BOOTSTRAP_LOG="$CORTEX_DIR/bootstrap.log"
+
+# State dir: prefer MEMEM_DIR, then legacy CORTEX_DIR, then default to ~/.memem
+MEMEM_DIR="${MEMEM_DIR:-${CORTEX_DIR:-$HOME/.memem}}"
+LEGACY_CORTEX_DIR="$HOME/.cortex"
+BOOTSTRAP_LOG="$MEMEM_DIR/bootstrap.log"
+
+# Vault root: same fallback pattern
+MEMEM_VAULT="${MEMEM_OBSIDIAN_VAULT:-${CORTEX_OBSIDIAN_VAULT:-$HOME/obsidian-brain}}"
 
 # Exit codes
 EXIT_PYTHON=10
@@ -33,13 +47,13 @@ EXIT_SYNC=12
 EXIT_WRITE=13
 
 log() {
-    mkdir -p "$CORTEX_DIR" 2>/dev/null || true
+    mkdir -p "$MEMEM_DIR" 2>/dev/null || true
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$BOOTSTRAP_LOG" 2>/dev/null || true
 }
 
 die() {
     local code="$1"; shift
-    echo "cortex-bootstrap: $*" >&2
+    echo "memem-bootstrap: $*" >&2
     log "FATAL ($code): $*"
     exit "$code"
 }
@@ -47,7 +61,7 @@ die() {
 # ---- usage / self-test mode --------------------------------------------------
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
     cat <<EOF
-cortex-bootstrap - self-healing MCP server launcher
+memem-bootstrap - self-healing MCP server launcher
 
 Usage: bootstrap.sh [SERVER_ARGS...]
 
@@ -55,22 +69,23 @@ What it does:
   1. Ensure Python >= 3.11 is available
   2. Install uv (https://docs.astral.sh/uv/) if missing
   3. Sync deps into \$PLUGIN_ROOT/.venv (hash-cached against uv.lock)
-  4. Ensure ~/.cortex and the Obsidian vault dir exist and are writable
-  5. Write ~/.cortex/.capabilities (used for degraded-mode decisions)
-  6. Exec: python -m cortex_server.server \$@
+  4. One-time migrate ~/.cortex/ → ~/.memem/ + vault subdir (copy, idempotent)
+  5. Ensure ~/.memem and the Obsidian vault dir exist and are writable
+  6. Write ~/.memem/.capabilities (used for degraded-mode decisions)
+  7. Exec: python -m memem.server \$@
 
 Environment variables:
   CLAUDE_PLUGIN_ROOT     Root of the plugin checkout (default: script dir)
-  CORTEX_DIR             State dir (default: ~/.cortex)
-  CORTEX_OBSIDIAN_VAULT  Obsidian vault (default: ~/obsidian-brain)
-  CORTEX_SKIP_SYNC=1     Skip uv sync (useful during development)
+  MEMEM_DIR              State dir (default: ~/.memem; falls back to legacy CORTEX_DIR)
+  MEMEM_OBSIDIAN_VAULT   Obsidian vault (default: ~/obsidian-brain; falls back to CORTEX_OBSIDIAN_VAULT)
+  MEMEM_SKIP_SYNC=1      Skip uv sync (useful during development; falls back to CORTEX_SKIP_SYNC)
 
 Exit codes:
   0    success (or degraded mode)
   10   Python >= 3.11 not found
   11   uv install failed
   12   uv sync failed
-  13   ~/.cortex or vault dir is not writable
+  13   ~/.memem or vault dir is not writable
 EOF
     exit 0
 fi
@@ -85,7 +100,7 @@ PYVER="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
 PYMAJ="${PYVER%%.*}"
 PYMIN="${PYVER##*.}"
 if [ "$PYMAJ" -lt 3 ] || { [ "$PYMAJ" -eq 3 ] && [ "$PYMIN" -lt 11 ]; }; then
-    die "$EXIT_PYTHON" "Python $PYVER detected; Cortex requires >= 3.11."
+    die "$EXIT_PYTHON" "Python $PYVER detected; memem requires >= 3.11."
 fi
 log "python ok: $PYVER"
 
@@ -113,8 +128,9 @@ fi
 log "uv ok: $(uv --version 2>/dev/null || echo unknown)"
 
 # ---- 3. Venv sync (hash-cached) ---------------------------------------------
-if [ "${CORTEX_SKIP_SYNC:-0}" = "1" ]; then
-    log "CORTEX_SKIP_SYNC=1 — skipping uv sync"
+SKIP_SYNC="${MEMEM_SKIP_SYNC:-${CORTEX_SKIP_SYNC:-0}}"
+if [ "$SKIP_SYNC" = "1" ]; then
+    log "MEMEM_SKIP_SYNC=1 — skipping uv sync"
 else
     if [ -f "$UV_LOCK" ]; then
         LOCK_HASH="$(sha256sum "$UV_LOCK" 2>/dev/null | awk '{print $1}')"
@@ -143,27 +159,53 @@ else
     fi
 fi
 
-# ---- 4. Directory + writability check ---------------------------------------
-CORTEX_VAULT="${CORTEX_OBSIDIAN_VAULT:-$HOME/obsidian-brain}"
-mkdir -p "$CORTEX_DIR" "$CORTEX_VAULT/cortex/memories" "$CORTEX_VAULT/cortex/playbooks" 2>/dev/null || true
+# ---- 4. One-time data migration: ~/.cortex/ → ~/.memem/ ----------------------
+# Idempotent via marker file. Copy (not move) so the legacy dir survives as a
+# safety net. Same logic for the obsidian vault subdir.
+MIGRATION_MARKER="$MEMEM_DIR/.migrated_from_cortex"
+if [ ! -f "$MIGRATION_MARKER" ]; then
+    if [ -d "$LEGACY_CORTEX_DIR" ] && [ "$LEGACY_CORTEX_DIR" != "$MEMEM_DIR" ]; then
+        log "migration: detected legacy data at $LEGACY_CORTEX_DIR, copying to $MEMEM_DIR"
+        mkdir -p "$MEMEM_DIR"
+        # Use cp -an: archive mode, no-clobber, so re-runs are safe.
+        cp -an "$LEGACY_CORTEX_DIR/." "$MEMEM_DIR/" 2>>"$BOOTSTRAP_LOG" || \
+            log "migration warning: cp from $LEGACY_CORTEX_DIR failed (non-fatal)"
+        log "migration: state dir copy complete"
+    fi
+    LEGACY_VAULT_SUB="$MEMEM_VAULT/cortex"
+    NEW_VAULT_SUB="$MEMEM_VAULT/memem"
+    if [ -d "$LEGACY_VAULT_SUB" ] && [ ! -d "$NEW_VAULT_SUB" ]; then
+        log "migration: copying $LEGACY_VAULT_SUB → $NEW_VAULT_SUB"
+        mkdir -p "$NEW_VAULT_SUB"
+        cp -an "$LEGACY_VAULT_SUB/." "$NEW_VAULT_SUB/" 2>>"$BOOTSTRAP_LOG" || \
+            log "migration warning: vault copy failed (non-fatal — legacy path remains as fallback)"
+        log "migration: vault subdir copy complete"
+    fi
+    # Mark migration done so we never run it again (even if it was a no-op).
+    mkdir -p "$MEMEM_DIR"
+    date -u '+%Y-%m-%dT%H:%M:%SZ' > "$MIGRATION_MARKER" 2>/dev/null || true
+fi
+
+# ---- 5. Directory + writability check ---------------------------------------
+mkdir -p "$MEMEM_DIR" "$MEMEM_VAULT/memem/memories" "$MEMEM_VAULT/memem/playbooks" 2>/dev/null || true
 
 canary() {
     local dir="$1"
-    local f="$dir/.cortex-write-check"
+    local f="$dir/.memem-write-check"
     if ! ( echo ok > "$f" ) 2>/dev/null; then return 1; fi
     rm -f "$f" 2>/dev/null || true
     return 0
 }
 
-if ! canary "$CORTEX_DIR"; then
-    die "$EXIT_WRITE" "$CORTEX_DIR is not writable. Set CORTEX_DIR to a writable path."
+if ! canary "$MEMEM_DIR"; then
+    die "$EXIT_WRITE" "$MEMEM_DIR is not writable. Set MEMEM_DIR to a writable path."
 fi
-if ! canary "$CORTEX_VAULT/cortex/memories"; then
-    die "$EXIT_WRITE" "$CORTEX_VAULT/cortex/memories is not writable. Set CORTEX_OBSIDIAN_VAULT."
+if ! canary "$MEMEM_VAULT/memem/memories"; then
+    die "$EXIT_WRITE" "$MEMEM_VAULT/memem/memories is not writable. Set MEMEM_OBSIDIAN_VAULT."
 fi
-log "writability ok: cortex=$CORTEX_DIR vault=$CORTEX_VAULT"
+log "writability ok: state=$MEMEM_DIR vault=$MEMEM_VAULT"
 
-# ---- 5. Pick the Python interpreter + write capabilities --------------------
+# ---- 6. Pick the Python interpreter + write capabilities --------------------
 if [ -x "$VENV_DIR/bin/python" ]; then
     PYBIN="$VENV_DIR/bin/python"
 else
@@ -171,12 +213,16 @@ else
 fi
 
 export PYTHONPATH="$PLUGIN_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+export MEMEM_DIR MEMEM_VAULT
+# Re-export legacy names too so any subprocess that still reads them works.
+export CORTEX_DIR="${CORTEX_DIR:-$MEMEM_DIR}"
+export CORTEX_OBSIDIAN_VAULT="${CORTEX_OBSIDIAN_VAULT:-$MEMEM_VAULT}"
 
 # Write capabilities file — degraded mode if this fails, not fatal
-if ! "$PYBIN" -c "from cortex_server.capabilities import write_capabilities; write_capabilities()" >> "$BOOTSTRAP_LOG" 2>&1; then
+if ! "$PYBIN" -c "from memem.capabilities import write_capabilities; write_capabilities()" >> "$BOOTSTRAP_LOG" 2>&1; then
     log "warning: capabilities probe failed — server will run without status banner"
 fi
 
-# ---- 6. Exec the server ------------------------------------------------------
-log "exec: $PYBIN -m cortex_server.server $*"
-exec "$PYBIN" -m cortex_server.server "$@"
+# ---- 7. Exec the server ------------------------------------------------------
+log "exec: $PYBIN -m memem.server $*"
+exec "$PYBIN" -m memem.server "$@"

@@ -11,21 +11,21 @@ Paste-ready entries for each community list. Submit one PR per list.
 **Entry:**
 
 ```markdown
-- [Cortex](https://github.com/TT-Wang/cortex-plugin) — Persistent, self-evolving memory for Claude Code. A background miner extracts durable lessons from completed sessions, stores them as markdown in an Obsidian vault, and assembles query-tailored context briefings at the start of each new session. Local-first, no cloud, no API keys. Install via `/plugin install cortex`.
+- [memem](https://github.com/TT-Wang/memem) — Persistent, self-evolving memory for Claude Code. A background miner extracts durable lessons from completed sessions, stores them as markdown in an Obsidian vault, and assembles query-tailored context briefings at the start of each new session. Local-first, no cloud, no API keys. Install via `/plugin install memem`.
 ```
 
-**PR title:** `Add Cortex — persistent memory plugin for Claude Code`
+**PR title:** `Add memem — persistent memory plugin for Claude Code`
 
 **PR body:**
 ```
-This adds Cortex to the Claude Code plugin list.
+This adds memem to the Claude Code plugin list.
 
-Cortex is a memory plugin that eliminates the re-explain-your-project friction: it auto-mines completed Claude Code sessions for durable knowledge (decisions, conventions, bug fixes), stores the results as human-readable markdown in an Obsidian vault, and injects a query-tailored context brief at the start of every new session via Claude Haiku.
+memem is a memory plugin that eliminates the re-explain-your-project friction: it auto-mines completed Claude Code sessions for durable knowledge (decisions, conventions, bug fixes), stores the results as human-readable markdown in an Obsidian vault, and injects a query-tailored context brief at the start of every new session via Claude Haiku.
 
 - Local-first: no cloud services, no API keys, no vendor lock-in
 - Self-healing install: `bootstrap.sh` uses uv to sync deps into a plugin-local venv on first run — no separate pip install step
 - Graceful degraded mode: works with FTS-only recall if the claude CLI isn't available
-- `/cortex-doctor` slash command for preflight health checks with explicit fix instructions
+- `/memem-doctor` slash command for preflight health checks with explicit fix instructions
 - 54 tests, ruff clean, mypy strict
 - MIT licensed
 ```
@@ -39,16 +39,16 @@ Cortex is a memory plugin that eliminates the re-explain-your-project friction: 
 **Entry:**
 
 ```markdown
-- [Cortex](https://github.com/TT-Wang/cortex-plugin) 🐍 🏠 — Persistent memory for Claude Code. Background miner extracts lessons from sessions, stores as markdown in an Obsidian vault, assembles query-tailored context at session start. Local-first, no cloud.
+- [memem](https://github.com/TT-Wang/memem) 🐍 🏠 — Persistent memory for Claude Code. Background miner extracts lessons from sessions, stores as markdown in an Obsidian vault, assembles query-tailored context at session start. Local-first, no cloud.
 ```
 
 (Emojis follow the list's convention: 🐍 Python, 🏠 local/self-hosted.)
 
-**PR title:** `Add Cortex — persistent memory MCP server`
+**PR title:** `Add memem — persistent memory MCP server`
 
 **PR body:**
 ```
-Adds Cortex, an MCP server that provides persistent, self-evolving memory for Claude Code.
+Adds memem, an MCP server that provides persistent, self-evolving memory for Claude Code.
 
 Tools exposed:
 - memory_save(content, title, tags)
@@ -58,7 +58,7 @@ Tools exposed:
 - transcript_search(query)
 - context_assemble(query, project)
 
-Storage: local markdown in an Obsidian vault at ~/obsidian-brain/cortex/memories/, with a SQLite FTS5 index for fast search. No cloud services, no API keys required.
+Storage: local markdown in an Obsidian vault at ~/obsidian-brain/memem/memories/, with a SQLite FTS5 index for fast search. No cloud services, no API keys required.
 
 License: MIT
 Language: Python 3.11+
@@ -66,7 +66,7 @@ Language: Python 3.11+
 
 ---
 
-## Claude Code Plugin Marketplace (TT-Wang/cortex-marketplace → already submitted)
+## Claude Code Plugin Marketplace (TT-Wang/memem-marketplace → already submitted)
 
 **Status:** submitted, awaiting approval.
 
@@ -78,7 +78,7 @@ If there are newer community lists worth tracking as they emerge, dump them here
 
 - [ ] `awesome-claude` (non-code focused)
 - [ ] `awesome-local-first` (for the local-first angle)
-- [ ] `awesome-obsidian` (Cortex is tightly integrated with Obsidian as a browse layer)
+- [ ] `awesome-obsidian` (memem is tightly integrated with Obsidian as a browse layer)
 
 These are secondary — only submit if the list is active (merged PRs in the last 30 days).
 

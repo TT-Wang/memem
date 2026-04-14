@@ -1,26 +1,26 @@
 {
-  "name": "cortex-marketplace",
+  "name": "memem-marketplace",
   "owner": {
     "name": "TT-Wang",
     "url": "https://github.com/TT-Wang"
   },
   "metadata": {
-    "description": "Cortex persistent memory plugin for Claude Code",
+    "description": "memem persistent memory plugin for Claude Code",
     "version": "1.0.0"
   },
   "plugins": [
     {
-      "name": "cortex",
+      "name": "memem",
       "source": "./",
-      "description": "Intelligent cross-session memory and context assembly for Claude Code",
-      "version": "0.5.0",
+      "description": "Persistent, self-evolving memory for Claude Code. Local-first, no cloud, browsable Obsidian vault.",
+      "version": "0.7.0",
       "author": {
         "name": "TT-Wang"
       },
-      "homepage": "https://github.com/TT-Wang/cortex-plugin",
-      "repository": "https://github.com/TT-Wang/cortex-plugin",
+      "homepage": "https://github.com/TT-Wang/memem",
+      "repository": "https://github.com/TT-Wang/memem",
       "license": "MIT",
-      "keywords": ["memory", "context", "knowledge", "recall", "learning"],
+      "keywords": ["memory", "context", "knowledge", "recall", "learning", "persistent-memory", "obsidian"],
       "category": "productivity"
     }
   ]

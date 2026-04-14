@@ -17,8 +17,8 @@ docs
 skills
 hooks
 bootstrap.sh
-cortex_server/miner-wrapper.sh
-cortex_server/mine-cron.sh
+memem/miner-wrapper.sh
+memem/mine-cron.sh
 
 # Build artifacts
 dist
@@ -26,5 +26,6 @@ build
 *.egg-info
 
 # Local state (should never be in the repo but defensive)
+~/.memem
 ~/.cortex
 obsidian-brain

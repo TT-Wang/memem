@@ -14,7 +14,7 @@ declared in ``pyproject.toml`` — this is purely an import-time deferral.
 
 import sys
 
-from cortex_server.cli import dispatch_cli
+from memem.cli import dispatch_cli
 
 
 def _build_mcp():
@@ -29,13 +29,13 @@ def _build_mcp():
     from mcp.server.fastmcp import FastMCP
     from pydantic import Field
 
-    from cortex_server.operations import memory_import as _memory_import
-    from cortex_server.operations import memory_save as _memory_save
-    from cortex_server.recall import memory_list as _memory_list
-    from cortex_server.recall import memory_recall as _memory_recall
-    from cortex_server.transcripts import transcript_search as _transcript_search
+    from memem.operations import memory_import as _memory_import
+    from memem.operations import memory_save as _memory_save
+    from memem.recall import memory_list as _memory_list
+    from memem.recall import memory_recall as _memory_recall
+    from memem.transcripts import transcript_search as _transcript_search
 
-    mcp = FastMCP("cortex")
+    mcp = FastMCP("memem")
 
     @mcp.tool()
     def memory_recall(
@@ -515,7 +515,7 @@ def _build_mcp():
               known bcrypt.compare gotcha, a link to the staging-specific
               env var issue from last month, etc.
         """
-        from cortex_server.assembly import context_assemble as _assemble
+        from memem.assembly import context_assemble as _assemble
         return _assemble(query, project)
 
     return mcp

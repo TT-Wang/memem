@@ -11,15 +11,15 @@ import json
 import logging
 import subprocess
 
-from cortex_server.models import PLAYBOOK_DIR, _normalize_scope_id
-from cortex_server.obsidian_store import (
+from memem.models import PLAYBOOK_DIR, _normalize_scope_id
+from memem.obsidian_store import (
     _deprecate_memory,
     _find_memory,
     _obsidian_memories,
     _update_memory,
 )
 
-log = logging.getLogger("cortex-assembly")
+log = logging.getLogger("memem-assembly")
 
 
 _ASSEMBLE_SYSTEM = (
@@ -55,11 +55,11 @@ def context_assemble(query: str, project: str = "default") -> str:
             pass
 
     # Get relevant memories (lazy import to avoid circular dep)
-    from cortex_server.recall import _search_memories
+    from memem.recall import _search_memories
     memories = _search_memories(query, scope_id=normalized, limit=20, record_access=False)
 
     # Get transcript search results (lazy import)
-    from cortex_server.transcripts import transcript_search
+    from memem.transcripts import transcript_search
     transcript_results = transcript_search(query, limit=3)
 
     # Early return if nothing to assemble
@@ -92,7 +92,7 @@ def context_assemble(query: str, project: str = "default") -> str:
     # Degraded mode: if the `claude` CLI isn't available, return the raw
     # materials (playbook + memory list) instead of failing or silently
     # returning empty. The caller still gets useful context.
-    from cortex_server.capabilities import assembly_available
+    from memem.capabilities import assembly_available
     if not assembly_available():
         log.info("context_assemble: claude CLI unavailable, returning raw materials (degraded)")
         return materials if materials else (playbook_content or "")
@@ -201,7 +201,7 @@ def _consolidate_project(project: str) -> dict:
             continue
         try:
             # Lazy import to avoid circular dependency (mining imports from storage)
-            from cortex_server.mining import _merge_memories
+            from memem.mining import _merge_memories
             merged_content = _merge_memories(keep_mem.get("essence", ""), remove_mem.get("essence", ""))
             _update_memory(keep_mem["id"], merged_content)
             _deprecate_memory(remove_mem["id"], f"merged_into:{keep_id}")

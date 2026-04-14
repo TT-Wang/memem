@@ -3,15 +3,15 @@ import logging
 import subprocess
 from pathlib import Path
 
-from cortex_server.assembly import _consolidate_project
-from cortex_server.miner_protocol import (
+from memem.assembly import _consolidate_project
+from memem.miner_protocol import (
     MINER_STATE_VERSION,
     STATUS_COMPLETE,
     STATUS_FAILED,
     STATUS_IN_PROGRESS,
 )
-from cortex_server.models import ObsidianUnavailableError
-from cortex_server.obsidian_store import (
+from memem.models import ObsidianUnavailableError
+from memem.obsidian_store import (
     _deprecate_memory,
     _find_best_match,
     _generate_index,
@@ -21,20 +21,20 @@ from cortex_server.obsidian_store import (
     _stable_mined_memory_id,
     _update_memory,
 )
-from cortex_server.playbook import (
+from memem.playbook import (
     _playbook_append,
     _playbook_refine,
 )
-from cortex_server.session_state import (
+from memem.session_state import (
     find_settled_sessions,
     load_mined_session_state,
     session_is_complete,
     update_session_state,
 )
-from cortex_server.telemetry import _log_event
-from cortex_server.transcripts import _extract_conversation
+from memem.telemetry import _log_event
+from memem.transcripts import _extract_conversation
 
-log = logging.getLogger("cortex-miner")
+log = logging.getLogger("memem-miner")
 
 
 class MiningError(RuntimeError):

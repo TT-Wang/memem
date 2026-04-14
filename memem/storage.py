@@ -14,9 +14,9 @@ import subprocess
 import time
 from pathlib import Path
 
-from cortex_server.models import CORTEX_DIR, INDEX_PATH, OBSIDIAN_MEMORIES_DIR, PLAYBOOK_DIR, SERVER_PID_FILE
+from memem.models import INDEX_PATH, MEMEM_DIR, OBSIDIAN_MEMORIES_DIR, PLAYBOOK_DIR, SERVER_PID_FILE
 
-log = logging.getLogger("cortex-storage")
+log = logging.getLogger("memem-storage")
 
 
 def _pid_is_running(pid: int) -> bool:
@@ -42,7 +42,7 @@ def _ensure_vault_exists():
     OBSIDIAN_MEMORIES_DIR.mkdir(parents=True, exist_ok=True)
     INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
     PLAYBOOK_DIR.mkdir(parents=True, exist_ok=True)
-    CORTEX_DIR.mkdir(parents=True, exist_ok=True)
+    MEMEM_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _auto_start_miner():
@@ -56,7 +56,7 @@ def _auto_start_miner():
     not come up.
     """
     try:
-        miner_pid_file = CORTEX_DIR / "miner.pid"
+        miner_pid_file = MEMEM_DIR / "miner.pid"
         if miner_pid_file.exists():
             try:
                 pid = int(miner_pid_file.read_text().strip())

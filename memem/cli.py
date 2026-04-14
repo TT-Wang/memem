@@ -3,16 +3,16 @@ import subprocess
 import sys
 from pathlib import Path
 
-from cortex_server.miner_protocol import FATAL_EXIT_CODE, TRANSIENT_EXIT_CODE
-from cortex_server.mining import FatalMiningError, MiningError, mine_all, mine_session
-from cortex_server.models import INDEX_PATH
-from cortex_server.obsidian_store import (
+from memem.miner_protocol import FATAL_EXIT_CODE, TRANSIENT_EXIT_CODE
+from memem.mining import FatalMiningError, MiningError, mine_all, mine_session
+from memem.models import INDEX_PATH
+from memem.obsidian_store import (
     _generate_index,
     purge_mined_memories,
 )
-from cortex_server.recall import memory_recall, smart_recall
-from cortex_server.session_state import MINED_SESSIONS_FILE
-from cortex_server.storage import _register_server_pid
+from memem.recall import memory_recall, smart_recall
+from memem.session_state import MINED_SESSIONS_FILE
+from memem.storage import _register_server_pid
 
 
 def dispatch_cli(argv: list[str], mcp) -> None:
@@ -38,7 +38,7 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         return
 
     if cmd == "--mine-all":
-        from cortex_server.session_state import clear_installed_at
+        from memem.session_state import clear_installed_at
         clear_installed_at()  # Mine ALL sessions, including pre-install history
         try:
             print(json.dumps(mine_all()))
@@ -71,8 +71,8 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         return
 
     if cmd == "--rebuild-playbooks":
-        from cortex_server.obsidian_store import _obsidian_memories
-        from cortex_server.playbook import _playbook_refine
+        from memem.obsidian_store import _obsidian_memories
+        from memem.playbook import _playbook_refine
         seen = set()
         count = 0
         for mem in _obsidian_memories():
@@ -86,14 +86,14 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         return
 
     if cmd == "--rebuild-search-index":
-        from cortex_server.search_index import _rebuild_search_index
+        from memem.search_index import _rebuild_search_index
         count = _rebuild_search_index()
         print(f"Search index rebuilt: {count} memories indexed")
         return
 
     if cmd == "--migrate-schema":
-        from cortex_server.obsidian_store import _obsidian_memories, _write_obsidian_memory
-        from cortex_server.telemetry import _log_event
+        from memem.obsidian_store import _obsidian_memories, _write_obsidian_memory
+        from memem.telemetry import _log_event
 
         migrated = 0
         already = 0
@@ -124,20 +124,20 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         return
 
     if cmd == "--eval":
-        from cortex_server.eval import run_eval
+        from memem.eval import run_eval
         run_eval()
         return
 
     if cmd == "--doctor":
-        from cortex_server.capabilities import detect_capabilities, pretty_report, write_capabilities
+        from memem.capabilities import detect_capabilities, pretty_report, write_capabilities
         caps = detect_capabilities()
         write_capabilities(caps)
         print(pretty_report(caps))
-        blockers = not caps.get("mcp") or not caps.get("writable_cortex_dir") or not caps.get("writable_vault")
+        blockers = not caps.get("mcp") or not caps.get("writable_state_dir") or not caps.get("writable_vault")
         raise SystemExit(1 if blockers else 0)
 
     if cmd == "--events":
-        from cortex_server.models import EVENT_LOG
+        from memem.models import EVENT_LOG
         if not EVENT_LOG.exists():
             print("No events yet.")
             return
@@ -163,19 +163,19 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         if not query:
             print("No query provided.")
             return
-        from cortex_server.assembly import context_assemble
+        from memem.assembly import context_assemble
         print(context_assemble(query, project))
         return
 
     if cmd == "--status":
-        from cortex_server.models import (
-            CORTEX_DIR,
+        from memem.models import (
             EVENT_LOG,
+            MEMEM_DIR,
             OBSIDIAN_VAULT,
             PLAYBOOK_DIR,
             SEARCH_DB,
         )
-        from cortex_server.obsidian_store import _obsidian_memories
+        from memem.obsidian_store import _obsidian_memories
         # Memory stats
         all_mems = _obsidian_memories(include_deprecated=True)
         active = sum(1 for m in all_mems if m.get("status", "active") == "active")
@@ -188,7 +188,7 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         print("Cortex Status")
         print("=" * 40)
         print(f"  Vault:     {OBSIDIAN_VAULT}")
-        print(f"  Data:      {CORTEX_DIR}")
+        print(f"  Data:      {MEMEM_DIR}")
         print(f"  Memories:  {active} active, {deprecated} deprecated")
         print(f"  Sources:   {mined} mined, {user} user")
         print(f"  Projects:  {projects}")

@@ -1,4 +1,4 @@
-"""Shared pytest fixtures for Cortex tests."""
+"""Shared pytest fixtures for memem tests."""
 
 import importlib
 
@@ -9,10 +9,11 @@ import pytest
 def tmp_vault(tmp_path, monkeypatch):
     """Isolated Obsidian vault for testing."""
     vault = tmp_path / "obsidian-brain"
-    (vault / "cortex" / "memories").mkdir(parents=True)
-    (vault / "cortex" / "playbooks").mkdir(parents=True)
-    monkeypatch.setenv("CORTEX_OBSIDIAN_VAULT", str(vault))
-    from cortex_server import models, obsidian_store, playbook
+    (vault / "memem" / "memories").mkdir(parents=True)
+    (vault / "memem" / "playbooks").mkdir(parents=True)
+    monkeypatch.setenv("MEMEM_OBSIDIAN_VAULT", str(vault))
+    monkeypatch.delenv("CORTEX_OBSIDIAN_VAULT", raising=False)
+    from memem import models, obsidian_store, playbook
     importlib.reload(models)
     importlib.reload(obsidian_store)
     importlib.reload(playbook)
@@ -21,15 +22,22 @@ def tmp_vault(tmp_path, monkeypatch):
 
 @pytest.fixture
 def tmp_cortex_dir(tmp_path, monkeypatch):
-    """Isolated Cortex data directory for testing."""
-    cortex = tmp_path / ".cortex"
-    cortex.mkdir()
-    monkeypatch.setenv("CORTEX_DIR", str(cortex))
-    from cortex_server import models, search_index, telemetry
+    """Isolated memem state directory for testing.
+
+    Fixture is named tmp_cortex_dir for legacy reasons; the directory it
+    creates is now ~/.memem/, not ~/.cortex/. Tests that take this fixture
+    don't need to be renamed — they get whatever the package considers the
+    current state dir.
+    """
+    state = tmp_path / ".memem"
+    state.mkdir()
+    monkeypatch.setenv("MEMEM_DIR", str(state))
+    monkeypatch.delenv("CORTEX_DIR", raising=False)
+    from memem import models, search_index, telemetry
     importlib.reload(models)
     importlib.reload(telemetry)
     importlib.reload(search_index)
-    return cortex
+    return state
 
 
 @pytest.fixture

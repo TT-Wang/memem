@@ -10,12 +10,12 @@ import logging
 import subprocess
 from datetime import UTC, datetime
 
-from cortex_server.models import PLAYBOOK_DIR, PLAYBOOK_STAGING_DIR, now_iso
-from cortex_server.obsidian_store import _atomic_write
-from cortex_server.security import scan_memory_content
-from cortex_server.telemetry import _log_event
+from memem.models import PLAYBOOK_DIR, PLAYBOOK_STAGING_DIR, now_iso
+from memem.obsidian_store import _atomic_write
+from memem.security import scan_memory_content
+from memem.telemetry import _log_event
 
-log = logging.getLogger("cortex-playbook")
+log = logging.getLogger("memem-playbook")
 
 _now = now_iso
 

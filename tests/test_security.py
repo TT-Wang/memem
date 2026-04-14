@@ -1,6 +1,6 @@
 """Tests for security.scan_memory_content."""
 
-from cortex_server.security import scan_memory_content
+from memem.security import scan_memory_content
 
 
 def test_clean_content_passes():

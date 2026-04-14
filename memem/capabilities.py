@@ -1,6 +1,6 @@
 """Runtime capability detection + serialization.
 
-Cortex writes a small JSON file at ``~/.cortex/.capabilities`` during the
+memem writes a small JSON file at ``~/.memem/.capabilities`` during the
 bootstrap shim (bootstrap.sh) and on every ``--doctor`` invocation. The rest
 of the package reads it to decide whether optional features (Haiku-powered
 assembly, smart recall) should run or fall back to a degraded mode.
@@ -9,11 +9,11 @@ Schema (v1)::
 
     {
       "schema_version": 1,
-      "updated_at": "2026-04-13T12:34:56+00:00",
+      "updated_at": "2026-04-14T12:34:56+00:00",
       "python_version": "3.11.6",
       "mcp": true,
       "claude_cli": true,
-      "writable_cortex_dir": true,
+      "writable_state_dir": true,
       "writable_vault": true,
       "uv": true,
       "notes": []
@@ -34,11 +34,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from cortex_server.models import CORTEX_DIR, OBSIDIAN_MEMORIES_DIR, now_iso
+from memem.models import MEMEM_DIR, OBSIDIAN_MEMORIES_DIR, now_iso
 
-log = logging.getLogger("cortex-capabilities")
+log = logging.getLogger("memem-capabilities")
 
-CAPABILITIES_FILE = CORTEX_DIR / ".capabilities"
+CAPABILITIES_FILE = MEMEM_DIR / ".capabilities"
 SCHEMA_VERSION = 1
 
 
@@ -46,7 +46,7 @@ def _can_write(path: Path) -> bool:
     """Probe whether we can actually create and remove a file under ``path``."""
     try:
         path.mkdir(parents=True, exist_ok=True)
-        canary = path / ".cortex-write-check"
+        canary = path / ".memem-write-check"
         canary.write_text("ok")
         canary.unlink(missing_ok=True)
         return True
@@ -88,7 +88,7 @@ def detect_capabilities() -> dict[str, Any]:
         "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
         "mcp": _mcp_importable(),
         "claude_cli": _claude_cli_available(),
-        "writable_cortex_dir": _can_write(CORTEX_DIR),
+        "writable_state_dir": _can_write(MEMEM_DIR),
         "writable_vault": _can_write(OBSIDIAN_MEMORIES_DIR),
         "uv": _uv_available(),
         "notes": [],
@@ -97,10 +97,10 @@ def detect_capabilities() -> dict[str, Any]:
 
 
 def write_capabilities(caps: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Detect (if not supplied) and atomically persist to ``~/.cortex/.capabilities``."""
+    """Detect (if not supplied) and atomically persist to ``~/.memem/.capabilities``."""
     if caps is None:
         caps = detect_capabilities()
-    CORTEX_DIR.mkdir(parents=True, exist_ok=True)
+    MEMEM_DIR.mkdir(parents=True, exist_ok=True)
     tmp = CAPABILITIES_FILE.with_suffix(".tmp")
     with open(tmp, "w") as fh:
         fh.write(json.dumps(caps, indent=2, sort_keys=True))
@@ -143,7 +143,7 @@ def format_status_banner(memory_count: int, miner_running: bool) -> str:
     miner_glyph = "✓" if miner_running else "✗"
     assembly_glyph = "✓" if caps.get("claude_cli") else "⚠"
     parts = [
-        f"[Cortex] {memory_count} memories",
+        f"[memem] {memory_count} memories",
         f"miner {miner_glyph}",
         f"assembly {assembly_glyph}",
     ]
@@ -159,14 +159,14 @@ def pretty_report(caps: dict[str, Any] | None = None) -> str:
     if caps is None:
         caps = detect_capabilities()
     lines = [
-        "Cortex Doctor",
+        "memem Doctor",
         "=" * 40,
         f"  Python version     : {caps.get('python_version', '?')}",
         f"  mcp importable     : {'yes' if caps.get('mcp') else 'NO — pip install mcp'}",
         f"  claude CLI on PATH : {'yes' if caps.get('claude_cli') else 'NO — Haiku assembly disabled (degraded)'}",
         f"  uv available       : {'yes' if caps.get('uv') else 'no (bootstrap.sh will install)'}",
-        f"  cortex dir writable: {'yes' if caps.get('writable_cortex_dir') else 'NO — set CORTEX_DIR env var'}",
-        f"  vault writable     : {'yes' if caps.get('writable_vault') else 'NO — set CORTEX_OBSIDIAN_VAULT env var'}",
+        f"  state dir writable : {'yes' if caps.get('writable_state_dir') else 'NO — set MEMEM_DIR env var'}",
+        f"  vault writable     : {'yes' if caps.get('writable_vault') else 'NO — set MEMEM_OBSIDIAN_VAULT env var'}",
         f"  updated_at         : {caps.get('updated_at', '?')}",
         "=" * 40,
     ]
@@ -179,8 +179,8 @@ def pretty_report(caps: dict[str, Any] | None = None) -> str:
     blockers = []
     if not caps.get("mcp"):
         blockers.append("mcp package missing — MCP server cannot start")
-    if not caps.get("writable_cortex_dir"):
-        blockers.append("~/.cortex is not writable")
+    if not caps.get("writable_state_dir"):
+        blockers.append("~/.memem is not writable")
     if not caps.get("writable_vault"):
         blockers.append("obsidian vault directory is not writable")
 

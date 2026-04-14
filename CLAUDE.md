@@ -1,9 +1,9 @@
-# Cortex — Persistent Memory & Context Assembly
+# memem — Persistent Memory & Context Assembly
 
-You have access to a persistent memory system via Cortex. This memory persists across sessions, self-evolves, and gets smarter over time.
+You have access to a persistent memory system via memem. This memory persists across sessions, self-evolves, and gets smarter over time.
 
-Storage: Obsidian vault at `~/obsidian-brain/cortex/memories/` (markdown files, single source of truth).
-Machine index: SQLite FTS5 at `~/.cortex/search.db` for fast retrieval.
+Storage: Obsidian vault at `~/obsidian-brain/memem/memories/` (markdown files, single source of truth).
+Machine index: SQLite FTS5 at `~/.memem/search.db` for fast retrieval.
 
 ## Auto-recall
 
@@ -15,7 +15,7 @@ For deeper recall during the session, use the MCP tools below.
 
 When you complete significant work, save non-obvious lessons:
 
-Call `mcp__plugin_cortex_cortex__memory_save` with:
+Call `mcp__memem__memory_save` with:
 - `content`: The key insight (one per save, keep it atomic)
 - `title`: Short descriptive title
 - `tags`: Comma-separated relevant tags
@@ -33,10 +33,10 @@ Call `mcp__plugin_cortex_cortex__memory_save` with:
 
 ## Mining existing sessions
 
-By default, Cortex only mines sessions created after installation. When a user asks to mine their existing history (e.g. "mine my existing sessions", "mine my history"), run this in the background:
+By default, memem only mines sessions created after installation. When a user asks to mine their existing history (e.g. "mine my existing sessions", "mine my history"), run this in the background:
 
 ```bash
-nohup PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python3 -m cortex_server.server --mine-all > /dev/null 2>&1 &
+nohup PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python3 -m memem.server --mine-all > /dev/null 2>&1 &
 ```
 
 The `--mine-all` flag clears the install-time gate so all historical sessions are included. Tell the user it's running in the background and they can continue working normally.
@@ -51,3 +51,11 @@ The `--mine-all` flag clears the install-time gate so all historical sessions ar
 | `memory_import` | Import from files, directories, or chat exports |
 | `transcript_search` | Search raw Claude Code session logs |
 | `context_assemble` | On-demand query-tailored briefing from all knowledge |
+
+## Backward compatibility
+
+memem was renamed from `cortex` in v0.7.0. Existing users with data under
+`~/.cortex/` and `~/obsidian-brain/cortex/` are auto-migrated to `~/.memem/`
+and `~/obsidian-brain/memem/` on first run via a one-time copy. Legacy paths
+remain intact as a safety net. Legacy `CORTEX_*` env vars are still read as
+fallbacks for `MEMEM_*`.

@@ -10,9 +10,9 @@ import json
 import logging
 import os
 
-from cortex_server.models import CORTEX_DIR, EVENT_LOG, TELEMETRY_FILE, now_iso
+from memem.models import EVENT_LOG, MEMEM_DIR, TELEMETRY_FILE, now_iso
 
-log = logging.getLogger("cortex-telemetry")
+log = logging.getLogger("memem-telemetry")
 
 
 # ============================================================================
@@ -41,7 +41,7 @@ def _record_access(memory_id: str) -> None:
     corrupt, it's preserved as <file>.corrupt.<ts> rather than silently
     overwritten so telemetry history can be recovered if needed.
     """
-    CORTEX_DIR.mkdir(parents=True, exist_ok=True)
+    MEMEM_DIR.mkdir(parents=True, exist_ok=True)
     lock_path = TELEMETRY_FILE.with_suffix(".lock")
     fd = open(lock_path, "w")
     try:
@@ -83,7 +83,7 @@ def _record_access(memory_id: str) -> None:
 def _log_event(op: str, memory_id: str = "", **details) -> None:
     """Append an event to the audit log. Atomic for lines < PIPE_BUF."""
     try:
-        CORTEX_DIR.mkdir(parents=True, exist_ok=True)
+        MEMEM_DIR.mkdir(parents=True, exist_ok=True)
         entry = {"op": op, "memory_id": memory_id, "timestamp": now_iso(), **details}
         with open(EVENT_LOG, "a") as f:
             f.write(json.dumps(entry) + "\n")

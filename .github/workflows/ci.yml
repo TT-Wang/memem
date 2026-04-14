@@ -21,7 +21,7 @@ jobs:
       - name: Ruff
         run: ruff check .
       - name: Mypy
-        run: mypy cortex_server
+        run: mypy memem
 
   test:
     runs-on: ubuntu-latest
@@ -57,8 +57,8 @@ jobs:
           /tmp/wheel-venv/bin/pip install dist/*.whl
       - name: Smoke-test the installed wheel
         run: |
-          /tmp/wheel-venv/bin/python -m cortex_server.server --rebuild-index
-          /tmp/wheel-venv/bin/python -c "import cortex_server; print(cortex_server.__version__)"
+          /tmp/wheel-venv/bin/python -m memem.server --rebuild-index
+          /tmp/wheel-venv/bin/python -c "import memem; print(memem.__version__)"
       - name: Upload dist
         uses: actions/upload-artifact@v4
         with:

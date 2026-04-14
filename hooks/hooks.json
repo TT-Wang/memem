@@ -1,5 +1,5 @@
 {
-  "description": "Cortex memory — auto-recalls relevant memories on first message",
+  "description": "memem — auto-recalls relevant memories on first message",
   "hooks": {
     "UserPromptSubmit": [
       {

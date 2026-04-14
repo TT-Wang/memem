@@ -4,26 +4,26 @@ import subprocess
 from collections import Counter
 from datetime import UTC, datetime
 
-from cortex_server.models import INDEX_PATH
-from cortex_server.obsidian_store import (
+from memem.models import INDEX_PATH
+from memem.obsidian_store import (
     _find_memory,
     _load_obsidian_memories,
     _obsidian_memories,
     _word_set,
 )
-from cortex_server.telemetry import (
+from memem.telemetry import (
     _get_telemetry,
     _record_access,
 )
-from cortex_server.transcripts import transcript_search
+from memem.transcripts import transcript_search
 
-log = logging.getLogger("cortex-recall")
+log = logging.getLogger("memem-recall")
 
 
 def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 10) -> list[dict]:
     """FTS5-first search: query SQLite index, load full memories from Obsidian."""
     try:
-        from cortex_server.search_index import _search_fts
+        from memem.search_index import _search_fts
         fts_ids = _search_fts(query, scope_id or "default", limit * 2)
         if not fts_ids:
             return []
@@ -232,7 +232,7 @@ def smart_recall(prompt: str, scope_id: str = "default") -> str:
 
     # Degraded mode: if claude CLI is unavailable, fall back to keyword recall
     # (which uses FTS5 only). No user-facing failure.
-    from cortex_server.capabilities import assembly_available
+    from memem.capabilities import assembly_available
     if not assembly_available():
         log.info("smart_recall: claude CLI unavailable, falling back to memory_recall (degraded)")
         return memory_recall(prompt, scope_id=scope_id, limit=10)

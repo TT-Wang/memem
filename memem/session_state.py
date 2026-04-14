@@ -4,19 +4,20 @@ import os
 import time
 from pathlib import Path
 
-from cortex_server.miner_protocol import MINER_STATE_VERSION, STATUS_COMPLETE
-from cortex_server.models import (
-    CORTEX_DIR,
+from memem.miner_protocol import MINER_STATE_VERSION, STATUS_COMPLETE
+from memem.models import (
+    MEMEM_DIR,
+    _env,
     _now,
 )
 
-MINED_SESSIONS_FILE = CORTEX_DIR / ".mined_sessions"
+MINED_SESSIONS_FILE = MEMEM_DIR / ".mined_sessions"
 SESSIONS_DIRS = [Path.home() / ".claude" / "projects"]
-_extra = os.environ.get("CORTEX_EXTRA_SESSION_DIRS", "")
+_extra = _env("MEMEM_EXTRA_SESSION_DIRS", "CORTEX_EXTRA_SESSION_DIRS")
 if _extra:
     SESSIONS_DIRS.extend(Path(path) for path in _extra.split(":") if path)
 
-SETTLE_SECONDS = int(os.environ.get("CORTEX_MINER_SETTLE_SECONDS", "300"))
+SETTLE_SECONDS = int(_env("MEMEM_MINER_SETTLE_SECONDS", "CORTEX_MINER_SETTLE_SECONDS", default="300"))
 
 
 def session_fingerprint(path: Path) -> dict:
@@ -125,14 +126,14 @@ def session_is_complete(path: Path, state: dict | None) -> bool:
     )
 
 
-INSTALLED_AT_FILE = CORTEX_DIR / ".installed_at"
+INSTALLED_AT_FILE = MEMEM_DIR / ".installed_at"
 
 
 def _get_installed_at() -> float:
     """Get the timestamp when Cortex was installed. Returns 0 if mine-all mode."""
     if not INSTALLED_AT_FILE.exists():
         # First run — record install time
-        CORTEX_DIR.mkdir(parents=True, exist_ok=True)
+        MEMEM_DIR.mkdir(parents=True, exist_ok=True)
         INSTALLED_AT_FILE.write_text(str(time.time()))
     try:
         return float(INSTALLED_AT_FILE.read_text().strip())
