@@ -10,6 +10,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
 
+## [0.9.2] - 2026-04-14
+
+### Changed
+- **`/memem` branches on new-vs-returning user.** Adopts the mature CLI
+  pattern (VSCode walkthroughs, gh CLI, Homebrew): brand-new users see
+  the full welcome with ASCII art, pitch, and mining options; returning
+  users see a compact one-line status only, no pedagogy. Distinction is
+  tracked via `~/.memem/.welcome-shown` (created after first welcome) +
+  legacy migration marker + memory count. First view is persistent.
+- **New `/memem-welcome` skill.** Re-show the full welcome on demand
+  regardless of state — the "re-open walkthrough" handle borrowed from
+  VSCode's walkthrough pattern. Returning users who want the intro
+  again don't have to delete state files.
+
 ## [0.9.1] - 2026-04-14
 
 ### Fixed

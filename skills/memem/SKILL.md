@@ -1,16 +1,38 @@
 ---
 name: memem
-description: Show memem welcome, onboarding, status, and help. Use when the user wants to learn about memem, check if it's working, or see available commands.
+description: Show memem status for returning users, or the full welcome for brand-new users. Use when the user wants to check memem or learn about it.
 allowed-tools: [Bash, Read]
 ---
 
-Show the memem welcome screen. Follow these steps in order.
+Show memem's current state. Follow these steps in order.
 
-**Step 1 — Check for a bootstrap error.**
-Run: `[ -f ~/.memem/last-error.md ] && cat ~/.memem/last-error.md || true`
-If the command returned content, show it to the user at the very top with a clear heading, then continue to Step 2. Do not suppress — the user needs to see it.
+**Step 1 — Detect user type.**
+Run these commands:
+```bash
+[ -f ~/.memem/last-error.md ] && echo "HAS_ERROR" || echo "NO_ERROR"
+[ -f ~/.memem/.welcome-shown ] && echo "WELCOME_SHOWN" || echo "WELCOME_NEW"
+[ -f ~/.memem/.migrated_from_cortex ] && echo "LEGACY" || echo "NO_LEGACY"
+find ~/obsidian-brain/memem/memories -maxdepth 1 -name "*.md" -type f 2>/dev/null | wc -l | tr -d ' '
+```
 
-**Step 2 — Print the banner.**
+Read the four outputs. The user is **brand new** only if ALL of these are true:
+- `NO_ERROR`
+- `WELCOME_NEW`
+- `NO_LEGACY`
+- Memory count is `0`
+
+Otherwise the user is **returning** (even with 0 memories — if they migrated from cortex or dismissed the welcome, they're not brand new).
+
+**Step 2 — If there is a bootstrap error, show it first** regardless of user type.
+Run `cat ~/.memem/last-error.md` and display the output under a heading like `### ⚠️ memem bootstrap failed`. Then continue to the appropriate branch.
+
+---
+
+## Branch A — Brand new user
+
+Show the full welcome:
+
+**A1. Print the banner:**
 
 ```
   ███╗   ███╗███████╗███╗   ███╗███████╗███╗   ███╗
@@ -22,67 +44,68 @@ If the command returned content, show it to the user at the very top with a clea
   persistent memory for Claude Code
 ```
 
-**Step 3 — Show current status.**
-Run: `PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python3 -m memem.server --status`
-Display the output in a code block.
+**A2. Write the one-sentence pitch:**
+> memem gives Claude Code persistent memory across sessions. It extracts durable lessons (decisions, conventions, bug fixes, preferences) from your completed sessions into markdown files, then surfaces the relevant ones at the start of each new session.
 
-**Step 4 — Check miner state and past-session count.**
-Run these two commands:
+**A3. Show the two mining options prominently:**
+
+Check the past session count first:
 ```bash
-[ -f ~/.memem/.miner-opted-in ] && echo "OPTED_IN" || echo "NOT_OPTED_IN"
 find ~/.claude/projects/ -name "*.jsonl" ! -path "*/subagents/*" -size +5k 2>/dev/null | wc -l | tr -d ' '
 ```
 
-**Step 5 — Branch on the miner state:**
+Then show:
 
-**If `NOT_OPTED_IN` (miner has not been started yet):**
-Show this block prominently:
-
-> ### 🟡 memem is installed but the miner is idle
+> ### 🟡 memem is installed — choose how to start
 >
-> memem won't extract any memories until you start the miner. You have two options:
+> memem won't mine anything until you start it. Two options:
 >
-> - **Mine only new sessions going forward** — from now on, every completed Claude Code session will be extracted into durable memories. No API cost for past history.
->   - Say: **"start mining new sessions"** — or type `/memem-mine`
+> - **Mine only new sessions going forward.** Every completed Claude Code session will be extracted into durable memories from now on. No API cost for past history.
+>   - Say **"start mining new sessions"** — or type `/memem-mine`
 >
-> - **Mine everything, including your past [N] Claude Code sessions** — extracts memories from your full history plus all new sessions going forward. Uses Claude Haiku API credits; may take up to an hour for large histories.
->   - Say: **"start mining everything including history"** — or type `/memem-mine-history`
+> - **Mine everything, including your past [N] Claude Code sessions.** Extracts memories from your full history plus all new sessions going forward. Uses Claude Haiku API credits; large histories may take up to an hour.
+>   - Say **"start mining everything including history"** — or type `/memem-mine-history`
 >
-> Replace `[N]` with the number from step 4. If the number is 0, skip the second option.
+> Replace `[N]` with the session count. If the count is 0, drop the second option entirely.
 
-**If `OPTED_IN` (miner is active):**
-Run: `pgrep -f "memem.server --mine-all" > /dev/null && echo "MINING_HISTORY" || echo "IDLE"`
-If `MINING_HISTORY`, show:
-> ⚙️ **Mining history in background.** memem is extracting memories from your past Claude Code sessions via Claude Haiku. Runs silently — you can keep working.
+**A4. Tail:**
 
-Otherwise show:
-> ✅ **Miner is active** — new Claude Code sessions will be mined automatically ~5 minutes after they end. To stop: `python3 -m memem.server --miner-opt-out`.
+> **Optional:** Memories are plain markdown at `~/obsidian-brain/memem/memories/`. Open that folder as an Obsidian vault for graph view. memem works identically without Obsidian.
+>
+> Commands: `/memem-status`, `/memem-doctor`, `/memem-mine`, `/memem-mine-history`
 
-**Step 6 — Show how memem works.**
+**A5. Mark welcome as shown so future `/memem` invocations use the compact view:**
+```bash
+mkdir -p ~/.memem && touch ~/.memem/.welcome-shown
+```
 
-**How memem works:**
-1. You work normally in Claude Code — nothing to do.
-2. A background miner watches for completed sessions (once you start it).
-3. ~5 minutes after a session ends, it extracts durable memories via Claude Haiku and writes them to `~/obsidian-brain/memem/memories/`.
-4. Your next session starts with relevant context pre-loaded from memory — no re-explaining the project.
+---
 
-**Step 7 — Show commands and tools.**
+## Branch B — Returning user
 
-**Slash commands:**
-- `/memem` — this welcome + status screen
-- `/memem-status` — detailed memory system status
-- `/memem-doctor` — preflight health check with fix instructions
-- `/memem-mine` — start the miner (new sessions only)
-- `/memem-mine-history` — start the miner AND mine past history (opt-in, may take hours)
+Show only current state. No pedagogy, no ASCII art, no tutorials.
 
-**MCP tools** (Claude calls these automatically when useful; you can also ask for them by name):
-- `memory_save` — store a lesson, pattern, or convention
-- `memory_recall` — search memories by keyword
-- `memory_list` — list all memories with stats
-- `memory_import` — import from files or chat exports
-- `transcript_search` — search raw session logs
-- `context_assemble` — get a query-tailored briefing
+**B1. Run the status command:**
+```bash
+PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python3 -m memem.server --status
+```
 
-**Step 8 — Show optional Obsidian note.**
+Display the output in a code block.
 
-**Obsidian (optional):** Memories are plain markdown files at `~/obsidian-brain/memem/memories/`. Open that folder as an Obsidian vault for graph view and backlinks. memem works identically without Obsidian.
+**B2. Check the miner state:**
+```bash
+[ -f ~/.memem/.miner-opted-in ] && echo "OPTED_IN" || echo "NOT_OPTED_IN"
+pgrep -f "memem.server --mine-all" > /dev/null && echo "MINING_HISTORY" || echo "NOT_MINING_HISTORY"
+```
+
+Then show a single one-line state summary matching what the signals show:
+
+- If `OPTED_IN` + `MINING_HISTORY`: "⚙️ memem active — mining past history in background. New sessions will be mined automatically."
+- If `OPTED_IN` + `NOT_MINING_HISTORY`: "✅ memem active — miner running, new sessions mined automatically."
+- If `NOT_OPTED_IN`: "🟡 memem has N memories but the miner is stopped. Type `/memem-mine` to resume, or `/memem-welcome` to re-read the intro."
+
+**B3. Tail (always, for returning users):**
+
+> Commands: `/memem-status`, `/memem-doctor`, `/memem-mine`, `/memem-mine-history`, `/memem-welcome` (re-show intro)
+
+**Do NOT** print the ASCII banner, "how memem works" explainer, Obsidian note, MCP tool list, or mining-option walkthrough. Returning users don't need them.
