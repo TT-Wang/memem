@@ -160,59 +160,10 @@ else:
     index = Path(index_path).read_text() if Path(index_path).exists() else ""
 
     if memory_count == 0:
-        # Count existing session logs for the mine-existing option
-        import glob as _glob
-        sessions_dir = Path.home() / ".claude" / "projects"
-        existing_sessions = 0
-        if sessions_dir.exists():
-            existing_sessions = len(_glob.glob(str(sessions_dir / "**" / "*.jsonl"), recursive=True))
-
-        # Brand new user — welcome + onboarding
-        mine_option = ""
-        if existing_sessions > 0:
-            mine_option = (
-                f"\n**You have {existing_sessions} past Claude Code sessions.**\n"
-                "memem can mine your existing history for knowledge — decisions, "
-                "preferences, lessons, and conventions from past conversations.\n\n"
-                "- **To mine your history:** type `/memem-mine-history`\n"
-                "- **To skip:** do nothing — memem will automatically mine all new sessions going forward\n\n"
-                "History mining runs in the background and may take a few hours for large histories.\n"
-            )
-
-        output = (
-            "```\n"
-            "  ███╗   ███╗███████╗███╗   ███╗███████╗███╗   ███╗\n"
-            "  ████╗ ████║██╔════╝████╗ ████║██╔════╝████╗ ████║\n"
-            "  ██╔████╔██║█████╗  ██╔████╔██║█████╗  ██╔████╔██║\n"
-            "  ██║╚██╔╝██║██╔══╝  ██║╚██╔╝██║██╔══╝  ██║╚██╔╝██║\n"
-            "  ██║ ╚═╝ ██║███████╗██║ ╚═╝ ██║███████╗██║ ╚═╝ ██║\n"
-            "  ╚═╝     ╚═╝╚══════╝╚═╝     ╚═╝╚══════╝╚═╝     ╚═╝\n"
-            "  persistent memory for Claude Code\n"
-            "```\n\n"
-            "Welcome to memem! This is your first session with persistent memory enabled.\n\n"
-            "**How it works:**\n"
-            "- Every session you have builds your memory. Decisions, preferences, lessons, "
-            "and conventions are automatically extracted and stored.\n"
-            "- Future sessions start with relevant context pre-loaded — no more repeating yourself.\n"
-            "- The more you work, the smarter it gets.\n\n"
-            + mine_option +
-            "\n**Getting started:**\n"
-            "1. Just work normally — memem runs in the background\n"
-            "2. To save something important now: use `memory_save`\n"
-            "3. To search past knowledge: use `memory_recall`\n"
-            "4. To get a tailored briefing: use `context_assemble`\n\n"
-            "**What happens next:**\n"
-            "- After this session ends, the miner daemon extracts durable knowledge from your conversation\n"
-            "- Next session, you'll see a context briefing tailored to your first message\n"
-            "- Over time, playbooks build per project — curated, self-evolving knowledge\n\n"
-            "**Browse your memories with Obsidian (optional):**\n"
-            "- Download Obsidian: https://obsidian.md (free)\n"
-            "- Open `~/obsidian-brain` as a vault\n"
-            "- Memories appear in `memem/memories/`, playbooks in `memem/playbooks/`\n"
-            "- Use Graph View to see how memories link to each other\n\n"
-            "Available tools: `memory_save`, `memory_recall`, `memory_list`, "
-            "`memory_import`, `transcript_search`, `context_assemble`"
-        )
+        # Quiet onboarding: do NOT inject a welcome wall on the user's first
+        # prompt. Users discover memem via /memem when they want it; this hook
+        # stays silent so the first question is answered without interruption.
+        sys.exit(0)
     else:
         # Has memories but assembly failed — dump index + playbook
         playbook_dir = Path(vault) / vault_subdir / "playbooks"

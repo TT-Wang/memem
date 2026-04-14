@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memem"
-version = "0.7.1"
+version = "0.8.0"
 description = "Persistent, self-evolving memory for Claude Code — local-first, browsable Obsidian vault."
 readme = "README.md"
 license = {text = "MIT"}

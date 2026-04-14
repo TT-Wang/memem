@@ -58,14 +58,17 @@ Use memem if:
 
 That's it. On first run, `bootstrap.sh` self-heals everything:
 
-1. Verifies Python ≥ 3.11
+1. Verifies Python ≥ 3.11 — or installs it via `uv python install 3.11` if your system Python is too old
 2. Installs `uv` if missing (via the official Astral installer)
 3. Syncs deps into a plugin-local `.venv` (hash-cached against `uv.lock`)
 4. Creates and canary-tests `~/.memem/` and `~/obsidian-brain/`
 5. Writes `~/.memem/.capabilities` (used for degraded-mode decisions)
-6. Execs the real MCP server
+6. **Auto-mines your existing Claude Code history in the background** (if you have ≥5 past sessions) so session 2 already has warm context. One-shot, idempotent, runs silently.
+7. Execs the real MCP server
 
-**First run:** ~5 seconds. **Every run after:** ~100ms. No separate `pip install` step.
+**First run:** ~5 seconds (plus background mining if applicable). **Every run after:** ~100ms. No separate `pip install` step.
+
+**Opt out of auto-mining:** set `MEMEM_NO_AUTO_MINE=1` in your shell profile before installing. Any other time, just type `/memem` to see status and help.
 
 ## What happens on my first Claude Code session?
 

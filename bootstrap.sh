@@ -62,6 +62,19 @@ die() {
     local code="$1"; shift
     echo "memem-bootstrap: $*" >&2
     log "FATAL ($code): $*"
+    # Surface the failure to the user via /memem (reads last-error.md).
+    mkdir -p "$MEMEM_DIR" 2>/dev/null || true
+    {
+        echo "# memem bootstrap failed"
+        echo ""
+        echo "**Error:** $*"
+        echo ""
+        echo "**Exit code:** $code"
+        echo ""
+        echo "**Log:** \`$BOOTSTRAP_LOG\`"
+        echo ""
+        echo "**Next step:** run \`/memem-doctor\` for guided diagnostics."
+    } > "$MEMEM_DIR/last-error.md" 2>/dev/null || true
     exit "$code"
 }
 
@@ -99,17 +112,22 @@ fi
 
 log "bootstrap start — PLUGIN_ROOT=$PLUGIN_ROOT  args=$*"
 
-# ---- 1. Python version check -------------------------------------------------
+# ---- 1. Python version check (self-heals via uv if too old) ----------------
+NEEDS_UV_PYTHON=0
 if ! command -v python3 >/dev/null 2>&1; then
-    die "$EXIT_PYTHON" "python3 not found on PATH. Install Python >= 3.11 and retry."
+    log "python3 not found on PATH — will install Python 3.11 via uv"
+    NEEDS_UV_PYTHON=1
+else
+    PYVER="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+    PYMAJ="${PYVER%%.*}"
+    PYMIN="${PYVER##*.}"
+    if [ "$PYMAJ" -lt 3 ] || { [ "$PYMAJ" -eq 3 ] && [ "$PYMIN" -lt 11 ]; }; then
+        log "python $PYVER too old — will install Python 3.11 via uv"
+        NEEDS_UV_PYTHON=1
+    else
+        log "python ok: $PYVER"
+    fi
 fi
-PYVER="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
-PYMAJ="${PYVER%%.*}"
-PYMIN="${PYVER##*.}"
-if [ "$PYMAJ" -lt 3 ] || { [ "$PYMAJ" -eq 3 ] && [ "$PYMIN" -lt 11 ]; }; then
-    die "$EXIT_PYTHON" "Python $PYVER detected; memem requires >= 3.11."
-fi
-log "python ok: $PYVER"
 
 # ---- 2. uv install -----------------------------------------------------------
 ensure_uv_on_path() {
@@ -133,6 +151,15 @@ if ! command -v uv >/dev/null 2>&1; then
     fi
 fi
 log "uv ok: $(uv --version 2>/dev/null || echo unknown)"
+
+# ---- 2.5. Install Python 3.11 via uv if system python is missing/too old ---
+if [ "$NEEDS_UV_PYTHON" = "1" ]; then
+    log "installing Python 3.11 via uv (first-run only, ~30MB download)"
+    if ! uv python install 3.11 >> "$BOOTSTRAP_LOG" 2>&1; then
+        die "$EXIT_PYTHON" "uv python install 3.11 failed. See $BOOTSTRAP_LOG."
+    fi
+    log "uv-managed python 3.11 installed"
+fi
 
 # ---- 3. Venv sync (hash-cached) ---------------------------------------------
 SKIP_SYNC="${MEMEM_SKIP_SYNC:-${CORTEX_SKIP_SYNC:-0}}"
@@ -229,6 +256,33 @@ export CORTEX_OBSIDIAN_VAULT="${CORTEX_OBSIDIAN_VAULT:-$MEMEM_VAULT}"
 if ! "$PYBIN" -c "from memem.capabilities import write_capabilities; write_capabilities()" >> "$BOOTSTRAP_LOG" 2>&1; then
     log "warning: capabilities probe failed — server will run without status banner"
 fi
+
+# ---- 6.5. Auto-mine existing Claude Code sessions (first run only) ----------
+# One-shot: if the user has prior Claude Code history, extract memories from it
+# in the background so session 2 already has warm context. Opt-out via
+# MEMEM_NO_AUTO_MINE=1. Idempotent via marker file.
+AUTO_MINE_MARKER="$MEMEM_DIR/.auto-mined"
+if [ ! -f "$AUTO_MINE_MARKER" ] && [ "${MEMEM_NO_AUTO_MINE:-0}" != "1" ]; then
+    CLAUDE_PROJECTS_DIR="$HOME/.claude/projects"
+    SESSION_COUNT=0
+    if [ -d "$CLAUDE_PROJECTS_DIR" ]; then
+        SESSION_COUNT=$(find "$CLAUDE_PROJECTS_DIR" -name "*.jsonl" -type f 2>/dev/null | wc -l | tr -d ' ')
+    fi
+    if [ "${SESSION_COUNT:-0}" -ge 5 ]; then
+        log "auto-mine: found $SESSION_COUNT past sessions — spawning --mine-all in background"
+        touch "$AUTO_MINE_MARKER"
+        nohup "$PYBIN" -m memem.server --mine-all >> "$MEMEM_DIR/auto-mine.log" 2>&1 &
+        disown 2>/dev/null || true
+    else
+        log "auto-mine: only $SESSION_COUNT past sessions (threshold 5) — skipping"
+        touch "$AUTO_MINE_MARKER"
+    fi
+elif [ "${MEMEM_NO_AUTO_MINE:-0}" = "1" ]; then
+    log "auto-mine: MEMEM_NO_AUTO_MINE=1 set — skipping"
+fi
+
+# Clear any stale error-surface file — we made it this far, so bootstrap succeeded.
+rm -f "$MEMEM_DIR/last-error.md" 2>/dev/null || true
 
 # ---- 7. Exec the server ------------------------------------------------------
 log "exec: $PYBIN -m memem.server $*"

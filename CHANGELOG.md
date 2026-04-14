@@ -10,6 +10,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
 
+## [0.8.0] - 2026-04-14
+
+### Changed — "quiet onboarding"
+Overhauls the new-user experience around a pull model: install → memem
+works silently → user types `/memem` when they want the welcome and
+status. No more wall-of-text injection into the first user prompt.
+
+- **Auto-mine past sessions on first install.** `bootstrap.sh` now checks
+  `~/.claude/projects/` on first run and, if you have ≥5 prior Claude Code
+  sessions, spawns `memem.server --mine-all` in the background via `nohup`.
+  One-shot, idempotent via `~/.memem/.auto-mined` marker. Converts new
+  users from cold-start (0 memories) to warm-start on day one.
+  **Opt-out:** `MEMEM_NO_AUTO_MINE=1`.
+- **No more welcome wall on first prompt.** `hooks/auto-recall.sh` used to
+  inject a ~40-line welcome (ASCII art + tool tutorials + Obsidian pitch +
+  mine-history prompt) into the first `UserPromptSubmit` of a zero-memory
+  session. That hijacked the user's actual first question. The hook now
+  stays silent on zero memories — users learn about memem via `/memem`.
+- **`/memem` is now the welcome surface.** Enriched the skill to show:
+  bootstrap error (if any), ASCII banner, live status, auto-mine progress,
+  how-it-works explainer, commands, MCP tools, and the optional-Obsidian
+  note. Pull model: user asks, gets everything in one place.
+- **Python auto-install.** If system `python3` is missing or older than
+  3.11, bootstrap now runs `uv python install 3.11` and uses that for
+  the plugin venv. No more hard bounces on Python 3.10.
+- **Bootstrap errors surface to chat.** On any non-zero exit, `die()`
+  writes `~/.memem/last-error.md` with the error, exit code, log path,
+  and a pointer to `/memem-doctor`. `/memem` reads this file and shows
+  it prominently at the top when present. Clears on successful bootstrap.
+
+### Migration
+No action required. Existing installs get the quiet-onboarding flow on
+next session. The `.auto-mined` marker starts empty, so existing users
+with prior sessions will get a one-time background mine on their first
+v0.8.0 session unless `MEMEM_NO_AUTO_MINE=1` is set.
+
 ## [0.7.1] - 2026-04-14
 
 ### Fixed
