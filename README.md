@@ -38,11 +38,6 @@ Use memem if:
 - You like local-first tools with zero vendor lock-in
 - You already use Obsidian (memem plugs straight into your vault)
 
-Skip memem if:
-- `CLAUDE.md` works fine for you and you don't want a background daemon
-- You need cloud-synced memory across machines (memem is local-only)
-- You're on Python < 3.11
-
 ## How is memem different from CLAUDE.md?
 
 `CLAUDE.md` is a single hand-edited file per project. memem gives you:
@@ -84,11 +79,16 @@ You work normally. The miner daemon runs silently in the background. When your s
 
 It saves durable knowledge, not session logs:
 
-- **Architecture decisions** with rationale ("we use RS256 JWTs because …")
-- **Conventions** ("tests go in `tests/` not `spec/`")
-- **Bug fixes you might forget** ("bcrypt.compare is async — must `await`")
-- **User preferences** ("prefer single commits, not stacked PRs")
-- **Known issues** ("JWT_SECRET defaults to 'secret' if unset — tracked in #123")
+- **Architecture decisions** with rationale ("we use RS256 JWTs because HS256 can't be verified by third parties without sharing the secret")
+- **Conventions** ("tests go in `tests/` not `spec/`", "commit messages use imperative mood", "never import from `internal/` outside its package")
+- **Bug fixes you might forget** ("`bcrypt.compare` is async — must `await`", "timezone math must use `dayjs.utc()` or DST shifts the result by an hour")
+- **User preferences** ("prefer single commits, not stacked PRs", "terse responses — no trailing summaries", "ask before running migrations in prod")
+- **Known issues & workarounds** ("`JWT_SECRET` defaults to `'secret'` if unset — tracked in #123", "pnpm install hangs on corporate VPN, use `--network-timeout=600000`")
+- **Environment & tooling facts** ("project uses Poetry, not pip", "CI runs on Node 20 but local defaults to 22 — pin with `nvm use`", "Redis must be running on :6380 not :6379")
+- **Project structure & invariants** ("auth middleware requires Redis", "all DB writes go through `repo/` layer, never raw SQL in handlers")
+- **Failure patterns & post-mortems** ("mocking the DB hid a broken migration last quarter — integration tests must hit a real DB", "don't ship on Fridays after the 2025-11 rollback incident")
+- **Third-party quirks** ("Stripe webhooks retry for 3 days — idempotency key is mandatory", "OpenAI streaming drops the final token if client closes early")
+- **Domain knowledge** ("a 'merchant' in our schema is what the legal team calls a 'counterparty'", "revenue is recognized at ship time, not order time")
 
 It does NOT save:
 
