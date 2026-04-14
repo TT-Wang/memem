@@ -436,9 +436,18 @@ def mine_session(jsonl_path: str) -> dict:
                     _update_memory(existing["id"], merged, insight["title"])
                     memories_merged += 1
                     _log_event("merge", existing["id"], merged_with=insight["title"])
-                except (TransientMiningError, ValueError) as exc:
-                    # Merge failed — skip this insight entirely, don't duplicate
-                    log.warning("Merge failed, skipping insight: %s", exc)
+                except TransientMiningError as exc:
+                    # Transient failure — propagate so the outer session
+                    # finishes in STATUS_FAILED and the miner retries it
+                    # on the next cycle. Previously this was silently
+                    # dropped (v0.10.2 fix: insight loss on transient
+                    # Haiku errors).
+                    log.warning("Merge transient failure, will retry session: %s", exc)
+                    raise
+                except ValueError as exc:
+                    # Genuine validation failure (junk content, security
+                    # threat) — drop the insight, don't retry.
+                    log.warning("Merge validation failed, skipping insight: %s", exc)
                 continue
 
             # Score < 0.3 or merge failed — save as new
@@ -501,14 +510,20 @@ def mine_session(jsonl_path: str) -> dict:
         raise FatalMiningError(f"unexpected mining failure: {exc}") from exc
 
 
-def mine_all() -> dict:
+def mine_all(bypass_gate: bool = True) -> dict:
+    """Mine every settled session.
+
+    ``bypass_gate`` defaults to True for this entry point because the primary
+    caller (``--mine-all`` CLI) exists specifically to mine pre-install history.
+    Daemon callers that want to respect the install-time gate can pass False.
+    """
     states = load_mined_session_state()
     total = 0
     newly_mined = 0
     already_mined = 0
     failed_sessions = 0
 
-    for path in find_settled_sessions(states):
+    for path in find_settled_sessions(states, bypass_gate=bypass_gate):
         total += 1
         try:
             result = mine_session(str(path))

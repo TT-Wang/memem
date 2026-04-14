@@ -25,6 +25,7 @@ from memem.models import MEMEM_DIR
 from memem.session_state import (
     MINED_SESSIONS_FILE,
     SETTLE_SECONDS,
+    _ensure_installed_at,
     find_settled_sessions,
     load_mined_session_state,
 )
@@ -208,6 +209,11 @@ def _run_loop():
         SETTLE_SECONDS,
         MINED_SESSIONS_FILE,
     )
+    # Establish the install-time gate on first daemon run so subsequent
+    # scans only mine sessions created after the daemon started. v0.10.2:
+    # _get_installed_at is now read-only, so we have to create the marker
+    # explicitly here instead of relying on lazy-creation.
+    _ensure_installed_at()
 
     while True:
         try:

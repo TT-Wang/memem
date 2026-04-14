@@ -97,7 +97,11 @@ def context_assemble(query: str, project: str = "default") -> str:
         log.info("context_assemble: claude CLI unavailable, returning raw materials (degraded)")
         return materials if materials else (playbook_content or "")
 
-    # Haiku assembles the brief
+    # Haiku assembles the brief. On any failure — subprocess exception,
+    # non-zero exit, empty stdout — fall back to the raw `materials` we
+    # already collected locally (playbook + memories + transcript search).
+    # v0.10.2 fix: previously these branches returned only playbook_content,
+    # silently dropping memories and transcripts when Haiku was unstable.
     try:
         result = subprocess.run(
             ["claude", "-p", "--model", "haiku", "--tools", "", "--system-prompt", _ASSEMBLE_SYSTEM],
@@ -107,10 +111,16 @@ def context_assemble(query: str, project: str = "default") -> str:
             timeout=120,
         )
     except Exception:
-        return playbook_content or ""
+        log.info("context_assemble: claude subprocess failed, returning raw materials")
+        return materials or playbook_content or ""
 
     if result.returncode != 0 or not result.stdout.strip():
-        return playbook_content or ""
+        log.info(
+            "context_assemble: claude returned rc=%s empty=%s, returning raw materials",
+            result.returncode,
+            not result.stdout.strip(),
+        )
+        return materials or playbook_content or ""
 
     return result.stdout.strip()
 

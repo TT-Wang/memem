@@ -500,6 +500,14 @@ def smart_recall(prompt: str, scope_id: str = "default") -> str:
         return memory_recall(prompt, scope_id=scope_id, limit=10)
 
     picked_files = _load_obsidian_memories(picked_ids)
+
+    # v0.10.2 fix: apply scope_id filter here. Previously smart_recall only
+    # respected scope_id in the fallback branches — the Haiku-driven path
+    # loaded the global index, picked from it, and returned unfiltered
+    # results, leaking cross-project memories for scoped queries.
+    if scope_id and scope_id != "default":
+        picked_files = [m for m in picked_files if m.get("project") == scope_id]
+
     if not picked_files:
         return memory_recall(prompt, scope_id=scope_id, limit=10)
 

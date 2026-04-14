@@ -2,12 +2,21 @@
 # memem auto-recall hook — topic-shift detection on UserPromptSubmit.
 #
 # Flow:
-#   1. Load .last-brief.json (keyword set from previous message)
+#   1. Load .last-brief.json (keyword set from last SUCCESSFUL assembly)
 #   2. Compute keyword overlap with current message
-#   3. If overlap < MEMEM_TOPIC_SHIFT_THRESHOLD (default 0.30), re-fire assembly
-#   4. Always update .last-brief.json with current message keywords
+#   3. If overlap < MEMEM_TOPIC_SHIFT_THRESHOLD (default 0.30), try assembly
+#   4. ONLY on successful assembly, update .last-brief.json
+#   5. On failure/empty, leave .last-brief.json untouched so the next
+#      prompt with similar keywords will retry — never silently starve
 #
 # Silent (empty context) when topic is unchanged.
+#
+# v0.10.2 fixes:
+#   - Move .last-brief.json write AFTER successful assembly (was writing
+#     before, which caused silent context starvation after any transient
+#     Haiku failure)
+#   - Pass the user message via tempfile instead of argv (was hitting
+#     ARG_MAX on large pasted-log prompts)
 
 set -euo pipefail
 
@@ -17,26 +26,26 @@ mkdir -p "$MEMEM_DIR"
 # Read hook input from stdin
 INPUT=$(cat)
 
-# Extract session_id and message
-SESSION_ID=$(echo "$INPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('session_id',''))" 2>/dev/null || echo "")
-MESSAGE=$(echo "$INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('message', d.get('query','')))" 2>/dev/null || echo "")
+# Write raw input to a tempfile — Python helper reads from this, avoiding
+# ARG_MAX limits on huge first prompts (pasted logs, large code blocks).
+INPUT_FILE=$(mktemp)
+trap 'rm -f "$INPUT_FILE"' EXIT
+printf '%s' "$INPUT" > "$INPUT_FILE"
 
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
 LAST_BRIEF="${MEMEM_DIR}/.last-brief.json"
 TOPIC_LOG="${MEMEM_DIR}/topic-shifts.log"
 
-# Inline Python: keyword overlap computation + conditional assembly
-python3 - "$PLUGIN_ROOT" "$SESSION_ID" "$MESSAGE" "$LAST_BRIEF" "$TOPIC_LOG" "$MEMEM_DIR" << 'HOOKPY'
+python3 - "$PLUGIN_ROOT" "$INPUT_FILE" "$LAST_BRIEF" "$TOPIC_LOG" "$MEMEM_DIR" << 'HOOKPY'
 import sys, json, os, subprocess, re
 from pathlib import Path
 from datetime import datetime
 
 plugin_root = sys.argv[1]
-session_id  = sys.argv[2]
-message     = sys.argv[3]
-last_brief  = Path(sys.argv[4])
-topic_log   = Path(sys.argv[5])
-memem_dir   = Path(sys.argv[6])
+input_file  = Path(sys.argv[2])
+last_brief  = Path(sys.argv[3])
+topic_log   = Path(sys.argv[4])
+memem_dir   = Path(sys.argv[5])
 
 STOPWORDS = {
     "a","an","the","is","are","was","were","be","been","being",
@@ -61,6 +70,15 @@ def tokenize(text: str) -> set:
 def emit_empty():
     print(EMPTY_RESPONSE)
     sys.exit(0)
+
+# Parse hook input from the tempfile (avoids argv size limits)
+try:
+    hook = json.loads(input_file.read_text())
+except Exception:
+    emit_empty()
+
+session_id = hook.get("session_id", "") or ""
+message = hook.get("message", hook.get("query", "")) or ""
 
 # If no plugin root, we cannot assemble — emit empty
 if not plugin_root or plugin_root == '${CLAUDE_PLUGIN_ROOT}':
@@ -97,32 +115,12 @@ else:
 
 threshold = float(os.environ.get("MEMEM_TOPIC_SHIFT_THRESHOLD", "0.3"))
 
-# Update .last-brief.json regardless of trigger
-try:
-    last_brief.parent.mkdir(parents=True, exist_ok=True)
-    last_brief.write_text(json.dumps({
-        "session_id": session_id,
-        "keywords": sorted(current_keywords),
-        "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-    }))
-except Exception:
-    pass
-
-# If overlap is sufficient, stay silent
+# If overlap is sufficient, stay silent WITHOUT updating last-brief
+# (nothing to update — we're continuing the same topic)
 if not is_first_message and overlap >= threshold:
     emit_empty()
 
 # --- Topic shift triggered (or first message) ---
-
-# Log the shift
-try:
-    topic_log.parent.mkdir(parents=True, exist_ok=True)
-    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-    snippet = message[:100].replace('"', "'")
-    with topic_log.open("a") as fh:
-        fh.write(f'{ts} session={session_id} overlap={overlap:.2f} msg="{snippet}"\n')
-except Exception:
-    pass
 
 # Run context assembly
 assembled = ""
@@ -136,11 +134,35 @@ if plugin_root:
         )
         if result.returncode == 0 and result.stdout.strip():
             assembled = result.stdout.strip()
-    except Exception as exc:
+    except Exception:
         pass
 
+# If assembly failed or returned empty, leave last-brief UNTOUCHED so the
+# next prompt with similar keywords will retry. Silent starvation was the
+# bug we fixed in v0.10.2 — previously .last-brief.json was written before
+# this check, causing any transient Haiku failure to suppress future recall.
 if not assembled:
     emit_empty()
+
+# Assembly succeeded — NOW commit the keyword set + log the shift
+try:
+    last_brief.parent.mkdir(parents=True, exist_ok=True)
+    last_brief.write_text(json.dumps({
+        "session_id": session_id,
+        "keywords": sorted(current_keywords),
+        "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }))
+except Exception:
+    pass
+
+try:
+    topic_log.parent.mkdir(parents=True, exist_ok=True)
+    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    snippet = message[:100].replace('"', "'").replace('\n', ' ').replace('\r', '')
+    with topic_log.open("a") as fh:
+        fh.write(f'{ts} session={session_id} overlap={overlap:.2f} msg="{snippet}"\n')
+except Exception:
+    pass
 
 print(json.dumps({
     "hookSpecificOutput": {

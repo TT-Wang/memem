@@ -130,15 +130,34 @@ INSTALLED_AT_FILE = MEMEM_DIR / ".installed_at"
 
 
 def _get_installed_at() -> float:
-    """Get the timestamp when Cortex was installed. Returns 0 if mine-all mode."""
+    """Read the install-time gate. Returns 0.0 if missing — does NOT recreate.
+
+    v0.10.2 fix: this used to lazily recreate the marker on read, which broke
+    `--mine-all` (the CLI would clear the marker, then the immediate scan would
+    recreate it with the current timestamp and filter out all older sessions).
+    Callers that need to ensure the marker exists must call ``_ensure_installed_at``
+    explicitly.
+    """
     if not INSTALLED_AT_FILE.exists():
-        # First run — record install time
-        MEMEM_DIR.mkdir(parents=True, exist_ok=True)
-        INSTALLED_AT_FILE.write_text(str(time.time()))
+        return 0.0
     try:
         return float(INSTALLED_AT_FILE.read_text().strip())
     except (OSError, ValueError):
         return 0.0
+
+
+def _ensure_installed_at() -> float:
+    """Create the install-time gate if missing, return its timestamp.
+
+    Called by bootstrap / first-daemon-boot paths that need to establish
+    the "only mine sessions after this moment" gate for normal operation.
+    Explicitly separate from the read-only ``_get_installed_at`` so
+    ``--mine-all`` can clear the marker without it being silently rebuilt.
+    """
+    if not INSTALLED_AT_FILE.exists():
+        MEMEM_DIR.mkdir(parents=True, exist_ok=True)
+        INSTALLED_AT_FILE.write_text(str(time.time()))
+    return _get_installed_at()
 
 
 def clear_installed_at():
@@ -146,11 +165,21 @@ def clear_installed_at():
     INSTALLED_AT_FILE.unlink(missing_ok=True)
 
 
-def find_settled_sessions(states: dict[str, dict] | None = None) -> list[Path]:
+def find_settled_sessions(
+    states: dict[str, dict] | None = None,
+    bypass_gate: bool = False,
+) -> list[Path]:
+    """Find session JSONLs settled long enough to mine.
+
+    ``bypass_gate=True`` skips the install-time filter entirely — used by
+    ``--mine-all`` to process pre-install history. Default behavior respects
+    the marker if present, but does NOT recreate it on first read (callers
+    that want the gate must call ``_ensure_installed_at`` first).
+    """
     now = time.time()
     states = states or {}
     settled: list[tuple[int, Path]] = []
-    installed_at = _get_installed_at()
+    installed_at = 0.0 if bypass_gate else _get_installed_at()
 
     for sessions_dir in SESSIONS_DIRS:
         if not sessions_dir.exists():

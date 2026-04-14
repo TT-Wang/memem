@@ -10,6 +10,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
 
+## [0.10.2] - 2026-04-14
+
+### Fixed — second-pass code review
+
+Six more bugs found in a second code review of v0.10.0/v0.10.1. All but
+one are pre-existing (not introduced by the layered-recall overhaul),
+but one of them — `--mine-all` being silently broken — meant our
+v0.10.0 migration advice ("run `--rebuild-playbooks` to reclassify")
+mined nothing at all for affected users.
+
+**High severity:**
+
+- **`--mine-all` was a no-op for historical sessions.** `cli.py`
+  cleared the install-time gate marker, then immediately called
+  `mine_all()` → `find_settled_sessions()` → `_get_installed_at()`,
+  which lazily recreated the marker with the current timestamp. The
+  subsequent filter then rejected every pre-install session. Fix:
+  `_get_installed_at()` is now read-only and returns `0.0` when the
+  marker is absent. A new `_ensure_installed_at()` is the only path
+  that creates the marker (called explicitly by `miner_daemon._run_loop`
+  on first startup). `find_settled_sessions()` accepts a `bypass_gate`
+  parameter; `mine_all()` defaults it to `True` for the CLI entry point.
+- **Topic-shift detection silent-starvation after transient Haiku
+  failure.** `auto-recall.sh` wrote `.last-brief.json` BEFORE attempting
+  context assembly. If assembly then failed transiently, the next prompt
+  with similar keywords would see the updated keyword set, compute high
+  overlap, and skip assembly entirely — silently starving Claude of
+  context for the rest of the session. Fix: write `.last-brief.json`
+  only after a successful assembly. On failure, leave the last-brief
+  untouched so the next prompt retries.
+- **Transient merge failures silently dropped with session marked
+  `STATUS_COMPLETE`.** `mining.py` caught `TransientMiningError` in
+  the merge path, logged a warning, and continued — then marked the
+  session complete so the miner would never retry. Permanent insight
+  loss on transient Haiku errors. Fix: `TransientMiningError` now
+  propagates out of the merge path so the outer session finishes in
+  `STATUS_FAILED` and is retried. `ValueError` (genuine junk content
+  or security threats) is still dropped — those are not retryable.
+
+**Medium severity:**
+
+- **`context_assemble` dropped memories+transcripts on Haiku failure.**
+  On subprocess exception or empty result, the function returned
+  `playbook_content or ""`, throwing away memories and transcript
+  search results that had already been fetched. Fix: fall back to the
+  raw `materials` (playbook + memories + transcript), matching the
+  degraded-mode branch's behavior.
+- **`smart_recall(scope_id=...)` leaked cross-project memories.** The
+  Haiku-driven path loaded the global memory index, asked Haiku to pick
+  from it, and returned the chosen memories without any scope filter.
+  `scope_id` was only honored in the fallback branches. Fix: apply the
+  scope filter to `picked_files` after `_load_obsidian_memories`.
+
+**Low severity:**
+
+- **`auto-recall.sh` passed user message as argv — ARG_MAX exposure.**
+  Large pasted prompts (huge logs, code blocks) could hit the ~2 MB
+  argv size limit and silently fail. Fix: write the raw hook input to
+  a tempfile and pass the path, matching the pattern already used in
+  `session-start.sh` and `pre-tool-use.sh`.
+
+### Tests
+
+- 6 new regression tests in `tests/test_v010_fixes.py` — one per bug,
+  each failing before the fix and passing after. Total suite: 79 tests,
+  ruff clean, mypy compatible.
+
+### User impact
+
+If you ran `--mine-all` on v0.10.0 expecting historical sessions to be
+processed, run it again on v0.10.2 — this time it will actually work.
+Your vault's existing memories are not affected; the re-run just fills
+in what was silently skipped.
+
 ## [0.10.1] - 2026-04-14
 
 ### Fixed — v0.10.0 code-review findings
