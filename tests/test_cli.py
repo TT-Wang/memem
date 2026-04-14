@@ -23,7 +23,7 @@ def test_status_empty_vault(tmp_vault, tmp_cortex_dir, capsys, monkeypatch):
     monkeypatch.setattr(subprocess, "run",
         lambda *a, **k: SimpleNamespace(stdout="not running", stderr="", returncode=0))
     out = _dispatch(["--status"], capsys)
-    assert "Cortex Status" in out.out
+    assert "memem Status" in out.out
     assert "0 active" in out.out
     assert "not running" in out.out
 

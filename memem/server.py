@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Cortex MCP Server — persistent memory for Claude Code.
+memem MCP Server — persistent memory for Claude Code.
 
 This file is the thin runtime entrypoint. Core behaviour lives in the split
 modules (obsidian_store, recall, transcripts, mining, operations, assembly, cli).
@@ -77,7 +77,7 @@ def _build_mcp():
             ),
         ] = 10,
     ) -> str:
-        """Search Cortex memories for durable knowledge relevant to a query.
+        """Search memem memories for durable knowledge relevant to a query.
 
         Use this when you need to recall prior decisions, conventions, bug fixes,
         user preferences, or lessons learned from past Claude Code sessions. It
@@ -88,13 +88,13 @@ def _build_mcp():
         Behaviour:
           - Read-only. Does not modify any memory, index, or sidecar file.
             Only side effect is a bump to the access-count telemetry sidecar
-            (~/.cortex/telemetry.json), which influences future ranking.
-          - No authentication required. Cortex is local-first; there are no
+            (~/.memem/telemetry.json), which influences future ranking.
+          - No authentication required. memem is local-first; there are no
             credentials, tokens, or API keys.
           - No rate limits. Typical latency is under 100ms on corpora up to
             ~10k memories; pathological queries can take up to ~500ms.
-          - Data access scope: reads from ~/obsidian-brain/cortex/memories/
-            and ~/.cortex/search.db. Nothing leaves the local machine.
+          - Data access scope: reads from ~/obsidian-brain/memem/memories/
+            and ~/.memem/search.db. Nothing leaves the local machine.
           - Idempotent: calling twice with the same query returns the same
             results (modulo the access-count telemetry bump).
           - Failure modes: returns "No memories found for: <query>" on empty
@@ -156,7 +156,7 @@ def _build_mcp():
                     "Project scope for the memory. \"default\" for cross-project "
                     "global memories (user preferences, general lessons). A "
                     "specific project name for project-scoped memories (e.g. "
-                    "\"cortex-plugin\", \"my-webapp\")."
+                    "\"memem\", \"my-webapp\")."
                 ),
             ),
         ] = "default",
@@ -180,9 +180,9 @@ def _build_mcp():
 
         Behaviour:
           - MUTATION. Writes a new markdown file under
-            ~/obsidian-brain/cortex/memories/, appends to the FTS5 index
-            (~/.cortex/search.db), updates ~/obsidian-brain/cortex/_index.md,
-            and writes an append-only entry to ~/.cortex/events.jsonl.
+            ~/obsidian-brain/memem/memories/, appends to the FTS5 index
+            (~/.memem/search.db), updates ~/obsidian-brain/memem/_index.md,
+            and writes an append-only entry to ~/.memem/events.jsonl.
             Writes are atomic (tmp + fsync + os.replace) and fcntl-locked.
           - No authentication required. Local-first; no credentials.
           - No rate limits. Typical latency 50-200ms including the security
@@ -246,7 +246,7 @@ def _build_mcp():
     ) -> str:
         """List every memory in a scope, with counts and source breakdown.
 
-        Use this when you want to see the full inventory of what Cortex has
+        Use this when you want to see the full inventory of what memem has
         stored — e.g. to audit which projects have the most memories, to check
         if a specific memory you wrote earlier is still present, or to find a
         memory whose exact title you remember but whose keywords are ambiguous.
@@ -256,7 +256,7 @@ def _build_mcp():
           - No authentication required.
           - No rate limits. Latency scales linearly with memory count;
             typical sub-second on corpora up to ~10k.
-          - Data access scope: reads ~/obsidian-brain/cortex/memories/
+          - Data access scope: reads ~/obsidian-brain/memem/memories/
             markdown files via filesystem glob. Nothing leaves the machine.
           - Idempotent and deterministic for a given filesystem state.
           - Failure modes: returns "No memories in scope: <scope>" for an
@@ -315,7 +315,7 @@ def _build_mcp():
     ) -> str:
         """Bulk-import memories from a file, directory, or chat export.
 
-        Use this to seed Cortex with existing notes, CLAUDE.md content,
+        Use this to seed memem with existing notes, CLAUDE.md content,
         documentation excerpts, or chat logs you want to make searchable.
         Each imported item runs through the same security scan and deduplication
         as `memory_save`, so clean imports even from messy sources.
@@ -454,24 +454,24 @@ def _build_mcp():
     ) -> str:
         """Assemble a query-tailored context briefing from all available knowledge.
 
-        This is the highest-value Cortex tool. It gathers the relevant subset
+        This is the highest-value memem tool. It gathers the relevant subset
         of memories, the project's playbook, and related session transcripts,
         then uses Claude Haiku to synthesise a focused markdown briefing for
         the given query. The result is a ready-to-read summary, NOT a raw
         memory dump — usually 300-800 tokens of distilled relevant knowledge.
 
         Behaviour:
-          - Read-only with respect to the Cortex memory store. Bumps access
+          - Read-only with respect to the memem memory store. Bumps access
             telemetry on memories it reads (same as `memory_recall`).
-          - No authentication required by Cortex itself. The optional
+          - No authentication required by memem itself. The optional
             Haiku synthesis step shells out to the local `claude` CLI,
             which may use Claude Code credentials the user already has
-            signed in — Cortex does not handle those credentials directly.
+            signed in — memem does not handle those credentials directly.
           - Rate limits: depend on the `claude` CLI backend in the healthy
             path. In degraded mode (claude CLI missing), there are no
-            rate limits at all — Cortex just returns raw materials.
-          - Data access scope: reads ~/obsidian-brain/cortex/memories/,
-            ~/obsidian-brain/cortex/playbooks/<project>.md, ~/.cortex/search.db,
+            rate limits at all — memem just returns raw materials.
+          - Data access scope: reads ~/obsidian-brain/memem/memories/,
+            ~/obsidian-brain/memem/playbooks/<project>.md, ~/.memem/search.db,
             and ~/.claude/projects/ transcripts. If the `claude` CLI is
             invoked, the gathered materials (up to 50KB) are sent to Haiku
             via that subprocess — which in turn sends them to Anthropic's

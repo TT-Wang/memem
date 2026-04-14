@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
-mkdir -p ~/.cortex/logs
+# Prefer MEMEM_DIR, fall back to legacy CORTEX_DIR for users mid-migration.
+MEMEM_DIR="${MEMEM_DIR:-${CORTEX_DIR:-$HOME/.memem}}"
+mkdir -p "$MEMEM_DIR/logs"
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
-LOG_FILE=~/.cortex/logs/mine-cron.log
+LOG_FILE="$MEMEM_DIR/logs/mine-cron.log"
 echo "[$TIMESTAMP] Starting mine-all" >> "$LOG_FILE"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"

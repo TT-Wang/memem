@@ -2,6 +2,14 @@
 
 **Persistent, self-evolving memory for Claude Code.** Stop re-explaining your project every session.
 
+<!--
+The Glama badge URL below intentionally uses the legacy `cortex-plugin`
+slug. Glama listing slugs are fixed-once-created and the project was
+renamed cortex → memem in v0.7.0. The badge keeps rendering A-tier under
+the old slug via GitHub's repo-rename redirect. Re-listing under the
+new slug requires manual coordination via https://glama.ai/discord.
+DO NOT "fix" this URL — `glama.ai/mcp/servers/TT-Wang/memem` returns 404.
+-->
 [![CI](https://github.com/TT-Wang/memem/actions/workflows/ci.yml/badge.svg)](https://github.com/TT-Wang/memem/actions/workflows/ci.yml) [![memem MCP server](https://glama.ai/mcp/servers/TT-Wang/cortex-plugin/badges/score.svg?v=3)](https://glama.ai/mcp/servers/TT-Wang/cortex-plugin) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
 > For LLM/AI tool discovery, see [llms.txt](./llms.txt).

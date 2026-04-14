@@ -12,6 +12,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BOOTSTRAP = REPO_ROOT / "bootstrap.sh"
 
@@ -63,6 +65,12 @@ def test_bootstrap_writes_capabilities(tmp_path):
     assert data["writable_state_dir"] is True  # tmp_path is always writable
 
 
+@pytest.mark.skipif(
+    os.geteuid() == 0,
+    reason="POSIX file permissions don't restrict root — the canary write "
+    "succeeds even on a 0555 dir, so this test cannot meaningfully run as root. "
+    "It still runs in normal user CI (GitHub Actions) where this assertion holds.",
+)
 def test_bootstrap_refuses_unwritable_state_dir(tmp_path):
     """Bootstrap must hard-fail (exit 13) when the state dir is not writable."""
     # Create a read-only parent so mkdir will succeed but canary will fail

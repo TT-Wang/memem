@@ -185,7 +185,7 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         projects = len(set(m.get("project", "general") for m in all_mems))
         with_related = sum(1 for m in all_mems if m.get("related"))
 
-        print("Cortex Status")
+        print("memem Status")
         print("=" * 40)
         print(f"  Vault:     {OBSIDIAN_VAULT}")
         print(f"  Data:      {MEMEM_DIR}")
