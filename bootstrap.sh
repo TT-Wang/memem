@@ -257,6 +257,32 @@ if ! "$PYBIN" -c "from memem.capabilities import write_capabilities; write_capab
     log "warning: capabilities probe failed — server will run without status banner"
 fi
 
+# ---- 6.5. Grandfather existing users into the opt-in miner ------------------
+# v0.9.0 made the miner strictly opt-in. For users upgrading from v0.8.x or
+# earlier who were already running the miner, we don't want the upgrade to
+# silently kill their background mining. If we see any signal that this user
+# was already using memem, auto-create the opt-in marker so behaviour is
+# preserved. Brand-new installs have none of these signals and still get the
+# clean "choose your mining mode" flow via /memem.
+OPT_IN_MARKER="$MEMEM_DIR/.miner-opted-in"
+if [ ! -f "$OPT_IN_MARKER" ]; then
+    GRANDFATHER=0
+    # Signal 1: miner pid file exists (daemon was running)
+    [ -f "$MEMEM_DIR/miner.pid" ] && GRANDFATHER=1
+    # Signal 2: user migrated from legacy cortex install
+    [ -f "$MEMEM_DIR/.migrated_from_cortex" ] && GRANDFATHER=1
+    # Signal 3: vault already has at least one mined memory
+    if [ "$GRANDFATHER" = "0" ] && [ -d "$MEMEM_VAULT/memem/memories" ]; then
+        if find "$MEMEM_VAULT/memem/memories" -maxdepth 1 -name "*.md" -type f 2>/dev/null | head -1 | grep -q .; then
+            GRANDFATHER=1
+        fi
+    fi
+    if [ "$GRANDFATHER" = "1" ]; then
+        log "grandfathering existing user — creating miner-opted-in marker"
+        touch "$OPT_IN_MARKER" 2>/dev/null || true
+    fi
+fi
+
 # Clear any stale error-surface file — we made it this far, so bootstrap succeeded.
 rm -f "$MEMEM_DIR/last-error.md" 2>/dev/null || true
 

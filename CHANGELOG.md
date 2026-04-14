@@ -10,6 +10,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
 
+## [0.9.1] - 2026-04-14
+
+### Fixed
+- **Grandfather existing users into opt-in mining.** v0.9.0 made the miner
+  strictly opt-in via `~/.memem/.miner-opted-in`, but existing users
+  upgrading from v0.8.x had their miners silently go idle on next boot
+  because they had no marker. Bootstrap now creates the marker automatically
+  on upgrade when any of these signals are present:
+  - `~/.memem/miner.pid` exists (daemon was running)
+  - `~/.memem/.migrated_from_cortex` exists (legacy install)
+  - The vault has at least one mined memory
+  Brand-new installs still get the clean opt-in flow via `/memem`.
+
 ## [0.9.0] - 2026-04-14
 
 ### Changed — "opt-in mining"
