@@ -18,6 +18,27 @@ from memem.storage import _register_server_pid
 def dispatch_cli(argv: list[str], mcp) -> None:
     cmd = argv[1] if len(argv) >= 2 else None
 
+    if cmd == "--compact-index":
+        from memem.models import LAYER_L0
+        from memem.obsidian_store import _obsidian_memories
+        from memem.recall import _format_compact_index_line
+        memories = _obsidian_memories()
+        l0 = [m for m in memories if m.get("layer", 2) == LAYER_L0]
+        others = [m for m in memories if m.get("layer", 2) != LAYER_L0]
+        # Print L0 full content first
+        if l0:
+            print("## Session memory — always-loaded (L0)\n")
+            for mem in l0:
+                print(f"### {mem.get('title', 'Untitled')}")
+                print(mem.get("essence", "") or mem.get("full_record", ""))
+                print()
+        # Then compact index of L1-L3
+        if others:
+            print(f"## Memory index ({len(others)} memories, use memory_get to drill)\n")
+            for mem in others:
+                print(_format_compact_index_line(mem))
+        return
+
     if cmd == "--recall-smart":
         query = " ".join(argv[2:]) if len(argv) >= 3 else ""
         print(smart_recall(query) if query else "No query provided.")

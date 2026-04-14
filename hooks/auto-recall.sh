@@ -1,207 +1,151 @@
 #!/usr/bin/env bash
-# memem auto-recall hook — injects memory index into context.
-# Fires on UserPromptSubmit. Only runs once per session (first message).
+# memem auto-recall hook — topic-shift detection on UserPromptSubmit.
 #
-# Flow: inject _index.md → assistant reads it → calls memory tools if needed
+# Flow:
+#   1. Load .last-brief.json (keyword set from previous message)
+#   2. Compute keyword overlap with current message
+#   3. If overlap < MEMEM_TOPIC_SHIFT_THRESHOLD (default 0.30), re-fire assembly
+#   4. Always update .last-brief.json with current message keywords
+#
+# Silent (empty context) when topic is unchanged.
 
 set -euo pipefail
 
 MEMEM_DIR="${MEMEM_DIR:-${CORTEX_DIR:-$HOME/.memem}}"
-SESSION_MARKER_DIR="$MEMEM_DIR/.sessions"
-mkdir -p "$SESSION_MARKER_DIR"
+mkdir -p "$MEMEM_DIR"
 
 # Read hook input from stdin
 INPUT=$(cat)
 
-# Extract session_id
+# Extract session_id and message
 SESSION_ID=$(echo "$INPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('session_id',''))" 2>/dev/null || echo "")
+MESSAGE=$(echo "$INPUT" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('message', d.get('query','')))" 2>/dev/null || echo "")
 
-# Only run on first message of session
-MARKER="$SESSION_MARKER_DIR/$SESSION_ID"
-if [ -n "$SESSION_ID" ] && [ -f "$MARKER" ]; then
-  exit 0
-fi
+PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
+LAST_BRIEF="${MEMEM_DIR}/.last-brief.json"
+TOPIC_LOG="${MEMEM_DIR}/topic-shifts.log"
 
-# Clean up old session markers (older than 7 days)
-find "$SESSION_MARKER_DIR" -type f -mtime +7 -delete 2>/dev/null || true
-
-# Inject the memory index directly — let the assistant decide what to read deeper
-VAULT="${MEMEM_OBSIDIAN_VAULT:-${CORTEX_OBSIDIAN_VAULT:-$HOME/obsidian-brain}}"
-# Prefer new layout (~/obsidian-brain/memem/) but fall back to legacy (~/.../cortex/)
-if [ -f "$VAULT/memem/_index.md" ]; then
-  INDEX="$VAULT/memem/_index.md"
-  VAULT_SUBDIR="memem"
-elif [ -f "$VAULT/cortex/_index.md" ]; then
-  INDEX="$VAULT/cortex/_index.md"
-  VAULT_SUBDIR="cortex"
-else
-  INDEX="$VAULT/memem/_index.md"
-  VAULT_SUBDIR="memem"
-fi
-
-if [ -f "$INDEX" ] || [ -d "$VAULT/$VAULT_SUBDIR/memories" ]; then
-  # Write INPUT to temp file to avoid argv size limits on large prompts
-  INPUT_FILE=$(mktemp)
-  trap 'rm -f "$INPUT_FILE"' EXIT
-  echo "$INPUT" > "$INPUT_FILE"
-
-  python3 - "$INDEX" "$VAULT" "$INPUT_FILE" "$VAULT_SUBDIR" "$MEMEM_DIR" << 'HOOKPY'
-import sys, json, subprocess, os
+# Inline Python: keyword overlap computation + conditional assembly
+python3 - "$PLUGIN_ROOT" "$SESSION_ID" "$MESSAGE" "$LAST_BRIEF" "$TOPIC_LOG" "$MEMEM_DIR" << 'HOOKPY'
+import sys, json, os, subprocess, re
 from pathlib import Path
+from datetime import datetime
 
-index_path = sys.argv[1]
-vault = sys.argv[2]
-input_file = sys.argv[3] if len(sys.argv) > 3 else ""
-vault_subdir = sys.argv[4] if len(sys.argv) > 4 else "memem"
-memem_dir = sys.argv[5] if len(sys.argv) > 5 else os.path.expanduser("~/.memem")
+plugin_root = sys.argv[1]
+session_id  = sys.argv[2]
+message     = sys.argv[3]
+last_brief  = Path(sys.argv[4])
+topic_log   = Path(sys.argv[5])
+memem_dir   = Path(sys.argv[6])
 
-# Read hook input from temp file
-input_data = ""
-if input_file:
+STOPWORDS = {
+    "a","an","the","is","are","was","were","be","been","being",
+    "do","does","did","have","has","had",
+    "i","you","he","she","it","we","they",
+    "this","that","these","those",
+    "and","or","but","not",
+    "to","of","in","on","at","for","with","by","as","from",
+}
+
+EMPTY_RESPONSE = json.dumps({
+    "hookSpecificOutput": {
+        "hookEventName": "UserPromptSubmit",
+        "additionalContext": ""
+    }
+})
+
+def tokenize(text: str) -> set:
+    words = re.split(r'\W+', text.lower())
+    return {w for w in words if w and w not in STOPWORDS and len(w) > 1}
+
+def emit_empty():
+    print(EMPTY_RESPONSE)
+    sys.exit(0)
+
+# If no plugin root, we cannot assemble — emit empty
+if not plugin_root or plugin_root == '${CLAUDE_PLUGIN_ROOT}':
+    emit_empty()
+
+if not message:
+    emit_empty()
+
+current_keywords = tokenize(message)
+
+# Load last brief state
+last_data = {}
+if last_brief.exists():
     try:
-        input_data = Path(input_file).read_text()
-    except OSError:
-        pass
+        last_data = json.loads(last_brief.read_text())
+    except Exception:
+        last_data = {}
 
-# Resolve plugin root for PYTHONPATH (package runs via `python -m memem.server`)
-plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT", "")
-if not plugin_root:
-    # No sensible fallback — without plugin root we cannot locate the package.
-    # Surface it on stderr instead of silently guessing the wrong directory.
-    print("memem auto-recall: CLAUDE_PLUGIN_ROOT not set, skipping assembly", file=sys.stderr)
-    plugin_root = None
+last_keywords = set(last_data.get("keywords", []))
+last_session  = last_data.get("session_id", "")
 
-# Extract user message from hook input
-message = ""
+# Compute overlap ratio
+if last_keywords and last_session == session_id:
+    smaller = min(len(current_keywords), len(last_keywords))
+    if smaller > 0:
+        overlap = len(current_keywords & last_keywords) / smaller
+    else:
+        overlap = 0.0
+    is_first_message = False
+else:
+    # Different session or no prior data — always trigger
+    overlap = 0.0
+    is_first_message = True
+
+threshold = float(os.environ.get("MEMEM_TOPIC_SHIFT_THRESHOLD", "0.3"))
+
+# Update .last-brief.json regardless of trigger
 try:
-    hook_input = json.loads(input_data) if input_data else {}
-    message = hook_input.get("message", hook_input.get("query", ""))
-except (json.JSONDecodeError, TypeError):
+    last_brief.parent.mkdir(parents=True, exist_ok=True)
+    last_brief.write_text(json.dumps({
+        "session_id": session_id,
+        "keywords": sorted(current_keywords),
+        "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }))
+except Exception:
     pass
 
-# Check if memories exist before calling expensive assembly
-memories_dir = Path(vault) / vault_subdir / "memories"
-memory_count = len(list(memories_dir.glob("*.md"))) if memories_dir.exists() else 0
+# If overlap is sufficient, stay silent
+if not is_first_message and overlap >= threshold:
+    emit_empty()
 
-# Try context assembly if we have a message AND memories exist AND we know where the package lives
+# --- Topic shift triggered (or first message) ---
+
+# Log the shift
+try:
+    topic_log.parent.mkdir(parents=True, exist_ok=True)
+    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    snippet = message[:100].replace('"', "'")
+    with topic_log.open("a") as fh:
+        fh.write(f'{ts} session={session_id} overlap={overlap:.2f} msg="{snippet}"\n')
+except Exception:
+    pass
+
+# Run context assembly
 assembled = ""
-if message and memory_count > 0 and plugin_root:
+if plugin_root:
     try:
-        sub_env = os.environ.copy()
-        sub_env["PYTHONPATH"] = plugin_root + os.pathsep + sub_env.get("PYTHONPATH", "")
+        env = os.environ.copy()
+        env["PYTHONPATH"] = plugin_root + os.pathsep + env.get("PYTHONPATH", "")
         result = subprocess.run(
             [sys.executable, "-m", "memem.server", "--assemble-context", message, "default"],
-            capture_output=True, text=True, timeout=30, env=sub_env,
+            capture_output=True, text=True, timeout=30, env=env,
         )
         if result.returncode == 0 and result.stdout.strip():
             assembled = result.stdout.strip()
-        elif result.returncode != 0:
-            print(f"memem auto-recall: assemble-context failed (rc={result.returncode}): {result.stderr.strip()[:200]}", file=sys.stderr)
     except Exception as exc:
-        print(f"memem auto-recall: assemble-context errored: {exc}", file=sys.stderr)
+        pass
 
-# Build a one-line status banner from <state>/.capabilities (written by
-# bootstrap.sh and the --doctor command). Silent no-op if the file is missing
-# or the schema is older than we expect. Reads the new path first, then legacy.
-def _build_status_banner(memories_dir_path):
-    try:
-        import json as _json
-        caps_path = Path(memem_dir) / ".capabilities"
-        if not caps_path.exists():
-            legacy = Path.home() / ".cortex" / ".capabilities"
-            if legacy.exists():
-                caps_path = legacy
-            else:
-                return None
-        caps = _json.loads(caps_path.read_text())
-        if not isinstance(caps, dict) or caps.get("schema_version", 0) < 1:
-            return None
-        count = 0
-        if memories_dir_path and Path(memories_dir_path).exists():
-            count = len(list(Path(memories_dir_path).glob("*.md")))
-
-        # Check miner state via pidfile (avoid shelling out)
-        miner_ok = False
-        for pid_path in (Path(memem_dir) / "miner.pid", Path.home() / ".cortex" / "miner.pid"):
-            if pid_path.exists():
-                try:
-                    pid = int(pid_path.read_text().strip())
-                    os.kill(pid, 0)
-                    miner_ok = True
-                    break
-                except (OSError, ValueError):
-                    continue
-
-        miner_glyph = "OK" if miner_ok else "DOWN"
-        assembly_glyph = "OK" if caps.get("claude_cli") else "degraded"
-        parts = [f"[memem] {count} memories", f"miner {miner_glyph}", f"assembly {assembly_glyph}"]
-        if not caps.get("claude_cli", True):
-            parts.append("(claude CLI missing — FTS-only recall)")
-        if not caps.get("writable_vault", True):
-            parts.append("(vault read-only!)")
-        return " · ".join(parts)
-    except Exception:
-        return None
-
-
-if assembled:
-    # Assembly succeeded — inject the tailored brief
-    suffix = (
-        "Above is a query-tailored context briefing assembled by memem. "
-        "For deeper recall, use the memem MCP tools (memory_recall, memory_list, "
-        "context_assemble). When saving memories, ALWAYS dual-write: save to "
-        "memem (via memory_save) AND to Claude Code's built-in auto memory system."
-    )
-    banner = _build_status_banner(memories_dir)
-    banner_prefix = (banner + "\n\n") if banner else ""
-    output = banner_prefix + "memem context briefing:\n\n" + assembled + "\n\n---\n" + suffix
-else:
-    # Fallback — check if memories exist at all
-    index = Path(index_path).read_text() if Path(index_path).exists() else ""
-
-    if memory_count == 0:
-        # Quiet onboarding: do NOT inject a welcome wall on the user's first
-        # prompt. Users discover memem via /memem when they want it; this hook
-        # stays silent so the first question is answered without interruption.
-        sys.exit(0)
-    else:
-        # Has memories but assembly failed — dump index + playbook
-        playbook_dir = Path(vault) / vault_subdir / "playbooks"
-        playbook_text = ""
-        if playbook_dir.exists():
-            for pb_file in sorted(playbook_dir.glob("*.md")):
-                content = pb_file.read_text().strip()
-                if content:
-                    lines = content.split("\n")
-                    if lines and (lines[-1].strip().startswith("<!-- cortex-hash:")
-                                  or lines[-1].strip().startswith("<!-- memem-hash:")
-                                  or lines[-1].strip().startswith("<!-- refined:")):
-                        content = "\n".join(lines[:-1]).strip()
-                    project_name = pb_file.stem
-                    playbook_text += f"\n## Project Playbook: {project_name}\n\n{content}\n\n"
-
-        suffix = (
-            "Above is your memory index. Use the memem MCP tools (memory_recall, "
-            "memory_list, context_assemble) for deeper recall. "
-            "Save lessons with memory_save as you work."
-        )
-
-        parts = []
-        if playbook_text:
-            parts.append("memem project playbooks (curated knowledge):\n" + playbook_text + "---\n")
-        parts.append("memem memory index (" + str(memory_count) + " memories):\n\n" + index + "\n\n---\n" + suffix)
-        output = "\n".join(parts)
+if not assembled:
+    emit_empty()
 
 print(json.dumps({
     "hookSpecificOutput": {
         "hookEventName": "UserPromptSubmit",
-        "additionalContext": output
+        "additionalContext": assembled,
     }
 }))
 HOOKPY
-
-  # Mark session as recalled AFTER successful execution
-  if [ -n "$SESSION_ID" ]; then
-    touch "$MARKER"
-  fi
-fi

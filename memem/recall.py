@@ -4,13 +4,23 @@ import subprocess
 from collections import Counter
 from datetime import UTC, datetime
 
-from memem.models import INDEX_PATH
+from memem.models import DEFAULT_LAYER, INDEX_PATH
 from memem.obsidian_store import (
     _find_memory,
     _load_obsidian_memories,
     _obsidian_memories,
     _word_set,
 )
+
+
+def _parse_ts(ts: str) -> float:
+    """Parse an ISO-8601 timestamp to a float for sorting. Returns 0 on failure."""
+    if not ts:
+        return 0.0
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+    except (ValueError, TypeError):
+        return 0.0
 from memem.telemetry import (
     _get_telemetry,
     _record_access,
@@ -162,6 +172,216 @@ def _search_memories(query: str, scope_id: str | None = None, limit: int = 10, r
                 _record_access(mem_id)
 
     return results
+
+
+def _format_compact_index_line(mem: dict) -> str:
+    """Return a ~50-token compact line for a single memory.
+
+    Format: ``[<8-char-id>] L<layer> <title> — <essence truncated to 80 chars>``
+    Used by memory_search, the session-start briefing CLI flag, and /memem.
+    """
+    mem_id = mem.get("id", "")[:8]
+    layer = mem.get("layer", DEFAULT_LAYER)
+    title = mem.get("title", "Untitled")
+    essence = mem.get("essence") or mem.get("full_record", "") or ""
+    essence_line = " ".join(essence.split())[:80]
+    return f"[{mem_id}] L{layer} {title} — {essence_line}"
+
+
+def _format_full_memory(mem: dict) -> str:
+    """Return a markdown-formatted full memory with frontmatter metadata.
+
+    Used by memory_get for the layer-2 (full content) fetch.
+    """
+    mid = mem.get("id", "")[:8]
+    layer = mem.get("layer", DEFAULT_LAYER)
+    title = mem.get("title", "Untitled")
+    tags = mem.get("tags", [])
+    related = mem.get("related", [])
+    source = mem.get("source_type", "unknown")
+    project = mem.get("project", "general")
+    essence = mem.get("essence") or mem.get("full_record", "") or ""
+
+    lines = [
+        f"### [{mid}] {title}",
+        f"- **layer:** L{layer}",
+        f"- **project:** {project}",
+        f"- **source:** {source}",
+    ]
+    if tags:
+        lines.append(f"- **tags:** {', '.join(tags)}")
+    if related:
+        lines.append(f"- **related:** {', '.join(r[:8] for r in related)}")
+    lines.append("")
+    lines.append(essence)
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _linked_memories(primary: list[dict]) -> list[dict]:
+    """One-hop graph traversal: return memories linked via the `related` field.
+
+    Given a list of primary memories, follow each memory's `related[]` list
+    exactly one hop and return the deduplicated set of linked memories that
+    aren't already in `primary`. Does not recurse — linked memories' own
+    `related[]` is ignored.
+    """
+    seen = {mem.get("id", "")[:8] for mem in primary if mem.get("id")}
+    linked: list[dict] = []
+    for mem in primary:
+        for related_id in mem.get("related", []) or []:
+            key = related_id[:8]
+            if key in seen:
+                continue
+            linked_mem = _find_memory(related_id)
+            if linked_mem:
+                seen.add(key)
+                linked.append(linked_mem)
+    return linked
+
+
+def memory_search(query: str, limit: int = 10, scope_id: str = "default") -> str:
+    """Layer 1 (compact index) search — the 3-tier recall entry point.
+
+    Returns a compact markdown index of matching memories (~50 tok/result),
+    then a one-hop graph-traversed section of related memories. Use this
+    FIRST to narrow candidates, then drill into specific IDs via memory_get.
+    """
+    memories = _search_memories(query, scope_id=scope_id, limit=limit, record_access=False)
+    if not memories:
+        return f"No memories found for: {query}"
+
+    linked = _linked_memories(memories)
+
+    lines = [f"### Compact memory index ({len(memories)} results)"]
+    for mem in memories:
+        lines.append(_format_compact_index_line(mem))
+
+    if linked:
+        lines.append("")
+        lines.append(f"### Related memories (via graph traversal, {len(linked)} linked)")
+        for mem in linked:
+            lines.append(_format_compact_index_line(mem))
+
+    lines.append("")
+    lines.append("_Use memory_get(ids=[...]) to fetch full content for any of these._")
+    return "\n".join(lines)
+
+
+def memory_get(ids: list[str], scope_id: str = "default") -> str:
+    """Layer 2 (full content) fetch — drill into specific memories by ID.
+
+    Accepts a list of memory IDs (8-char prefix supported). Returns full
+    markdown content for each, followed by a one-hop graph-traversed section
+    of linked memories. Use this after memory_search has narrowed candidates.
+    """
+    if not ids:
+        return "No IDs provided. Call memory_search first, then pass specific IDs here."
+
+    found: list[dict] = []
+    missing: list[str] = []
+    for mid in ids:
+        mem = _find_memory(mid)
+        if mem:
+            found.append(mem)
+        else:
+            missing.append(mid)
+
+    lines: list[str] = []
+    for mem in found:
+        lines.append(_format_full_memory(mem))
+
+    for mid in missing:
+        lines.append(f"[not-found: {mid}]")
+
+    linked = _linked_memories(found)
+    if linked:
+        lines.append(f"### Related memories (via graph traversal, {len(linked)} linked)")
+        for mem in linked:
+            lines.append(_format_compact_index_line(mem))
+
+    return "\n".join(lines) if lines else f"No memories found for ids: {ids}"
+
+
+def memory_timeline(
+    memory_id: str,
+    depth_before: int = 5,
+    depth_after: int = 5,
+    scope_id: str = "default",
+) -> str:
+    """Layer 3 (chronological thread) — walk related + creation-time context.
+
+    Finds the anchor memory, then builds a chronological thread using:
+      1. The anchor's ``related[]`` list (forward links)
+      2. Any memory whose ``related[]`` points back at the anchor (reverse links)
+      3. Same-project memories in the chronological window around the anchor
+
+    Returns a markdown timeline header + compact lines in creation order.
+    """
+    anchor = _find_memory(memory_id)
+    if not anchor:
+        return f"Anchor memory not found: {memory_id}"
+
+    anchor_id8 = anchor.get("id", "")[:8]
+    anchor_project = anchor.get("project", "general")
+    anchor_created = _parse_ts(anchor.get("created", ""))
+
+    all_mems = _obsidian_memories()
+
+    # Forward links
+    forward_ids = {r[:8] for r in anchor.get("related", []) or []}
+    # Reverse links
+    reverse_ids = {
+        m.get("id", "")[:8]
+        for m in all_mems
+        if anchor_id8 in {r[:8] for r in m.get("related", []) or []}
+    }
+
+    candidates: dict[str, dict] = {}
+    for mem in all_mems:
+        mid8 = mem.get("id", "")[:8]
+        if mid8 == anchor_id8:
+            continue
+        if mid8 in forward_ids or mid8 in reverse_ids:
+            candidates[mid8] = mem
+            continue
+        # Same-project chronological window
+        if mem.get("project") == anchor_project:
+            candidates[mid8] = mem
+
+    # Split into before/after by creation time
+    before: list[dict] = []
+    after: list[dict] = []
+    for mem in candidates.values():
+        created = _parse_ts(mem.get("created", ""))
+        if created < anchor_created:
+            before.append(mem)
+        else:
+            after.append(mem)
+
+    before.sort(key=lambda m: _parse_ts(m.get("created", "")))
+    after.sort(key=lambda m: _parse_ts(m.get("created", "")))
+    before = before[-depth_before:] if depth_before > 0 else []
+    after = after[:depth_after] if depth_after > 0 else []
+
+    lines = [f"### Timeline around [{anchor_id8}] {anchor.get('title', 'Untitled')}"]
+    lines.append("")
+    if before:
+        lines.append(f"**Before ({len(before)}):**")
+        for mem in before:
+            ts = mem.get("created", "")[:10]
+            lines.append(f"- {ts}  {_format_compact_index_line(mem)}")
+        lines.append("")
+    lines.append("**Anchor:**")
+    lines.append(f"- {anchor.get('created', '')[:10]}  {_format_compact_index_line(anchor)}")
+    lines.append("")
+    if after:
+        lines.append(f"**After ({len(after)}):**")
+        for mem in after:
+            ts = mem.get("created", "")[:10]
+            lines.append(f"- {ts}  {_format_compact_index_line(mem)}")
+        lines.append("")
+    return "\n".join(lines)
 
 
 def _format_memory_as_bullet(mem: dict) -> str:

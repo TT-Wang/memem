@@ -38,6 +38,7 @@ def _atomic_write(path: Path, content: str) -> None:
         raise
 
 from memem.models import (
+    DEFAULT_LAYER,
     INDEX_PATH,
     OBSIDIAN_MEMORIES_DIR,
     OBSIDIAN_VAULT,
@@ -202,6 +203,7 @@ def _write_obsidian_memory(mem: dict):
         f"importance: {mem.get('importance', 3)}\n"
         f"status: {mem.get('status', 'active')}\n"
         f"valid_to: {mem.get('valid_to', '')}\n"
+        f"layer: {int(mem.get('layer', DEFAULT_LAYER))}\n"
     )
     contradicts = mem.get("contradicts", [])
     if contradicts:
@@ -238,6 +240,7 @@ def _parse_obsidian_memory_file(md_file: Path) -> dict | None:
         "updated_at": "",
         "importance": 3,
         "schema_version": 0,
+        "layer": DEFAULT_LAYER,
     }
 
     if content.startswith("---"):
@@ -292,6 +295,11 @@ def _parse_obsidian_memory_file(md_file: Path) -> dict | None:
                         mem["schema_version"] = int(value)
                     except (ValueError, TypeError):
                         mem["schema_version"] = 0
+                elif key == "layer":
+                    try:
+                        mem["layer"] = int(value)
+                    except (ValueError, TypeError):
+                        mem["layer"] = DEFAULT_LAYER
 
     mem["essence"] = body
     mem["full_record"] = body  # read-time alias for essence — not stored in markdown

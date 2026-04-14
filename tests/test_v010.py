@@ -1,0 +1,377 @@
+"""Comprehensive tests for v0.10.0 features: layered recall, compact index, classify_layer."""
+
+import os
+import subprocess
+import sys
+import uuid
+from pathlib import Path  # noqa: F401
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _make_mem(
+    mid: str | None = None,
+    title: str = "Test memory",
+    essence: str = "Some essence text",
+    layer: int | None = None,
+    project: str = "myproj",
+    importance: int = 3,
+    tags: list[str] | None = None,
+    source_type: str = "user",
+    related: list[str] | None = None,
+) -> dict:
+    mem: dict = {
+        "id": mid or str(uuid.uuid4()),
+        "title": title,
+        "essence": essence,
+        "project": project,
+        "importance": importance,
+        "source_type": source_type,
+        "status": "active",
+        "tags": tags or [],
+        "domain_tags": tags or [],
+        "created_at": "2026-01-01T00:00:00",
+        "updated_at": "2026-01-01T00:00:00",
+        "schema_version": 1,
+    }
+    if layer is not None:
+        mem["layer"] = layer
+    if related is not None:
+        mem["related"] = related
+    return mem
+
+
+# ---------------------------------------------------------------------------
+# Test 1: Layer constants importable
+# ---------------------------------------------------------------------------
+
+def test_layer_constants_importable():
+    from memem.models import (
+        DEFAULT_LAYER,
+        LAST_BRIEF_PATH,
+        LAYER_L0,
+        LAYER_L1,
+        LAYER_L2,
+        LAYER_L3,
+        TOPIC_SHIFTS_LOG,
+    )
+    assert LAYER_L0 == 0
+    assert LAYER_L1 == 1
+    assert LAYER_L2 == 2
+    assert LAYER_L3 == 3
+    assert DEFAULT_LAYER == 2
+    assert isinstance(LAST_BRIEF_PATH, Path)
+    assert isinstance(TOPIC_SHIFTS_LOG, Path)
+
+
+# ---------------------------------------------------------------------------
+# Test 2: Layer frontmatter roundtrip
+# ---------------------------------------------------------------------------
+
+def test_layer_frontmatter_roundtrip(tmp_vault):
+    from memem.models import LAYER_L1
+    from memem.obsidian_store import _parse_obsidian_memory_file, _write_obsidian_memory
+
+    mem = _make_mem(
+        mid=str(uuid.uuid4()),
+        title="Pytest fixtures rock",
+        essence="Use fixtures for test isolation",
+        layer=LAYER_L1,
+    )
+    _write_obsidian_memory(mem)
+
+    filename = mem["obsidian_file"]
+    from memem.models import OBSIDIAN_MEMORIES_DIR
+    parsed = _parse_obsidian_memory_file(OBSIDIAN_MEMORIES_DIR / filename)
+
+    assert parsed is not None
+    assert parsed["layer"] == 1
+    assert isinstance(parsed["layer"], int)
+
+
+# ---------------------------------------------------------------------------
+# Test 3: Layer defaults when missing from frontmatter
+# ---------------------------------------------------------------------------
+
+def test_layer_defaults_when_missing(tmp_vault):
+    from memem.models import DEFAULT_LAYER, OBSIDIAN_MEMORIES_DIR
+    from memem.obsidian_store import _parse_obsidian_memory_file, _write_obsidian_memory
+
+    # Write without layer field
+    mem = _make_mem(
+        mid=str(uuid.uuid4()),
+        title="No layer field",
+        essence="This memory has no layer set",
+    )
+    # Do not include 'layer' key at all
+    mem.pop("layer", None)
+    _write_obsidian_memory(mem)
+
+    # Manually strip `layer:` line from the written file to simulate old format
+    filename = mem["obsidian_file"]
+    md_path = OBSIDIAN_MEMORIES_DIR / filename
+    content = md_path.read_text()
+    # Remove layer line from frontmatter
+    lines = [line for line in content.splitlines() if not line.startswith("layer:")]
+    md_path.write_text("\n".join(lines))
+
+    parsed = _parse_obsidian_memory_file(md_path)
+    assert parsed is not None
+    assert parsed["layer"] == DEFAULT_LAYER
+
+
+# ---------------------------------------------------------------------------
+# Test 4: _format_compact_index_line
+# ---------------------------------------------------------------------------
+
+def test_format_compact_index_line():
+    from memem.recall import _format_compact_index_line
+
+    mem = {
+        "id": "abc12345deadbeef",
+        "layer": 1,
+        "title": "Use pytest",
+        "essence": "prefer pytest over unittest",
+    }
+    result = _format_compact_index_line(mem)
+    assert "[abc12345]" in result
+    assert "L1" in result
+    assert "Use pytest" in result
+    assert "prefer pytest over unittest" in result
+
+
+# ---------------------------------------------------------------------------
+# Test 5: _format_compact_index_line uses DEFAULT_LAYER when layer missing
+# ---------------------------------------------------------------------------
+
+def test_format_compact_line_default_layer():
+    from memem.recall import _format_compact_index_line
+
+    mem = {
+        "id": "ff001122aabbccdd",
+        "title": "No layer here",
+        "essence": "some content",
+    }
+    result = _format_compact_index_line(mem)
+    assert "L2" in result  # DEFAULT_LAYER == 2
+
+
+# ---------------------------------------------------------------------------
+# Test 6: memory_search returns compact format
+# ---------------------------------------------------------------------------
+
+def test_memory_search_compact_format(monkeypatch):
+    fake_memories = [
+        _make_mem(mid="aaa11111" + "x" * 24, title="test alpha", essence="alpha test content", layer=1),
+        _make_mem(mid="bbb22222" + "x" * 24, title="test beta", essence="beta test content", layer=2),
+        _make_mem(mid="ccc33333" + "x" * 24, title="test gamma", essence="gamma test content", layer=3),
+    ]
+
+    monkeypatch.setattr("memem.recall._search_memories", lambda *a, **kw: fake_memories)
+
+    from memem.recall import memory_search
+    result = memory_search("test")
+
+    assert "### Compact memory index" in result
+    # 3 compact lines — each contains [id8] format
+    compact_lines = [line for line in result.splitlines() if line.startswith("[")]
+    assert len(compact_lines) == 3
+    assert "memory_get(ids=" in result
+
+
+# ---------------------------------------------------------------------------
+# Test 7: memory_get fetches by ID returning full content
+# ---------------------------------------------------------------------------
+
+def test_memory_get_fetches_by_id(monkeypatch):
+    mem_id = "abc12345" + "0" * 28
+    fake_mem = _make_mem(
+        mid=mem_id,
+        title="Deep dive memory",
+        essence="This is the full essence content for the deep dive",
+        layer=2,
+    )
+
+    monkeypatch.setattr("memem.recall._find_memory", lambda mid: fake_mem if mid.startswith("abc12345") else None)
+
+    from memem.recall import memory_get
+    result = memory_get(["abc12345"])
+
+    assert "Deep dive memory" in result
+    assert "This is the full essence content" in result
+    # Full content format, not just compact index line
+    assert "### [abc12345]" in result
+
+
+# ---------------------------------------------------------------------------
+# Test 8: memory_get handles not-found gracefully
+# ---------------------------------------------------------------------------
+
+def test_memory_get_handles_not_found(monkeypatch):
+    monkeypatch.setattr("memem.recall._find_memory", lambda mid: None)
+
+    from memem.recall import memory_get
+    # Should not raise
+    result = memory_get(["nope9999"])
+    assert "[not-found: nope9999]" in result
+
+
+# ---------------------------------------------------------------------------
+# Test 9: graph traversal one hop
+# ---------------------------------------------------------------------------
+
+def test_graph_traversal_one_hop(monkeypatch):
+    id_a = "aaaa0001" + "0" * 28
+    id_b = "bbbb0002" + "0" * 28
+    id_c = "cccc0003" + "0" * 28
+
+    mem_a = _make_mem(mid=id_a, title="Alpha memory", essence="alpha content test keyword",
+                      layer=1, related=[id_b[:8]])
+    mem_b = _make_mem(mid=id_b, title="Beta memory", essence="beta linked to alpha",
+                      layer=2, related=[id_c[:8]])
+    mem_c = _make_mem(mid=id_c, title="Gamma memory", essence="gamma two hops away",
+                      layer=2)
+
+    # _search_memories returns only A; B is a one-hop link; C is B's link (two hops, not included)
+    monkeypatch.setattr("memem.recall._search_memories", lambda *a, **kw: [mem_a])
+
+    def fake_find_memory(mid: str) -> dict | None:
+        for m in [mem_a, mem_b, mem_c]:
+            if m["id"].startswith(mid) or mid.startswith(m["id"][:8]):
+                return m
+        return None
+
+    monkeypatch.setattr("memem.recall._find_memory", fake_find_memory)
+
+    from memem.recall import memory_search
+    result = memory_search("keyword")
+
+    # B should be in related section (one hop)
+    assert "Beta memory" in result or "bbbb0002" in result
+    # C should NOT be in output (two hops)
+    assert "Gamma memory" not in result
+    assert "cccc0003" not in result
+
+
+# ---------------------------------------------------------------------------
+# Test 10: classify_layer defaults to L2
+# ---------------------------------------------------------------------------
+
+def test_classify_layer_defaults_to_l2():
+    from memem.mining import classify_layer
+    from memem.models import LAYER_L2
+
+    mem = {
+        "importance": 3,
+        "essence": "x" * 300,
+        "tags": [],
+        "project": "myproj",
+    }
+    result = classify_layer(mem, [])
+    assert result == LAYER_L2
+
+
+# ---------------------------------------------------------------------------
+# Test 11: classify_layer returns L1 for high importance
+# ---------------------------------------------------------------------------
+
+def test_classify_layer_l1_for_high_importance():
+    from memem.mining import classify_layer
+    from memem.models import LAYER_L1
+
+    mem = {
+        "importance": 4,
+        "essence": "x" * 300,
+        "tags": [],
+        "project": "myproj",
+        "source_type": "mined",
+    }
+    result = classify_layer(mem, [])
+    assert result == LAYER_L1
+
+
+# ---------------------------------------------------------------------------
+# Test 12: classify_layer returns L3 for rare low-importance
+# ---------------------------------------------------------------------------
+
+def test_classify_layer_l3_for_rare_low_importance():
+    from memem.mining import classify_layer
+    from memem.models import LAYER_L3
+
+    mem = {
+        "importance": 1,
+        "essence": "short",
+        "tags": [],
+        "project": "myproj",
+        "related": [],
+    }
+    result = classify_layer(mem, [])
+    assert result == LAYER_L3
+
+
+# ---------------------------------------------------------------------------
+# Test 13: classify_layer L0 cap per project
+# ---------------------------------------------------------------------------
+
+def test_classify_layer_l0_cap_per_project():
+    from memem.mining import _L0_CAP_PER_PROJECT, classify_layer
+    from memem.models import LAYER_L0, LAYER_L1
+
+    # Create 20 L0 memories in project "x" to hit the cap
+    fake_list = [
+        {"project": "x", "layer": LAYER_L0}
+        for _ in range(_L0_CAP_PER_PROJECT)
+    ]
+
+    mem_x = {
+        "title": "convention: new",
+        "tags": ["convention"],
+        "importance": 5,
+        "source_type": "user",
+        "project": "x",
+    }
+    # Cap hit — should fall through to L1
+    result_x = classify_layer(mem_x, fake_list)
+    assert result_x == LAYER_L1
+
+    # Project "y" has no L0 memories, should get L0
+    mem_y = {
+        "title": "convention: new",
+        "tags": ["convention"],
+        "importance": 5,
+        "source_type": "user",
+        "project": "y",
+    }
+    result_y = classify_layer(mem_y, fake_list)
+    assert result_y == LAYER_L0
+
+
+# ---------------------------------------------------------------------------
+# Test 14: topic shift threshold env parses as float
+# ---------------------------------------------------------------------------
+
+def test_topic_shift_threshold_env_parse():
+    raw = os.environ.get("MEMEM_TOPIC_SHIFT_THRESHOLD", "0.3")
+    parsed = float(raw)
+    assert isinstance(parsed, float)
+    assert 0.0 <= parsed <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# Test 15: session start CLI --compact-index runs without crash
+# ---------------------------------------------------------------------------
+
+def test_session_start_cli_runs_without_crash(tmp_vault):
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(Path(__file__).parent.parent)
+    env["MEMEM_OBSIDIAN_VAULT"] = str(tmp_vault)
+
+    result = subprocess.run(
+        [sys.executable, "-m", "memem.server", "--compact-index"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+    assert result.returncode == 0

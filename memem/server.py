@@ -31,8 +31,19 @@ def _build_mcp():
 
     from memem.operations import memory_import as _memory_import
     from memem.operations import memory_save as _memory_save
+    from memem.recall import (
+        memory_get as _memory_get,
+    )
     from memem.recall import memory_list as _memory_list
-    from memem.recall import memory_recall as _memory_recall
+    from memem.recall import (
+        memory_recall as _memory_recall,
+    )
+    from memem.recall import (
+        memory_search as _memory_search,
+    )
+    from memem.recall import (
+        memory_timeline as _memory_timeline,
+    )
     from memem.transcripts import transcript_search as _transcript_search
 
     mcp = FastMCP("memem")
@@ -121,6 +132,166 @@ def _build_mcp():
               documenting the decision to use RS256 in production.
         """
         return _memory_recall(query, scope_id=scope_id, limit=limit)
+
+    @mcp.tool()
+    def memory_search(
+        query: Annotated[
+            str,
+            Field(
+                description=(
+                    "Natural-language query describing what you want to find. "
+                    "Returns a compact index — IDs, titles, layer, and a 1-line "
+                    "essence snippet — not full content."
+                ),
+                min_length=1,
+                max_length=500,
+            ),
+        ],
+        limit: Annotated[
+            int,
+            Field(description="Max results to return.", ge=1, le=50),
+        ] = 10,
+        scope_id: Annotated[
+            str,
+            Field(description='Project scope to search within. Default "default".'),
+        ] = "default",
+    ) -> str:
+        """Layer-1 compact index search — the entry point to the 3-tier recall workflow.
+
+        Use this FIRST when you need to find memories. Returns ~50 tokens per
+        result (ID + layer + title + snippet) plus a one-hop graph-traversed
+        section of related memories. Then drill into specific IDs via
+        `memory_get` for full content, or trace the narrative around one via
+        `memory_timeline`.
+
+        Behaviour:
+          - Read-only, idempotent, no access-count bump (unlike memory_recall)
+          - Local-only SQLite FTS5 + Obsidian vault reads
+          - One-hop graph traversal via the `related` field — linked memories
+            are included under a separate "Related memories" section
+          - No authentication, no rate limits, no network I/O
+
+        Use when:
+          - You want to scan many candidates cheaply before committing tokens
+          - You're not sure exactly which memory you need and want to see titles
+          - Session start or topic shift — claude-mem pattern
+
+        Do NOT use for:
+          - Fetching full content when you already know the ID — use `memory_get`
+          - Chronological narrative — use `memory_timeline`
+
+        Returns: Markdown with `### Compact memory index` header, compact lines,
+        and optionally a `### Related memories` section.
+
+        Example:
+            memory_search(query="jwt auth", limit=5)
+            → returns 5 compact lines + any related memories linked by graph
+        """
+        return _memory_search(query, limit=limit, scope_id=scope_id)
+
+    @mcp.tool()
+    def memory_get(
+        ids: Annotated[
+            list[str],
+            Field(
+                description=(
+                    "List of memory IDs (8-char prefix supported). Fetch the "
+                    "full content of these specific memories."
+                ),
+                min_length=1,
+                max_length=50,
+            ),
+        ],
+        scope_id: Annotated[
+            str,
+            Field(description='Project scope. Default "default".'),
+        ] = "default",
+    ) -> str:
+        """Layer-2 full content fetch — drill into specific memories by ID.
+
+        Use this AFTER `memory_search` has given you a compact index and you
+        want the full content of specific candidates. ~500 tokens per result.
+        Follows the `related` graph one hop and includes linked memories.
+
+        Behaviour:
+          - Read-only, idempotent, no telemetry side effects
+          - Accepts 8-char ID prefixes (same format as the compact index)
+          - IDs that can't be resolved produce a `[not-found: <id>]` marker,
+            the call never fails
+
+        Use when:
+          - You've seen titles via `memory_search` and want full bodies
+          - You need specific known memories by ID (e.g. from a prior brief)
+
+        Do NOT use for:
+          - Open-ended search — use `memory_search`
+          - Chronological context — use `memory_timeline`
+
+        Returns: Markdown with full content per requested memory, then a
+        `### Related memories` section via one-hop graph traversal.
+
+        Example:
+            memory_get(ids=["abc12345", "def67890"])
+            → returns full bodies of those 2 memories + any linked ones
+        """
+        return _memory_get(ids, scope_id=scope_id)
+
+    @mcp.tool()
+    def memory_timeline(
+        memory_id: Annotated[
+            str,
+            Field(
+                description=(
+                    "Anchor memory ID (8-char prefix supported). The timeline "
+                    "is built around this memory."
+                ),
+                min_length=4,
+                max_length=64,
+            ),
+        ],
+        depth_before: Annotated[
+            int,
+            Field(description="How many memories to include before the anchor.", ge=0, le=20),
+        ] = 5,
+        depth_after: Annotated[
+            int,
+            Field(description="How many memories to include after the anchor.", ge=0, le=20),
+        ] = 5,
+        scope_id: Annotated[
+            str,
+            Field(description='Project scope. Default "default".'),
+        ] = "default",
+    ) -> str:
+        """Layer-3 chronological thread — narrative context around a memory.
+
+        Builds a chronological thread around an anchor memory using:
+          1. The anchor's `related[]` list (forward links)
+          2. Any memory whose `related[]` points back at the anchor (reverse links)
+          3. Same-project memories in the chronological window before/after
+
+        Use when:
+          - You found a memory via `memory_search` and want to understand
+            what led to it (decisions before) and what came after (consequences)
+          - Reconstructing the history of a decision or design evolution
+          - Debugging "why did we end up here?" questions
+
+        Do NOT use for:
+          - Open-ended search — use `memory_search`
+          - Fetching specific known memories — use `memory_get`
+
+        Returns: Markdown with `### Timeline around ...` header, **Before**
+        section (chronological), the anchor, and **After** section.
+
+        Example:
+            memory_timeline(memory_id="abc12345", depth_before=5, depth_after=5)
+            → returns 5 memories that led to abc12345 + abc12345 itself + 5 that followed
+        """
+        return _memory_timeline(
+            memory_id,
+            depth_before=depth_before,
+            depth_after=depth_after,
+            scope_id=scope_id,
+        )
 
     @mcp.tool()
     def memory_save(

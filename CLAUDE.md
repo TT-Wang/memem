@@ -11,6 +11,28 @@ The UserPromptSubmit hook fires on your first message and assembles a query-tail
 
 For deeper recall during the session, use the MCP tools below.
 
+## Layered recall (v0.10)
+
+Memories are organized into layers:
+- **L0 (always-loaded):** project identity — tech stack, repo structure, core conventions. Full content is injected at session start.
+- **L1 (generic conventions):** broadly useful patterns (testing, style, commit conventions)
+- **L2 (domain-specific):** most memories — the default bucket
+- **L3 (rare/archival):** niche failure modes, one-off lessons
+
+**At session start** you receive an L0 briefing (full content) plus a compact index of L1-L3 memories (~50 tokens each: `[id] L<layer> title — snippet`). Use this index to decide what to drill into.
+
+**During the session**, use the 3-tier recall workflow:
+
+1. **`memory_search(query)`** — compact index (~50 tok/result). Returns IDs + titles + 1-line snippets. Use FIRST to narrow candidates cheaply.
+2. **`memory_get(ids=[...])`** — full content (~500 tok/result). Use AFTER memory_search when you know which specific memories you need.
+3. **`memory_timeline(memory_id)`** — chronological thread via `related[]` graph + same-project window. Use when you need the narrative around a memory (what led to it, what came after).
+
+`memory_recall` (legacy) still works as a backward-compat alias that's equivalent to memory_search + memory_get on top results.
+
+**Topic-shift detection** — the `UserPromptSubmit` hook automatically detects when the conversation drifts to a new topic (keyword overlap < 30% with the last briefing) and re-fires `context_assemble` to refresh your context. You don't need to call it manually.
+
+**Graph traversal** — `memory_search` and `memory_get` automatically follow the `related[]` field one hop and include linked memories in a separate section.
+
 ## Auto-save
 
 When you complete significant work, save non-obvious lessons:
@@ -61,7 +83,10 @@ Then tell the user: history mining is running in the background (log at `~/.meme
 | Tool | What |
 |------|------|
 | `memory_save` | Store a lesson, pattern, or convention |
-| `memory_recall` | Search memories (FTS5 + keyword + temporal ranking) |
+| `memory_search` | **[Layer 1]** Compact index search — returns ~50 tok/result, use first |
+| `memory_get` | **[Layer 2]** Full content fetch by IDs — use after memory_search |
+| `memory_timeline` | **[Layer 3]** Chronological thread via related[] graph |
+| `memory_recall` | (legacy) Search + fetch full content — prefer search+get for token efficiency |
 | `memory_list` | List all memories with stats |
 | `memory_import` | Import from files, directories, or chat exports |
 | `transcript_search` | Search raw Claude Code session logs |

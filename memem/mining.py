@@ -10,7 +10,13 @@ from memem.miner_protocol import (
     STATUS_FAILED,
     STATUS_IN_PROGRESS,
 )
-from memem.models import ObsidianUnavailableError
+from memem.models import (
+    DEFAULT_LAYER,
+    LAYER_L0,
+    LAYER_L1,
+    LAYER_L3,
+    ObsidianUnavailableError,
+)
 from memem.obsidian_store import (
     _deprecate_memory,
     _find_best_match,
@@ -20,9 +26,6 @@ from memem.obsidian_store import (
     _save_memory,
     _stable_mined_memory_id,
     _update_memory,
-)
-from memem.playbook import (
-    _playbook_refine,
 )
 from memem.session_state import (
     find_settled_sessions,
@@ -34,6 +37,80 @@ from memem.telemetry import _log_event
 from memem.transcripts import _extract_conversation
 
 log = logging.getLogger("memem-miner")
+
+
+_L0_STRUCTURAL_TAGS = {
+    "convention",
+    "architecture",
+    "tech-stack",
+    "project-identity",
+    "repo-structure",
+    "environment",
+}
+_L1_GENERIC_TAGS = {
+    "testing",
+    "pytest",
+    "style",
+    "formatting",
+    "commit",
+    "git",
+    "security",
+    "best-practice",
+}
+_L0_CAP_PER_PROJECT = 20
+
+
+def classify_layer(mem: dict, all_memories: list[dict]) -> int:
+    """Classify a memory into L0/L1/L2/L3 via pure-Python scope heuristics.
+
+    L0 = project identity: high importance + structural tag + L0 cap not reached.
+    L1 = generic conventions: importance>=4 OR project=='general' OR generic tag.
+    L3 = rare/archival: importance<=2 + short content + no related links.
+    L2 = domain-specific (default): everything else.
+
+    Pure function; no I/O, no subprocess, no network.
+    """
+    tags = {t.lower() for t in (mem.get("tags") or [])}
+    title_lower = (mem.get("title") or "").lower()
+    importance = mem.get("importance", 3)
+    if not isinstance(importance, int | float):
+        importance = 3
+    project = mem.get("project", "general")
+    essence = mem.get("essence") or mem.get("full_record", "") or ""
+    related = mem.get("related") or []
+
+    # Structural signal: either tag match or title contains a structural keyword
+    structural = bool(tags & _L0_STRUCTURAL_TAGS) or any(
+        kw in title_lower for kw in _L0_STRUCTURAL_TAGS
+    )
+
+    # L0 cap — don't exceed N L0 memories per project
+    l0_count_in_project = sum(
+        1
+        for m in all_memories
+        if m.get("project") == project and m.get("layer") == LAYER_L0
+    )
+    l0_cap_ok = l0_count_in_project < _L0_CAP_PER_PROJECT
+
+    # Rule 1: L0
+    if (
+        structural
+        and importance >= 4
+        and mem.get("source_type") in ("user", "mined")
+        and l0_cap_ok
+    ):
+        return LAYER_L0
+
+    # Rule 2: L1
+    if importance >= 4 or project == "general" or bool(tags & _L1_GENERIC_TAGS):
+        return LAYER_L1
+
+    # Rule 3: L3
+    if importance <= 2 and len(essence) < 200 and not related:
+        return LAYER_L3
+
+    # Rule 4: L2 (default)
+    return DEFAULT_LAYER
 
 
 class MiningError(RuntimeError):
@@ -377,6 +454,7 @@ def mine_session(jsonl_path: str) -> dict:
                     source_session=session_id[:8],
                 )
                 mem["id"] = _stable_mined_memory_id(session_id, insight["title"], content)
+                mem["layer"] = classify_layer(mem, _obsidian_memories())
                 _save_memory(mem)
                 memories_saved += 1
                 if mem.get("contradicts"):

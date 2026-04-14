@@ -49,6 +49,49 @@ Use memem if:
 - **Security scanning** — every write is scanned for prompt injection and credential exfiltration
 - **Browsable** — Obsidian vault with graph view and backlinks for free
 
+## Architecture — layered recall
+
+memem uses a 3-tier recall workflow inspired by [claude-mem](https://github.com/thedotmack/claude-mem) and [mem0](https://mem0.ai). Instead of dumping full memory content on every recall, it lets Claude progressively drill into relevant memories:
+
+```
+   Session start
+   ┌─────────────────────────────┐
+   │ SessionStart hook injects:  │
+   │   • L0 full content (~20)   │
+   │   • Compact index of rest   │
+   └──────────┬──────────────────┘
+              │
+              ▼
+   During session
+   ┌─────────────────────────────┐
+   │ 1. memory_search(query)     │ → compact index (50 tok/result)
+   │ 2. memory_get(ids=[...])    │ → full content (500 tok/result)
+   │ 3. memory_timeline(id)      │ → chronological thread
+   └─────────────────────────────┘
+              │
+              ▼
+   ┌─────────────────────────────┐
+   │ Topic-shift detection       │ → auto-refreshes context
+   │ (UserPromptSubmit hook)     │    when conversation drifts
+   └─────────────────────────────┘
+```
+
+**Memory layers (auto-classified at mining time):**
+
+| Layer | Purpose | Injection |
+|-------|---------|-----------|
+| **L0** | Project identity — tech stack, repo structure, core conventions | Full content at session start |
+| **L1** | Generic conventions — testing, style, commit patterns | Compact index at session start |
+| **L2** | Domain-specific — most memories (default) | Compact index at session start |
+| **L3** | Rare/archival — niche failure modes, one-off lessons | Compact index at session start |
+
+Token efficiency: session start injects ~50 tokens per L1-L3 memory (ID + title + snippet) instead of full content. Claude drills into specific memories via `memory_get(ids=[...])` only when it needs full detail.
+
+Opt-in features:
+- **`MEMEM_SHOW_BANNER=1`** — show a one-line status banner at session start (off by default)
+- **`MEMEM_PRETOOL_GATING=1`** — enrich Read tool calls with memories about the target file (off by default)
+- **`MEMEM_TOPIC_SHIFT_THRESHOLD=0.3`** — keyword overlap threshold for topic-shift re-firing (default 0.3)
+
 ## How do I install memem?
 
 ```bash

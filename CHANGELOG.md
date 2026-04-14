@@ -10,6 +10,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
 
+## [0.10.0] - 2026-04-14
+
+### Changed — "layered recall"
+Comprehensive overhaul of memory retrieval for both session start and
+in-session recall, adopting the best patterns from
+[claude-mem](https://github.com/thedotmack/claude-mem) (3-tier progressive
+disclosure) and [mem0](https://mem0.ai) (pre-loaded context + topic-shift
+detection). This is a retrieval-layer release — mining, storage, and the
+Obsidian vault layout are unchanged.
+
+### Added — session start
+- **`SessionStart` hook** (`hooks/session-start.sh`) fires before the user
+  types their first message, injecting a compact briefing via
+  `hookSpecificOutput.additionalContext`. Silent by default; set
+  `MEMEM_SHOW_BANNER=1` for a one-line status banner.
+- **Compact index injection** at session start instead of full memory content.
+  Each L1-L3 memory contributes ~50 tokens (`[id] L<layer> title — snippet`).
+  L0 memories still get full content.
+- **L0/L1/L2/L3 layer auto-stratification.** New `layer` int frontmatter field
+  on every memory, auto-classified at mining time via pure-Python scope
+  heuristics (`memem/mining.py:classify_layer`). Rules:
+  - L0 = project identity (importance ≥ 4, structural tag, L0 cap per project = 20)
+  - L1 = generic conventions (importance ≥ 4, cross-project, or generic tag)
+  - L3 = rare/archival (low importance, short content, no related links)
+  - L2 = domain-specific (default)
+- **`--compact-index` CLI flag** (`python -m memem.server --compact-index`)
+  outputs the session-start briefing format (L0 full + L1-L3 index).
+
+### Added — in-session recall
+- **3-tier recall workflow** matching claude-mem's progressive disclosure
+  pattern. Three new MCP tools on the memem server:
+  - **`memory_search(query, limit, scope_id)`** — Layer 1 compact index
+    (~50 tok/result). Returns IDs + layer + title + 1-line snippet. Use
+    first to narrow candidates cheaply.
+  - **`memory_get(ids, scope_id)`** — Layer 2 full content fetch (~500
+    tok/result). Use after `memory_search` when you know which memories
+    you need. Accepts 8-char ID prefixes.
+  - **`memory_timeline(memory_id, depth_before, depth_after, scope_id)`** —
+    Layer 3 chronological thread. Walks the `related[]` graph forward AND
+    reverse, plus same-project memories in a creation-time window around
+    the anchor.
+- **Topic-shift detection** (`hooks/auto-recall.sh` rewritten). On each
+  `UserPromptSubmit`, computes keyword overlap between the new prompt and
+  the last triggered briefing (stored in `~/.memem/.last-brief.json`). If
+  overlap < `MEMEM_TOPIC_SHIFT_THRESHOLD` (default `0.3`), re-fires
+  `context_assemble` for a fresh brief. Every trigger is logged to
+  `~/.memem/topic-shifts.log` for tuning. Closes the "Claude didn't think
+  to search" failure mode that's claude-mem's biggest known weakness.
+- **One-hop graph traversal** on `memory_search` and `memory_get`. After
+  the primary result set, memem follows the `related[]` field exactly one
+  hop and includes linked memories in a separate section. Half of your
+  memories already have `related[]` populated — this is a free context
+  win per query.
+- **PreToolUse hook for file-read enrichment** (`hooks/pre-tool-use.sh`).
+  When Claude is about to call the `Read` tool, memem searches memories
+  for the target file path and injects any matches via `additionalContext`.
+  **Opt-in** via `MEMEM_PRETOOL_GATING=1` — off by default. Does NOT
+  block the read (too aggressive for v0.10.0); just enriches context.
+
+### Backward compatibility
+- **`memory_recall`** MCP tool is UNCHANGED and remains the
+  backward-compat alias. Existing clients keep working.
+- **`context_assemble`**, **`memory_save`**, **`memory_list`**,
+  **`memory_import`**, **`transcript_search`** are unchanged.
+- Memories without a `layer` field parse as `LAYER_L2` (=2, the default),
+  so existing vaults load cleanly without a migration.
+- Legacy `CORTEX_*` env vars still work alongside the new `MEMEM_*` ones.
+
+### New env vars (all optional)
+- `MEMEM_SHOW_BANNER=1` — show a one-line status banner at session start
+- `MEMEM_PRETOOL_GATING=1` — enable file-read enrichment hook
+- `MEMEM_TOPIC_SHIFT_THRESHOLD=0.3` — keyword overlap threshold for topic-shift re-firing
+
+### Tests
+- 15 new tests in `tests/test_v010.py` covering layer constants, frontmatter
+  roundtrip, compact format, memory_search/get/timeline, graph traversal,
+  classify_layer rules (L0 cap, L1/L3 edge cases), CLI smoke test.
+- All 58 existing tests continue to pass. Total: 73 tests, ruff clean.
+
+### Migration
+No action required. On next session start, memem will auto-inject the new
+compact index. Existing memories will classify as L2 (default) until they
+pass through the miner again (which reclassifies via the new heuristic).
+To force reclassification without waiting, run:
+```bash
+python3 -m memem.server --rebuild-playbooks
+```
+
 ## [0.9.3] - 2026-04-14
 
 ### Fixed — playbook drift

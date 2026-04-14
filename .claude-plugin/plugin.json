@@ -1,6 +1,6 @@
 {
   "name": "memem",
-  "version": "0.9.3",
+  "version": "0.10.0",
   "description": "Persistent, self-evolving memory for Claude Code. Local-first, no cloud, browsable Obsidian vault.",
   "author": {
     "name": "TT-Wang",

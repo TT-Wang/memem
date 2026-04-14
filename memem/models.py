@@ -43,6 +43,15 @@ SERVER_PID_FILE = MEMEM_DIR / "mcp-server.pid"
 TELEMETRY_FILE = MEMEM_DIR / "telemetry.json"
 EVENT_LOG = MEMEM_DIR / "events.jsonl"
 SEARCH_DB = MEMEM_DIR / "search.db"
+LAST_BRIEF_PATH = MEMEM_DIR / ".last-brief.json"
+TOPIC_SHIFTS_LOG = MEMEM_DIR / "topic-shifts.log"
+
+# Layer constants for memory stratification (v0.10)
+LAYER_L0 = 0  # Always-loaded: cross-project, importance==5
+LAYER_L1 = 1  # Session-start index: high-importance
+LAYER_L2 = 2  # On-demand: standard memories (default)
+LAYER_L3 = 3  # Background: low-importance, rarely surfaced
+DEFAULT_LAYER = 2
 
 # Vault root: same fallback pattern.
 OBSIDIAN_VAULT = Path(
