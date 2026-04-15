@@ -165,6 +165,82 @@ def clear_installed_at():
     INSTALLED_AT_FILE.unlink(missing_ok=True)
 
 
+# memem's own subprocess calls to `claude -p --model haiku` are recorded
+# by Claude Code as regular sessions in whatever project directory the
+# parent was running from. Their first user message always starts with
+# one of these prompt signatures — we detect them here so the miner
+# doesn't recursively try to mine its own subprocess fossils.
+#
+# Each signature is the exact prefix of the corresponding prompt body
+# built by one of the memem subprocess call sites:
+#
+#   - "Below is a coding conversation"     -> mining._summarize_session_haiku
+#   - "EXISTING:"                          -> mining._merge_memories
+#   - "You were asked to extract memories" -> mining corrective retry
+#   - "QUERY: "                            -> assembly.context_assemble
+#   - "Review these memory entries"        -> assembly._consolidate_project
+#   - "USER MESSAGE:\n"                    -> recall.smart_recall
+#
+# The playbook refine prompt (playbook._playbook_refine) has no stable
+# prefix because it's a raw concatenation of memory contents; those
+# sessions will still slip through, but they're rare compared to the
+# mining+merge calls that dominate the subprocess traffic.
+_MEMEM_SUBPROCESS_PROMPT_PREFIXES = (
+    "Below is a coding conversation",
+    "EXISTING:",
+    "You were asked to extract memories",
+    "QUERY: ",
+    "Review these memory entries",
+    "USER MESSAGE:\n",
+)
+
+
+def _looks_like_memem_subprocess(jsonl_path: Path) -> bool:
+    """True if a session's first human message matches a memem prompt signature.
+
+    Cheap path-independent filter to catch memem's own subprocess calls
+    to `claude -p` — these subprocesses inherit the parent's cwd and
+    end up recorded in the normal project directory alongside real user
+    sessions, so a path-based filter like `-root/` doesn't catch them.
+
+    Reads at most the first 20 JSONL lines (usually only 1-2 are needed)
+    to keep scan-time overhead under a few milliseconds per session.
+    Returns False on any parse/read failure so a corrupt session file
+    doesn't accidentally get filtered as a false positive.
+    """
+    try:
+        with open(jsonl_path, encoding="utf-8", errors="ignore") as fh:
+            for i, line in enumerate(fh):
+                if i >= 20:
+                    return False
+                try:
+                    entry = json.loads(line)
+                except (ValueError, json.JSONDecodeError):
+                    continue
+                if entry.get("type") != "user":
+                    continue
+                content = entry.get("message", {}).get("content", "")
+                # content can be a bare string OR a list of content blocks
+                text: str = ""
+                if isinstance(content, str):
+                    text = content
+                elif isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            text = block.get("text", "")
+                            break
+                if not text:
+                    return False
+                head = text.lstrip()[:200]
+                return any(
+                    head.startswith(prefix)
+                    for prefix in _MEMEM_SUBPROCESS_PROMPT_PREFIXES
+                )
+    except OSError:
+        return False
+    return False
+
+
 def find_settled_sessions(
     states: dict[str, dict] | None = None,
     bypass_gate: bool = False,
@@ -211,6 +287,15 @@ def find_settled_sessions(
             if (now - stat.st_mtime) <= SETTLE_SECONDS:
                 continue
             if session_is_complete(jsonl_path, states.get(jsonl_path.stem)):
+                continue
+            # Content-signature filter: skip memem's own subprocess fossils
+            # (mining / merge / assemble / smart_recall / consolidation calls
+            # to `claude -p` that got recorded as normal session files in the
+            # parent's project directory). The -root filter above catches
+            # headless runs from /root; this one catches subprocess calls
+            # that inherit the miner daemon's cwd (e.g. the memem repo dir).
+            # See _looks_like_memem_subprocess for the prompt signatures.
+            if _looks_like_memem_subprocess(jsonl_path):
                 continue
             settled.append((int(stat.st_mtime_ns), jsonl_path))
 
