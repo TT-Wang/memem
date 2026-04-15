@@ -305,6 +305,15 @@ mypy memem # type check (strict)
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the PR process and [CHANGELOG.md](CHANGELOG.md) for version history.
 
+## Works great with
+
+- **[forge](https://github.com/TT-Wang/forge)** — Structured planning,
+  parallel execution, and deep validation for Claude Code. memem + forge
+  is the recommended pairing: forge plans and executes multi-file
+  changes, memem remembers what worked across runs. Forge's
+  `memory_save` patterns land in memem's recall index, so next week's
+  run starts with last week's lessons already loaded.
+
 ## License
 
 MIT

@@ -77,6 +77,14 @@ First-session MCP spawn runs `bootstrap.sh` which installs `uv`, syncs deps into
 - `uv` (auto-installed by bootstrap.sh if missing)
 - `claude` CLI on PATH (optional — required for Haiku-powered assembly; FTS-only degraded mode works without it)
 
+## Companion project
+
+- **forge** — https://github.com/TT-Wang/forge — structured planning,
+  parallel execution, and deep validation for Claude Code. Recommended
+  pairing: forge plans + executes multi-file changes, memem remembers
+  what worked. Forge's `memory_save` patterns land in memem's recall
+  index, so learnings compound across runs.
+
 ## License
 
 MIT
