@@ -118,6 +118,11 @@ def test_find_settled_sessions_skips_memem_subprocess_fossils(tmp_cortex_dir, tm
         "recall-fossil",
         "USER MESSAGE:\nWhat was our test command?\n\nMEMORY INDEX:\n[abc12345] ...",
     )
+    # playbook refine fossil — should be filtered (substring match, not prefix)
+    playbook_fossil = write_session(
+        "playbook-fossil",
+        "# general — Project Playbook\nUpdated: 2026-04-15\n\n## Some memory title\nSome memory essence here",
+    )
 
     monkeypatch.setattr(session_state, "SESSIONS_DIRS", [projects])
 
@@ -130,6 +135,7 @@ def test_find_settled_sessions_skips_memem_subprocess_fossils(tmp_cortex_dir, tm
         (retry_fossil, "retry"),
         (assemble_fossil, "assemble"),
         (recall_fossil, "recall"),
+        (playbook_fossil, "playbook"),
     ]:
         assert fossil not in results, (
             f"{label} subprocess fossil should be filtered, but was returned"

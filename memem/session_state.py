@@ -180,11 +180,7 @@ def clear_installed_at():
 #   - "QUERY: "                            -> assembly.context_assemble
 #   - "Review these memory entries"        -> assembly._consolidate_project
 #   - "USER MESSAGE:\n"                    -> recall.smart_recall
-#
-# The playbook refine prompt (playbook._playbook_refine) has no stable
-# prefix because it's a raw concatenation of memory contents; those
-# sessions will still slip through, but they're rare compared to the
-# mining+merge calls that dominate the subprocess traffic.
+#   - "# <project> — Project Playbook"     -> playbook._playbook_refine
 _MEMEM_SUBPROCESS_PROMPT_PREFIXES = (
     "Below is a coding conversation",
     "EXISTING:",
@@ -193,6 +189,12 @@ _MEMEM_SUBPROCESS_PROMPT_PREFIXES = (
     "Review these memory entries",
     "USER MESSAGE:\n",
 )
+
+# The playbook refine prompt doesn't have a clean prefix-string match
+# (it starts with "# {project} — Project Playbook" where {project} is
+# arbitrary), so we detect it by looking for the literal substring
+# "— Project Playbook" in the first ~120 chars of the user message.
+_PLAYBOOK_REFINE_MARKER = "— Project Playbook"
 
 
 def _looks_like_memem_subprocess(jsonl_path: Path) -> bool:
@@ -232,10 +234,15 @@ def _looks_like_memem_subprocess(jsonl_path: Path) -> bool:
                 if not text:
                     return False
                 head = text.lstrip()[:200]
-                return any(
+                if any(
                     head.startswith(prefix)
                     for prefix in _MEMEM_SUBPROCESS_PROMPT_PREFIXES
-                )
+                ):
+                    return True
+                # Playbook refine substring check (no stable prefix).
+                if head.startswith("# ") and _PLAYBOOK_REFINE_MARKER in head:
+                    return True
+                return False
     except OSError:
         return False
     return False
