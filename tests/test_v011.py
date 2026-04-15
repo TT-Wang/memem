@@ -8,10 +8,12 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 
 
-def _run_compact_index(env: dict) -> str:
+def _run_compact_index(env: dict, vault: Path | None = None) -> str:
     full_env = os.environ.copy()
     full_env.update(env)
     full_env["PYTHONPATH"] = str(REPO) + os.pathsep + full_env.get("PYTHONPATH", "")
+    if vault is not None:
+        full_env["MEMEM_OBSIDIAN_VAULT"] = str(vault)
     result = subprocess.run(
         ["python3", "-m", "memem.server", "--compact-index"],
         capture_output=True,
@@ -23,13 +25,40 @@ def _run_compact_index(env: dict) -> str:
     return result.stdout
 
 
-def test_compact_index_respects_session_start_limit():
+def _seed_vault(tmp_path: Path, count: int) -> Path:
+    """Create an Obsidian vault seeded with `count` memory files."""
+    vault = tmp_path / "vault"
+    mem_dir = vault / "memem" / "memories"
+    mem_dir.mkdir(parents=True)
+    for i in range(count):
+        (mem_dir / f"seed-{i}-aaaaaaaa{i:02d}.md").write_text(
+            f"---\n"
+            f"id: aaaaaaaa{i:02d}\n"
+            f"schema_version: 1\n"
+            f"title: seed memory {i}\n"
+            f"project: general\n"
+            f"tags: [seed]\n"
+            f"created: 2026-04-14\n"
+            f"updated: 2026-04-14\n"
+            f"source_type: user\n"
+            f"source_session: \n"
+            f"importance: 3\n"
+            f"status: active\n"
+            f"valid_to: \n"
+            f"layer: 2\n"
+            f"---\n\nseed essence body {i}\n"
+        )
+    return vault
+
+
+def test_compact_index_respects_session_start_limit(tmp_path):
     """MEMEM_SESSION_START_LIMIT caps the total memories injected."""
+    vault = _seed_vault(tmp_path, 15)
     output = _run_compact_index({
         "MEMEM_SESSION_START_LIMIT": "10",
         "MEMEM_SESSION_START_FULL": "2",
         "MEMEM_SESSION_START_PROJECT": "all",
-    })
+    }, vault=vault)
     # Count compact-format lines: `[xxxxxxxx] L<N> ...`
     compact_lines = [
         line for line in output.splitlines()
@@ -43,29 +72,31 @@ def test_compact_index_respects_session_start_limit():
     )
 
 
-def test_compact_index_full_count_caps_full_content():
+def test_compact_index_full_count_caps_full_content(tmp_path):
     """MEMEM_SESSION_START_FULL caps how many memories show full content."""
+    vault = _seed_vault(tmp_path, 10)
     output = _run_compact_index({
         "MEMEM_SESSION_START_LIMIT": "20",
         "MEMEM_SESSION_START_FULL": "3",
         "MEMEM_SESSION_START_PROJECT": "all",
-    })
+    }, vault=vault)
     full_headers = [line for line in output.splitlines() if line.startswith("### [L")]
     assert len(full_headers) == 3, f"expected exactly 3 full entries, got {len(full_headers)}"
 
 
-def test_compact_index_project_scope_filters():
+def test_compact_index_project_scope_filters(tmp_path):
     """Project scope filters to that project + general memories."""
+    vault = _seed_vault(tmp_path, 5)
     scoped = _run_compact_index({
         "MEMEM_SESSION_START_LIMIT": "200",
         "MEMEM_SESSION_START_FULL": "0",
         "MEMEM_SESSION_START_PROJECT": "memem",
-    })
+    }, vault=vault)
     unscoped = _run_compact_index({
         "MEMEM_SESSION_START_LIMIT": "200",
         "MEMEM_SESSION_START_FULL": "0",
         "MEMEM_SESSION_START_PROJECT": "all",
-    })
+    }, vault=vault)
     # Scoped output must be smaller than or equal to unscoped
     # (equal only if vault has nothing outside memem/general scope).
     scoped_lines = len([line for line in scoped.splitlines() if line.startswith("[")])
@@ -73,13 +104,12 @@ def test_compact_index_project_scope_filters():
     assert scoped_lines <= unscoped_lines
 
 
-def test_compact_index_default_limit_is_50():
+def test_compact_index_default_limit_is_50(tmp_path):
     """Default MEMEM_SESSION_START_LIMIT is 50 (claude-mem parity)."""
-    # Clear all env overrides so defaults kick in. Scope=all so we exercise
-    # the full vault (otherwise the default scoped-to-cwd path may return < 50).
+    vault = _seed_vault(tmp_path, 75)
     output = _run_compact_index({
         "MEMEM_SESSION_START_PROJECT": "all",
-    })
+    }, vault=vault)
     compact_lines = [
         line for line in output.splitlines()
         if line.startswith("[") and "]" in line and " L" in line[:14]
