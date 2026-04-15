@@ -95,9 +95,11 @@ Opt-in features:
 ## How do I install memem?
 
 ```bash
-/plugin marketplace add TT-Wang/memem
-/plugin install memem
+claude plugin marketplace add TT-Wang/memem
+claude plugin install memem@memem-marketplace
 ```
+
+If you already added the marketplace once, future installs only need the second command.
 
 That's it. On first run, `bootstrap.sh` self-heals everything:
 
