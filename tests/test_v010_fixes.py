@@ -312,3 +312,141 @@ def test_mine_all_aborts_on_fatal(
         "aborting run" in rec.getMessage()
         for rec in caplog.records
     ), "expected an 'aborting run' error log line"
+
+
+# ─── v0.11.x: sliding-window chunked mining (tail bug fix) ─────────────
+
+
+class _FakeCompleted:
+    """Stand-in for subprocess.CompletedProcess returned by subprocess.run."""
+
+    def __init__(self, returncode: int, stdout: str = "", stderr: str = ""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def test_chunked_mining_small_session_fast_path(tmp_cortex_dir, monkeypatch):
+    """A small session (< _MAX_PROMPT_CHARS) must hit the fast path:
+    exactly one subprocess.run call to Haiku, no chunking overhead.
+    """
+    from memem import mining
+    importlib.reload(mining)
+
+    calls = []
+
+    def fake_run(cmd, input=None, capture_output=None, text=None, timeout=None):
+        calls.append(input or "")
+        return _FakeCompleted(
+            returncode=0,
+            stdout='[{"title": "Small session insight", "content": "x", "project": "general", "importance": 3}]',
+        )
+
+    monkeypatch.setattr(mining.subprocess, "run", fake_run)
+
+    # ~2k chars total — well under the 150k budget
+    messages = ["User: hello there", "Assistant: hi back"] * 50
+    total = sum(len(m) + 2 for m in messages)
+    assert total < mining._MAX_PROMPT_CHARS
+
+    insights = mining._summarize_session_haiku(messages)
+
+    assert len(calls) == 1, (
+        f"small session must hit fast path with exactly 1 Haiku call, got {len(calls)}"
+    )
+    assert len(insights) == 1
+    assert insights[0]["title"] == "Small session insight"
+
+
+def test_chunked_mining_large_session_splits_chunks(tmp_cortex_dir, monkeypatch, caplog):
+    """A session larger than _MAX_PROMPT_CHARS must be split into multiple
+    chunks, each sent to Haiku, and the insights aggregated across chunks.
+    """
+    import logging
+
+    from memem import mining
+    importlib.reload(mining)
+
+    # Build ~500k chars of fake messages (well over the 150k budget).
+    # Each message is 50k chars → 10 messages → 500k + separator overhead.
+    messages = [f"User: {'x' * 50_000}" for _ in range(10)]
+    total = sum(len(m) + 2 for m in messages)
+    assert total > mining._MAX_PROMPT_CHARS, f"test precondition failed: {total}"
+
+    # Each Haiku call returns one insight — counter so we can tell them apart.
+    call_inputs: list[str] = []
+
+    def fake_run(cmd, input=None, capture_output=None, text=None, timeout=None):
+        call_inputs.append(input or "")
+        idx = len(call_inputs)
+        return _FakeCompleted(
+            returncode=0,
+            stdout=(
+                f'[{{"title": "Chunk {idx} insight", '
+                f'"content": "content from chunk {idx}", '
+                f'"project": "general", "importance": 3}}]'
+            ),
+        )
+
+    monkeypatch.setattr(mining.subprocess, "run", fake_run)
+
+    with caplog.at_level(logging.INFO, logger=mining.log.name):
+        insights = mining._summarize_session_haiku(messages)
+
+    # Must have made more than one Haiku call (chunked path).
+    assert len(call_inputs) > 1, (
+        f"large session should be chunked, but only {len(call_inputs)} Haiku calls were made"
+    )
+    # And must have aggregated one insight per chunk.
+    assert len(insights) == len(call_inputs), (
+        f"expected {len(call_inputs)} aggregated insights, got {len(insights)}"
+    )
+    # Chunk-level progress must be logged.
+    chunk_logs = [
+        rec for rec in caplog.records if "Mining chunk" in rec.getMessage()
+    ]
+    assert len(chunk_logs) == len(call_inputs), (
+        f"expected {len(call_inputs)} chunk-progress log lines, got {len(chunk_logs)}"
+    )
+
+
+def test_chunked_mining_any_chunk_failure_fails_whole_session(
+    tmp_cortex_dir, monkeypatch
+):
+    """Pessimistic failure semantics: if ANY chunk's Haiku call fails
+    with TransientMiningError, the whole session must abort with that
+    error so the daemon marks STATUS_FAILED and retries from chunk 1.
+    """
+    from memem import mining
+    importlib.reload(mining)
+
+    # Same ~500k char setup as the previous test.
+    messages = [f"User: {'x' * 50_000}" for _ in range(10)]
+    assert sum(len(m) + 2 for m in messages) > mining._MAX_PROMPT_CHARS
+
+    call_count = {"n": 0}
+
+    def fake_run(cmd, input=None, capture_output=None, text=None, timeout=None):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            # First chunk succeeds
+            return _FakeCompleted(
+                returncode=0,
+                stdout='[{"title": "ok", "content": "c", "project": "general", "importance": 3}]',
+            )
+        # Second chunk's Haiku call fails — simulated rate-limit / network error
+        return _FakeCompleted(returncode=1, stderr="simulated haiku failure")
+
+    monkeypatch.setattr(mining.subprocess, "run", fake_run)
+
+    import pytest
+    with pytest.raises(mining.TransientMiningError, match="simulated haiku failure"):
+        mining._summarize_session_haiku(messages)
+
+    # Sanity: the loop must have reached chunk 2 (where the failure lives)
+    # but not continued past it. We can't know the exact chunk boundaries
+    # without re-running the splitter, but we can at least confirm that
+    # the second Haiku call was reached.
+    assert call_count["n"] >= 2, (
+        f"expected at least 2 Haiku calls before the failure, got {call_count['n']}"
+    )
