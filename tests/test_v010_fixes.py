@@ -198,3 +198,117 @@ def test_auto_recall_hook_uses_tempfile_for_large_message(tmp_path):
     # Must emit valid JSON
     data = json.loads(result.stdout)
     assert "hookSpecificOutput" in data
+
+
+# ─── v0.11.x: mine_all error handling (split Fatal vs Transient) ─────
+
+
+def test_mine_all_logs_transient_and_continues(
+    tmp_cortex_dir, tmp_path, monkeypatch, caplog
+):
+    """Transient mining errors must be logged (not swallowed) and must not
+    abort the mine_all loop. Each transient failure should be captured in
+    the returned ``failures`` list with fatal=False.
+    """
+    import logging
+
+    from memem import mining, session_state
+    importlib.reload(session_state)
+    importlib.reload(mining)
+
+    # Build two fake sessions on disk — big enough to clear the size gate,
+    # old enough to clear the settle gate.
+    sessions_dir = tmp_path / "projects" / "demo"
+    sessions_dir.mkdir(parents=True)
+    now = time.time()
+    fake_sessions = []
+    for name in ("session-aaa", "session-bbb"):
+        p = sessions_dir / f"{name}.jsonl"
+        p.write_text("x" * 6000)
+        old = now - 10_000
+        import os as _os
+        _os.utime(p, (old, old))
+        fake_sessions.append(p)
+
+    monkeypatch.setattr(session_state, "SESSIONS_DIRS", [tmp_path / "projects"])
+    # Re-export from mining namespace so mine_all sees the patched list.
+    monkeypatch.setattr(mining, "find_settled_sessions", session_state.find_settled_sessions)
+
+    def fake_mine(jsonl_path):
+        raise mining.TransientMiningError(f"fake transient: {jsonl_path}")
+
+    monkeypatch.setattr(mining, "mine_session", fake_mine)
+
+    with caplog.at_level(logging.WARNING, logger=mining.log.name):
+        result = mining.mine_all(bypass_gate=True)
+
+    # Both sessions seen, both counted as failed, nothing mined
+    assert result["total_sessions"] == 2
+    assert result["failed_sessions"] == 2
+    assert result["newly_mined"] == 0
+    # failures list must contain one entry per session with fatal=False
+    assert len(result["failures"]) == 2
+    for f in result["failures"]:
+        assert f["fatal"] is False
+        assert "fake transient" in f["error"]
+    # Each failure must produce a warning log (not silent)
+    transient_warnings = [
+        rec for rec in caplog.records
+        if "Transient mining failure" in rec.getMessage()
+    ]
+    assert len(transient_warnings) == 2, (
+        f"expected 2 transient warnings, got {len(transient_warnings)}: "
+        f"{[r.getMessage() for r in caplog.records]}"
+    )
+
+
+def test_mine_all_aborts_on_fatal(
+    tmp_cortex_dir, tmp_path, monkeypatch, caplog
+):
+    """FatalMiningError must abort mine_all immediately and re-raise,
+    so the CLI handler in cli.py can propagate FATAL_EXIT_CODE instead of
+    letting mine-cron.sh relaunch into the same broken storage state.
+    """
+    import logging
+
+    from memem import mining, session_state
+    importlib.reload(session_state)
+    importlib.reload(mining)
+
+    # Build three fake sessions; the first should raise Fatal and halt.
+    sessions_dir = tmp_path / "projects" / "demo"
+    sessions_dir.mkdir(parents=True)
+    now = time.time()
+    import os as _os
+    for name in ("a", "b", "c"):
+        p = sessions_dir / f"session-{name}.jsonl"
+        p.write_text("x" * 6000)
+        old = now - 10_000 - ord(name)  # deterministic order
+        _os.utime(p, (old, old))
+
+    monkeypatch.setattr(session_state, "SESSIONS_DIRS", [tmp_path / "projects"])
+    monkeypatch.setattr(mining, "find_settled_sessions", session_state.find_settled_sessions)
+
+    call_count = {"n": 0}
+
+    def fake_mine(jsonl_path):
+        call_count["n"] += 1
+        raise mining.FatalMiningError("disk full")
+
+    monkeypatch.setattr(mining, "mine_session", fake_mine)
+
+    with caplog.at_level(logging.ERROR, logger=mining.log.name):
+        import pytest
+        with pytest.raises(mining.FatalMiningError, match="disk full"):
+            mining.mine_all(bypass_gate=True)
+
+    # Exactly one call — the loop must have aborted on the first fatal.
+    assert call_count["n"] == 1, (
+        f"mine_all should abort on first FatalMiningError, but called "
+        f"mine_session {call_count['n']} times"
+    )
+    # And it must have logged an "aborting run" message.
+    assert any(
+        "aborting run" in rec.getMessage()
+        for rec in caplog.records
+    ), "expected an 'aborting run' error log line"

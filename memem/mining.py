@@ -516,19 +516,78 @@ def mine_all(bypass_gate: bool = True) -> dict:
     ``bypass_gate`` defaults to True for this entry point because the primary
     caller (``--mine-all`` CLI) exists specifically to mine pre-install history.
     Daemon callers that want to respect the install-time gate can pass False.
+
+    Error handling:
+      - ``FatalMiningError`` aborts the run immediately and re-raises. Storage
+        is broken; continuing would corrupt state on every subsequent write.
+        The CLI handler in ``cli.py`` catches the re-raise and exits with
+        ``FATAL_EXIT_CODE`` so wrappers (miner-wrapper.sh, mine-cron.sh) can
+        stop relaunching.
+      - ``TransientMiningError`` is logged and the loop continues. The session
+        is already marked ``STATUS_FAILED`` by ``mine_session``, so the next
+        invocation will retry it. Each failure is logged with the session id
+        and error message, and collected into the returned ``failures`` list
+        so callers can surface per-session context instead of a bare count.
     """
     states = load_mined_session_state()
     total = 0
     newly_mined = 0
     already_mined = 0
     failed_sessions = 0
+    failures: list[dict] = []
 
     for path in find_settled_sessions(states, bypass_gate=bypass_gate):
         total += 1
         try:
             result = mine_session(str(path))
-        except MiningError:
+        except FatalMiningError as exc:
+            # Storage is broken — stop mining immediately. Record this
+            # session's failure for observability, then re-raise so the CLI
+            # handler propagates FATAL_EXIT_CODE to miner-wrapper.sh and
+            # mine-cron.sh instead of relaunching into the same failure.
             failed_sessions += 1
+            failures.append({
+                "session": path.stem[:12],
+                "error": str(exc),
+                "fatal": True,
+            })
+            log.error(
+                "Fatal mining error on %s — aborting run (%d/%d sessions processed): %s",
+                path.stem[:12], total, len(failures), exc,
+            )
+            raise
+        except TransientMiningError as exc:
+            # Transient failure (Haiku rate limit, network blip, etc.) —
+            # mine_session has already marked the file STATUS_FAILED, so
+            # find_settled_sessions will return it again on the next scan
+            # and we'll retry. Log explicitly so users can see degradation
+            # in real time instead of discovering a silent failed_sessions
+            # counter after the fact.
+            failed_sessions += 1
+            failures.append({
+                "session": path.stem[:12],
+                "error": str(exc),
+                "fatal": False,
+            })
+            log.warning(
+                "Transient mining failure on %s (will retry next run): %s",
+                path.stem[:12], exc,
+            )
+            continue
+        except MiningError as exc:
+            # Safety net for any future MiningError subclass that isn't
+            # Transient/Fatal. Treat as transient (log + continue) rather
+            # than swallowing silently.
+            failed_sessions += 1
+            failures.append({
+                "session": path.stem[:12],
+                "error": str(exc),
+                "fatal": False,
+            })
+            log.warning(
+                "Mining failure on %s (treating as transient): %s",
+                path.stem[:12], exc,
+            )
             continue
         if result.get("skipped"):
             already_mined += 1
@@ -572,4 +631,5 @@ def mine_all(bypass_gate: bool = True) -> dict:
         "newly_mined": newly_mined,
         "already_mined": already_mined,
         "failed_sessions": failed_sessions,
+        "failures": failures,
     }
