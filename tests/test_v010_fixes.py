@@ -44,6 +44,49 @@ def test_ensure_installed_at_creates_marker(tmp_cortex_dir):
     assert abs(ts - time.time()) < 5.0  # within 5s of now
 
 
+def test_find_settled_sessions_skips_root_project(tmp_cortex_dir, tmp_path, monkeypatch):
+    """v0.11.x fix: sessions under `.claude/projects/-root/` must be
+    filtered out. That directory is where headless `claude -p` subprocess
+    invocations land — memem's own Haiku mining subprocesses end up there,
+    and without this filter the miner picks them up as real sessions and
+    tries to mine them (recursively mining mining).
+
+    Found 2026-04-15 during the tail-bug heal run: 26% of "successfully
+    mined" sessions were actually self-referential subprocess artifacts
+    under `-root`, polluting ~10% of the memory vault.
+    """
+    from memem import session_state
+    importlib.reload(session_state)
+
+    # Build two fake project directories: one named `-root` (should be
+    # filtered out) and one normal (should be returned).
+    projects = tmp_path / "projects"
+    (projects / "-root").mkdir(parents=True)
+    (projects / "normal-project").mkdir(parents=True)
+
+    # Both sessions are big enough and old enough to pass the other gates.
+    old_time = time.time() - 1800
+    root_session = projects / "-root" / "subprocess-artifact.jsonl"
+    root_session.write_text("x" * 10000)
+    import os as _os
+    _os.utime(root_session, (old_time, old_time))
+
+    real_session = projects / "normal-project" / "real-work.jsonl"
+    real_session.write_text("y" * 10000)
+    _os.utime(real_session, (old_time, old_time))
+
+    monkeypatch.setattr(session_state, "SESSIONS_DIRS", [projects])
+
+    results = session_state.find_settled_sessions(bypass_gate=True)
+
+    assert real_session in results, (
+        "normal project session should be returned"
+    )
+    assert root_session not in results, (
+        "sessions under -root/ must be filtered out as mining subprocess artifacts"
+    )
+
+
 def test_find_settled_sessions_bypass_gate_param(tmp_cortex_dir, tmp_path, monkeypatch):
     """v0.10.2 fix #1: find_settled_sessions(bypass_gate=True) ignores the gate.
 

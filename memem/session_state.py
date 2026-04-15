@@ -187,6 +187,18 @@ def find_settled_sessions(
         for jsonl_path in sessions_dir.rglob("*.jsonl"):
             if "/subagents/" in str(jsonl_path):
                 continue
+            # Skip sessions under the `-root` project. `/.claude/projects/-root/`
+            # is where Claude Code stores headless `claude -p` subprocess
+            # invocations — memem's own Haiku mining calls end up there. If
+            # we don't filter, the miner recursively picks up its own
+            # subprocess sessions, feeds them back to Haiku, and burns
+            # quota mining prompt templates. Found 2026-04-15: 1448 of
+            # 5546 "successfully mined" sessions (26%) were self-referential
+            # subprocess artifacts, yielding 110 polluted memories (9.9%
+            # of the vault). Filtering one directory fixes both the bug
+            # and prevents it from recurring.
+            if "/projects/-root/" in str(jsonl_path):
+                continue
             try:
                 stat = jsonl_path.stat()
             except OSError:
