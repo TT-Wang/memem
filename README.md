@@ -94,12 +94,21 @@ Opt-in features:
 
 ## How do I install memem?
 
+Copy-paste:
+
 ```bash
 claude plugin marketplace add TT-Wang/memem
 claude plugin install memem@memem-marketplace
 ```
 
 If you already added the marketplace once, future installs only need the second command.
+
+Then:
+
+1. restart Claude Code if it was already open
+2. open any project
+3. send your first normal message
+4. memem will show a welcome/status message and offer the mining options
 
 That's it. On first run, `bootstrap.sh` self-heals everything:
 
@@ -119,6 +128,13 @@ That's it. On first run, `bootstrap.sh` self-heals everything:
 
 Or just tell Claude "start mining new sessions" / "start mining everything including history" — it knows what to do.
 
+### Recommended first-run choice
+
+- choose **`/memem-mine`** if you only want memory from new sessions going forward
+- choose **`/memem-mine-history`** if you want memem to process your old Claude Code sessions too
+
+If you are unsure, start with **`/memem-mine`**. It is the safer and cheaper default.
+
 ## What happens on my first Claude Code session?
 
 You type your first message. The UserPromptSubmit hook fires and sees zero memories (you just installed it), so it injects a welcome banner into Claude's context. Claude reads the banner, tells you memem is active, and — if you have pre-existing Claude Code sessions — offers to mine them via `/memem-mine-history`.
@@ -126,6 +142,31 @@ You type your first message. The UserPromptSubmit hook fires and sees zero memor
 You work normally. The miner daemon runs silently in the background. When your session ends and settles for 5 minutes, the miner extracts memories from the transcript using Claude Haiku and writes them to your vault.
 
 **Session 2 onwards:** the hook sends your first message to `context_assemble`, which gives Haiku the relevant memories and asks it to synthesize a tailored briefing. You see a status banner like `[memem] 12 memories · miner OK · assembly OK` followed by the brief. Claude starts with full context — no re-explaining.
+
+## 30-Second Setup
+
+```bash
+claude plugin marketplace add TT-Wang/memem
+claude plugin install memem@memem-marketplace
+```
+
+Then in Claude Code:
+
+```text
+/memem
+```
+
+And choose one:
+
+```text
+/memem-mine
+```
+
+or
+
+```text
+/memem-mine-history
+```
 
 ## What does memem save?
 

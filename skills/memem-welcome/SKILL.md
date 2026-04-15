@@ -34,7 +34,12 @@ Force-display the full memem welcome (the brand-new-user view), even if the user
 - **`/memem-mine`** — start the miner, mine only new sessions going forward
 - **`/memem-mine-history`** — start the miner + mine all past history (uses Haiku API credits)
 
-Or just tell Claude "start mining new sessions" / "start mining everything including history".
+Or just tell Claude:
+
+- "start mining new sessions"
+- "start mining everything including history"
+
+If the user is unsure, recommend **`/memem-mine`** as the default.
 
 **Step 5 — Commands and tools:**
 
@@ -53,6 +58,12 @@ Or just tell Claude "start mining new sessions" / "start mining everything inclu
 
 Memories are plain markdown files at `~/obsidian-brain/memem/memories/`. Open that folder as an Obsidian vault for graph view and backlinks. memem works identically without Obsidian.
 
-**Step 7 — Opt-out:**
+**Step 7 — First action suggestion:**
+
+If the user asks "what should I do now?" or seems undecided, answer with one short recommendation:
+
+> Start with `/memem-mine`. It enables memory for new sessions going forward without spending Haiku credits on old history.
+
+**Step 8 — Opt-out:**
 
 To stop the miner and opt out: `python3 -m memem.server --miner-opt-out`

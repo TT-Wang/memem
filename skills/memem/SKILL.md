@@ -67,12 +67,18 @@ Then show:
 >   - Say **"start mining everything including history"** — or type `/memem-mine-history`
 >
 > Replace `[N]` with the session count. If the count is 0, drop the second option entirely.
+>
+> If the user sounds unsure, recommend the first option as the default.
 
 **A4. Tail:**
 
 > **Optional:** Memories are plain markdown at `~/obsidian-brain/memem/memories/`. Open that folder as an Obsidian vault for graph view. memem works identically without Obsidian.
 >
 > Commands: `/memem-status`, `/memem-doctor`, `/memem-mine`, `/memem-mine-history`
+
+If useful, add one final plain-English line:
+
+> If you just want the safe default, start with `/memem-mine`.
 
 **A5. Mark welcome as shown so future `/memem` invocations use the compact view:**
 ```bash
