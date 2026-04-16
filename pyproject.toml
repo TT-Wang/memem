@@ -36,6 +36,10 @@ dev = [
     "mypy>=1.11",
     "pre-commit>=3.8",
 ]
+embedding = [
+    "sentence-transformers>=2.2",
+    "numpy>=1.24",
+]
 
 [project.urls]
 Homepage = "https://github.com/TT-Wang/memem"

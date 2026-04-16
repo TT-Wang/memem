@@ -61,12 +61,14 @@ def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 1
     candidate_limit = limit * 4  # generous — re-ranker filters noise
 
     try:
+        from memem.embedding_index import _search_embedding
         from memem.obsidian_store import _ngram_search_candidates
         from memem.search_index import _search_fts
 
-        with ThreadPoolExecutor(max_workers=2) as pool:
+        with ThreadPoolExecutor(max_workers=3) as pool:
             fts_future = pool.submit(_search_fts, query, scope, candidate_limit)
             ngram_future = pool.submit(_ngram_search_candidates, query, scope, candidate_limit)
+            emb_future = pool.submit(_search_embedding, query, candidate_limit)
             try:
                 fts_ids = fts_future.result(timeout=10) or []
             except Exception as exc:
@@ -77,19 +79,27 @@ def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 1
             except Exception as exc:
                 log.debug("ngram candidate generation failed: %s", exc)
                 ngram_ids = []
+            try:
+                # Embedding has a longer budget — model encode dominates.
+                emb_ids = emb_future.result(timeout=30) or []
+            except Exception as exc:
+                log.debug("embedding candidate generation failed: %s", exc)
+                emb_ids = []
 
-        if not fts_ids and not ngram_ids:
+        if not fts_ids and not ngram_ids and not emb_ids:
             return []
 
-        # Preserve FTS rank for its hits; ngram-only hits get no FTS rank.
+        # Preserve FTS rank for its hits; other sources get a neutral
+        # FTS-rank later so they aren't penalized in the re-rank.
         fts_rank_by_id = {mid: i for i, mid in enumerate(fts_ids)}
         total_fts = len(fts_ids)
         union_ids: list[str] = list(fts_ids)
         seen = set(fts_ids)
-        for mid in ngram_ids:
-            if mid not in seen:
-                union_ids.append(mid)
-                seen.add(mid)
+        for source in (ngram_ids, emb_ids):
+            for mid in source:
+                if mid not in seen:
+                    union_ids.append(mid)
+                    seen.add(mid)
 
         # Load full memories from cache (O(1) per lookup after m1)
         mems: list[dict] = []

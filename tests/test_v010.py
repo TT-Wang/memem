@@ -298,6 +298,98 @@ def test_union_search_includes_ngram_only_candidates(tmp_vault, tmp_cortex_dir, 
     assert mem_both["id"] in ids
 
 
+def test_embedding_graceful_degrade_without_dep():
+    """If sentence-transformers isn't installed, _search_embedding must
+    return [] and is_available() must return False — no exception raised
+    and the union-rank path upstream still works."""
+    # The venv doesn't have sentence-transformers, so we expect graceful degrade.
+    # If someone installs it later, this test will still pass because we
+    # use mocking to force the ImportError path.
+    import sys
+
+    from memem import embedding_index
+    saved = sys.modules.get("sentence_transformers")
+    sys.modules["sentence_transformers"] = None  # forces ImportError in _try_import
+    embedding_index._model = None  # clear any cached model
+    embedding_index._unavailable_logged = False
+    try:
+        assert embedding_index.is_available() is False
+        assert embedding_index._search_embedding("anything", limit=5) == []
+    finally:
+        if saved is None:
+            sys.modules.pop("sentence_transformers", None)
+        else:
+            sys.modules["sentence_transformers"] = saved
+
+
+def test_union_search_survives_embedding_timeout(tmp_vault, tmp_cortex_dir, monkeypatch):
+    """If the embedding generator hangs or errors, FTS + ngram results still
+    return — embedding is additive, not blocking."""
+    import importlib
+
+    from memem import models, obsidian_store, recall, search_index
+    importlib.reload(models)
+    importlib.reload(search_index)
+    importlib.reload(obsidian_store)
+    importlib.reload(recall)
+
+    mem = obsidian_store._make_memory(
+        content="Content about testing FTS survives embedding failure path",
+        title="test_survive", project="general", source_type="user",
+    )
+    obsidian_store._save_memory(mem)
+
+    monkeypatch.setattr(
+        "memem.search_index._search_fts",
+        lambda q, scope, limit: [mem["id"]],
+    )
+    monkeypatch.setattr(
+        "memem.obsidian_store._ngram_search_candidates",
+        lambda q, scope, limit: [],
+    )
+
+    def raise_embedding(*args, **kwargs):
+        raise RuntimeError("embedding model broke")
+    monkeypatch.setattr("memem.embedding_index._search_embedding", raise_embedding)
+
+    results = recall._search_memories_fts("anything", "default", limit=10)
+    ids = {m.get("id") for m in results}
+    assert mem["id"] in ids, "FTS result lost when embedding failed"
+
+
+def test_union_search_includes_embedding_only_candidate(tmp_vault, tmp_cortex_dir, monkeypatch):
+    """When embedding returns a candidate FTS and ngram both miss, the union
+    must include it and apply the re-ranker to it."""
+    import importlib
+
+    from memem import models, obsidian_store, recall, search_index
+    importlib.reload(models)
+    importlib.reload(search_index)
+    importlib.reload(obsidian_store)
+    importlib.reload(recall)
+
+    mem = obsidian_store._make_memory(
+        content="Embedding-only candidate content about semantic topic X",
+        title="emb_only", project="general", source_type="user",
+    )
+    obsidian_store._save_memory(mem)
+
+    monkeypatch.setattr(
+        "memem.search_index._search_fts", lambda q, scope, limit: [],
+    )
+    monkeypatch.setattr(
+        "memem.obsidian_store._ngram_search_candidates", lambda q, scope, limit: [],
+    )
+    monkeypatch.setattr(
+        "memem.embedding_index._search_embedding",
+        lambda q, limit: [mem["id"]],
+    )
+
+    results = recall._search_memories_fts("anything", "default", limit=10)
+    ids = {m.get("id") for m in results}
+    assert mem["id"] in ids, f"embedding-only hit lost from union: {ids}"
+
+
 def test_graph_traversal_two_hop_is_superset_of_one_hop():
     """Regression guarantee: _expand_graph with hops=2 returns a strict
     superset of hops=1 for the same seed set. No 1-hop memory is dropped

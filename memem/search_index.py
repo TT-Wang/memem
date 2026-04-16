@@ -198,6 +198,13 @@ def _rebuild_search_index() -> int:
             count += 1
         conn.commit()
         conn.close()
+        # Also rebuild the embedding side-channel if installed — strictly
+        # additive so any failure here doesn't affect FTS-based search.
+        try:
+            from memem.embedding_index import _rebuild_embedding_index
+            _rebuild_embedding_index()
+        except Exception as exc:
+            log.debug("embedding rebuild skipped: %s", exc)
         return count
     except Exception as exc:
         log.warning("FTS rebuild failed: %s", exc)
