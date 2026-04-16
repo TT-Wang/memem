@@ -229,6 +229,121 @@ def test_vault_cache_perf_10_lookups(tmp_vault, tmp_cortex_dir):
     assert elapsed < 0.05, f"10 warm lookups took {elapsed*1000:.1f}ms, expected <50ms"
 
 
+def test_pkl_cache_cold_start_rehydrates(tmp_vault, tmp_cortex_dir):
+    """After a save, the pkl file exists and contains the memory. A fresh
+    cache state (simulating a new process) can re-hydrate from it without
+    re-parsing every file."""
+    import importlib
+
+    from memem import obsidian_store
+    importlib.reload(obsidian_store)
+
+    m = obsidian_store._make_memory(
+        content="Pkl rehydration test content", title="pkltest",
+        project="general", source_type="user",
+    )
+    obsidian_store._save_memory(m)
+    # Force sweep to write pkl (save alone updates in-memory only)
+    obsidian_store._trigger_sweep()
+
+    assert obsidian_store._VAULT_CACHE_PKL_PATH.exists(), "pkl should be written after sweep"
+
+    # Simulate a new process: clear the in-memory cache, clear the pkl-loaded
+    # flag, then load pkl directly.
+    with obsidian_store._VAULT_CACHE_LOCK:
+        obsidian_store._VAULT_CACHE.clear()
+        obsidian_store._VAULT_CACHE_FILES.clear()
+    obsidian_store._VAULT_PKL_LOADED = False
+
+    loaded = obsidian_store._load_pkl_cache()
+    assert loaded is True
+    # Same memory should be back in the cache without any glob/parse
+    assert m["id"] in obsidian_store._VAULT_CACHE
+    assert obsidian_store._VAULT_CACHE[m["id"]].get("essence") == "Pkl rehydration test content"
+
+
+def test_pkl_cache_detects_drift_across_processes(tmp_vault, tmp_cortex_dir):
+    """If the pkl was written, then a (simulated) other process modifies a
+    file while we're offline, the next `_ensure_cache_warm` on re-start
+    picks up the mtime change via the sweep and re-parses that file."""
+    import importlib
+    import os as _os
+    from pathlib import Path
+
+    from memem import obsidian_store
+    importlib.reload(obsidian_store)
+
+    m = obsidian_store._make_memory(
+        content="Original content before offline mutation", title="drifttest",
+        project="general", source_type="user",
+    )
+    obsidian_store._save_memory(m)
+    obsidian_store._trigger_sweep()  # writes pkl
+    mid = m["id"]
+    file_path = obsidian_store._VAULT_CACHE[mid]["file"]
+
+    # Simulate process exit: keep pkl on disk, drop in-memory state
+    with obsidian_store._VAULT_CACHE_LOCK:
+        obsidian_store._VAULT_CACHE.clear()
+        obsidian_store._VAULT_CACHE_FILES.clear()
+    obsidian_store._VAULT_PKL_LOADED = False
+
+    # Another "process" modifies the file (rewrite body + bump mtime)
+    original = Path(file_path).read_text()
+    Path(file_path).write_text(original.replace("Original content", "MUTATED content"))
+    new_mtime = Path(file_path).stat().st_mtime + 1
+    _os.utime(file_path, (new_mtime, new_mtime))
+
+    # Simulated restart: ensure_cache_warm should load pkl THEN sweep,
+    # and the sweep should detect the mtime drift and re-parse.
+    obsidian_store._set_sweep_interval(0.05)
+    obsidian_store._ensure_cache_warm()
+    obsidian_store._trigger_sweep()
+
+    after = obsidian_store._find_memory(mid)
+    assert after is not None
+    assert "MUTATED content" in after.get("essence", "")
+
+
+def test_pkl_cache_subprocess_cold_start(tmp_vault, tmp_cortex_dir):
+    """Subprocess cold-start regression: a fresh python process with only
+    the pkl (no in-memory state) must see the vault correctly. Follows the
+    pattern in test_v011.py because monkeypatching doesn't reach a new
+    interpreter."""
+    import importlib
+    import subprocess
+    import sys
+
+    from memem import obsidian_store
+    importlib.reload(obsidian_store)
+
+    m = obsidian_store._make_memory(
+        content="Subprocess cold start test content", title="subproctest",
+        project="general", source_type="user",
+    )
+    obsidian_store._save_memory(m)
+    obsidian_store._trigger_sweep()
+
+    result = subprocess.run(
+        [sys.executable, "-c",
+         "import os, sys; "
+         f"os.environ['MEMEM_DIR'] = {str(tmp_cortex_dir)!r}; "
+         f"os.environ['MEMEM_OBSIDIAN_VAULT'] = {str(tmp_vault)!r}; "
+         "sys.path.insert(0, '/home/claude-user/cortex-plugin'); "
+         "from memem.obsidian_store import _find_memory, _obsidian_memories; "
+         "mems = _obsidian_memories(); "
+         "print(f'COUNT={len(mems)}'); "
+         f"mem = _find_memory({m['id']!r}); "
+         "print(f'FOUND={mem is not None}'); "
+         "print(f'ESSENCE={mem.get(\"essence\", \"\")[:40]}' if mem else 'NONE')"],
+        capture_output=True, text=True, timeout=20,
+    )
+    assert result.returncode == 0, f"subprocess failed: {result.stderr}"
+    out = result.stdout
+    assert "FOUND=True" in out, f"subprocess didn't find memory: {out}"
+    assert "Subprocess cold start test content"[:40] in out
+
+
 def test_update_memory_refreshes_related(tmp_vault, tmp_cortex_dir):
     """After a merge rewrites a memory's content, _update_memory must
     recompute `related` so wiki-links match the post-merge topic, not the

@@ -12,6 +12,7 @@ import fcntl
 import functools
 import logging
 import os
+import pickle
 import re
 import tempfile
 import threading
@@ -42,6 +43,7 @@ def _atomic_write(path: Path, content: str) -> None:
 from memem.models import (
     DEFAULT_LAYER,
     INDEX_PATH,
+    MEMEM_DIR,
     OBSIDIAN_MEMORIES_DIR,
     OBSIDIAN_VAULT,
     ObsidianUnavailableError,
@@ -78,6 +80,10 @@ _VAULT_CACHE_FILES: dict[str, dict] = {}     # file path → {"mtime": float, "i
 _VAULT_CACHE_LOCK = threading.RLock()
 _VAULT_LAST_SWEEP: float = 0.0
 _VAULT_SWEEP_INTERVAL: float = 30.0  # seconds — tests override via _set_sweep_interval
+_VAULT_CACHE_PKL_VERSION = 1
+_VAULT_CACHE_PKL_PATH = MEMEM_DIR / ".vault-cache.pkl"
+_VAULT_PKL_LOADED: bool = False  # one-shot: only try pkl load once per process
+_VAULT_CACHE_DIRTY: bool = False  # set by event-driven updates, cleared by pkl flush
 
 
 def _set_sweep_interval(seconds: float) -> None:
@@ -97,34 +103,110 @@ def _trigger_sweep() -> None:
 
 
 def _reset_cache() -> None:
-    """Test hook: drop the entire cache. Next read repopulates from disk."""
+    """Test hook: drop the entire cache and forget the pkl load attempt.
+
+    Also removes the pkl file so a subsequent populate doesn't rehydrate
+    from stale disk state. Next read repopulates from the vault.
+    """
+    global _VAULT_LAST_SWEEP, _VAULT_PKL_LOADED
     with _VAULT_CACHE_LOCK:
         _VAULT_CACHE.clear()
         _VAULT_CACHE_FILES.clear()
-        global _VAULT_LAST_SWEEP
         _VAULT_LAST_SWEEP = 0.0
+        _VAULT_PKL_LOADED = False
+    try:
+        if _VAULT_CACHE_PKL_PATH.exists():
+            _VAULT_CACHE_PKL_PATH.unlink()
+    except OSError:
+        pass
+
+
+def _load_pkl_cache() -> bool:
+    """Hydrate the in-memory cache from the pickle file on disk.
+
+    Returns True if the pickle was loaded successfully; False if absent,
+    corrupt, or version-mismatched (caller should fall through to a full
+    parse). The subsequent mtime sweep corrects any drift since the pkl
+    was written, so stale-pkl risk is bounded.
+    """
+    global _VAULT_PKL_LOADED
+    _VAULT_PKL_LOADED = True
+    if not _VAULT_CACHE_PKL_PATH.exists():
+        return False
+    try:
+        with open(_VAULT_CACHE_PKL_PATH, "rb") as fh:
+            payload = pickle.load(fh)
+    except (pickle.PickleError, EOFError, OSError, AttributeError, ImportError) as exc:
+        log.info("vault pkl unusable (%s); falling back to full parse", exc)
+        try:
+            _VAULT_CACHE_PKL_PATH.unlink()
+        except OSError:
+            pass
+        return False
+    if not isinstance(payload, dict) or payload.get("version") != _VAULT_CACHE_PKL_VERSION:
+        return False
+    cache = payload.get("cache") or {}
+    files = payload.get("files") or {}
+    if not isinstance(cache, dict) or not isinstance(files, dict):
+        return False
+    with _VAULT_CACHE_LOCK:
+        _VAULT_CACHE.clear()
+        _VAULT_CACHE_FILES.clear()
+        _VAULT_CACHE.update(cache)
+        _VAULT_CACHE_FILES.update(files)
+    return True
+
+
+def _save_pkl_cache() -> None:
+    """Write the current cache to disk for cross-process cold-start reuse.
+
+    Atomic via tempfile + os.replace to avoid corrupting the file if the
+    process dies mid-write. Called at the end of every sweep that changed
+    anything; mutations within a process rely on the event-driven update
+    alone and a later sweep to flush.
+    """
+    MEMEM_DIR.mkdir(parents=True, exist_ok=True)
+    with _VAULT_CACHE_LOCK:
+        payload = {
+            "version": _VAULT_CACHE_PKL_VERSION,
+            "cache": dict(_VAULT_CACHE),
+            "files": dict(_VAULT_CACHE_FILES),
+        }
+    try:
+        tmp_path = _VAULT_CACHE_PKL_PATH.with_suffix(".tmp")
+        with open(tmp_path, "wb") as fh:
+            pickle.dump(payload, fh, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(tmp_path, _VAULT_CACHE_PKL_PATH)
+    except OSError as exc:
+        log.debug("vault pkl write failed: %s", exc)
 
 
 def _sweep_vault_cache() -> None:
     """Refresh the cache from disk: parse changed files, evict deleted ones.
 
     Cheap when nothing changed (just a stat per file). Called under
-    `_VAULT_CACHE_LOCK` by `_ensure_cache_warm`.
+    `_VAULT_CACHE_LOCK` by `_ensure_cache_warm`. Rewrites the pkl cache
+    if any entries were added, changed, evicted, or the dirty flag was
+    set by an event-driven update since the last sweep.
     """
-    global _VAULT_LAST_SWEEP
+    global _VAULT_LAST_SWEEP, _VAULT_CACHE_DIRTY
     with _VAULT_CACHE_LOCK:
         _VAULT_LAST_SWEEP = time.time()
         if not OBSIDIAN_MEMORIES_DIR.exists():
+            changed = bool(_VAULT_CACHE or _VAULT_CACHE_FILES or _VAULT_CACHE_DIRTY)
             _VAULT_CACHE.clear()
             _VAULT_CACHE_FILES.clear()
+            _VAULT_CACHE_DIRTY = False
+            if changed:
+                _save_pkl_cache()
             return
         current_paths = {str(p) for p in OBSIDIAN_MEMORIES_DIR.glob("*.md")}
-        # Evict cache entries whose file is gone
+        changed = _VAULT_CACHE_DIRTY
         for stale in [f for f in _VAULT_CACHE_FILES if f not in current_paths]:
             old_id = _VAULT_CACHE_FILES[stale]["id"]
             _VAULT_CACHE.pop(old_id, None)
             del _VAULT_CACHE_FILES[stale]
-        # Parse new or modified files
+            changed = True
         for path_str in current_paths:
             try:
                 mtime = os.stat(path_str).st_mtime
@@ -143,13 +225,27 @@ def _sweep_vault_cache() -> None:
                 _VAULT_CACHE.pop(cached["id"], None)
             _VAULT_CACHE[mid] = mem
             _VAULT_CACHE_FILES[path_str] = {"mtime": mtime, "id": mid}
+            changed = True
+        _VAULT_CACHE_DIRTY = False
+    if changed:
+        _save_pkl_cache()
 
 
 def _ensure_cache_warm() -> None:
-    """Populate the cache on first use; sweep periodically after that."""
+    """Populate the cache on first use; sweep periodically after that.
+
+    On cold start, tries the pickle cache first. If present and parseable,
+    the subsequent sweep only has to stat files and re-parse drifted ones
+    — an O(stat) operation — rather than paying O(parse-all) on every
+    process start.
+    """
+    global _VAULT_PKL_LOADED
     with _VAULT_CACHE_LOCK:
         needs_warm = not _VAULT_CACHE_FILES
         needs_sweep = (time.time() - _VAULT_LAST_SWEEP) >= _VAULT_SWEEP_INTERVAL
+        needs_pkl_probe = needs_warm and not _VAULT_PKL_LOADED
+    if needs_pkl_probe:
+        _load_pkl_cache()
     if needs_warm or needs_sweep:
         _sweep_vault_cache()
 
@@ -161,6 +257,7 @@ def _cache_refresh_from_disk(mem_id: str) -> None:
     the canonical fields (obsidian_file, file, related, etc) rather than
     the in-memory dict that may lack derived fields.
     """
+    global _VAULT_CACHE_DIRTY
     if not mem_id:
         return
     with _VAULT_CACHE_LOCK:
@@ -189,10 +286,12 @@ def _cache_refresh_from_disk(mem_id: str) -> None:
     with _VAULT_CACHE_LOCK:
         _VAULT_CACHE[new_id] = mem
         _VAULT_CACHE_FILES[file_path] = {"mtime": mtime, "id": new_id}
+        _VAULT_CACHE_DIRTY = True
 
 
 def _cache_evict(mem_id: str) -> None:
     """Remove a memory from the cache (called by _delete_memory)."""
+    global _VAULT_CACHE_DIRTY
     if not mem_id:
         return
     with _VAULT_CACHE_LOCK:
@@ -200,6 +299,7 @@ def _cache_evict(mem_id: str) -> None:
         stale_files = [f for f, meta in _VAULT_CACHE_FILES.items() if meta["id"] == mem_id]
         for f in stale_files:
             del _VAULT_CACHE_FILES[f]
+        _VAULT_CACHE_DIRTY = True
 
 
 # ---------------------------------------------------------------------------
