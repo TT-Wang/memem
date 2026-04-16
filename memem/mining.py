@@ -722,6 +722,23 @@ def mine_session(jsonl_path: str) -> dict:
                     _deprecate_memory(old_mem["id"], "superseded")
                     memories_deleted += 1
 
+        # Closed-loop relevance scoring: classify the session's outcome
+        # and update the relevance scores of any memories that were recalled
+        # during this session. Non-fatal — if feedback scoring fails, mining
+        # still succeeds.
+        try:
+            from memem.feedback import _classify_session_outcome, update_relevance_scores
+
+            outcome = _classify_session_outcome(messages)
+            if outcome != 0.0:
+                update_relevance_scores(session_id, outcome)
+                log.info(
+                    "Relevance feedback: session=%s outcome=%.2f",
+                    session_id[:8], outcome,
+                )
+        except Exception as exc:
+            log.warning("Relevance feedback failed (non-fatal): %s", exc)
+
         _mark_session(
             path,
             STATUS_COMPLETE,

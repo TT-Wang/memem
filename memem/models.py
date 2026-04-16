@@ -45,6 +45,7 @@ EVENT_LOG = MEMEM_DIR / "events.jsonl"
 SEARCH_DB = MEMEM_DIR / "search.db"
 LAST_BRIEF_PATH = MEMEM_DIR / ".last-brief.json"
 TOPIC_SHIFTS_LOG = MEMEM_DIR / "topic-shifts.log"
+RELEVANCE_SCORES_FILE = MEMEM_DIR / "relevance_scores.json"
 
 # Layer constants for memory stratification (v0.10)
 LAYER_L0 = 0  # Always-loaded: cross-project, importance==5

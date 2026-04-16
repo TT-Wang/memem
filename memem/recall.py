@@ -4,13 +4,24 @@ import subprocess
 from collections import Counter
 from datetime import UTC, datetime
 
-from memem.models import DEFAULT_LAYER, INDEX_PATH
+from memem.models import DEFAULT_LAYER, INDEX_PATH, LAST_BRIEF_PATH
 from memem.obsidian_store import (
     _find_memory,
     _load_obsidian_memories,
     _obsidian_memories,
     _word_set,
 )
+
+
+def _get_current_session_id() -> str:
+    """Read the current session_id from .last-brief.json (written by auto-recall hook)."""
+    try:
+        import json as _json
+
+        data = _json.loads(LAST_BRIEF_PATH.read_text())
+        return data.get("session_id", "")
+    except (OSError, ValueError, _json.JSONDecodeError):
+        return ""
 
 
 def _parse_ts(ts: str) -> float:
@@ -72,7 +83,22 @@ def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 1
             mem_id = mem.get("id", "")
             rank_pos = fts_rank_by_id.get(mem_id, total_fts // 2)
             fts_rank = 1.0 - (rank_pos / total_fts) if total_fts else 0.5
-            score = 0.5 * fts_rank + 0.15 * recency + 0.15 * access_boost + 0.2 * importance
+
+            # Relevance feedback: closed-loop signal from session outcomes.
+            # Raw score is [-1, 1]; normalize to [0, 1] so 0.0 (neutral/unknown)
+            # maps to 0.5 and doesn't bias ranking for memories with no feedback.
+            from memem.feedback import get_relevance_score
+
+            feedback_raw = get_relevance_score(mem_id)
+            feedback_norm = (feedback_raw + 1.0) / 2.0
+
+            score = (
+                0.45 * fts_rank
+                + 0.15 * recency
+                + 0.15 * access_boost
+                + 0.15 * importance
+                + 0.10 * feedback_norm
+            )
             tel_scored.append((score, mem))
 
         tel_scored.sort(key=lambda x: x[0], reverse=True)
@@ -108,10 +134,15 @@ def _search_memories(
         else:
             results = fts_results[:limit]
         if record_access:
+            session_id = _get_current_session_id()
             for mem in results:
                 mem_id = mem.get("id", "")
                 if mem_id:
                     _record_access(mem_id)
+                    if session_id:
+                        from memem.telemetry import record_session_recall
+
+                        record_session_recall(session_id, mem_id)
         return results
 
     # Fallback to file scan (existing code continues below)
@@ -150,7 +181,19 @@ def _search_memories(
             importance = mem.get("importance", 3)
             importance_score = importance / 5.0
 
-            score = 0.5 * keyword_score + 0.15 * recency + 0.15 * access_boost + 0.2 * importance_score
+            # Relevance feedback (closed-loop signal from session outcomes).
+            from memem.feedback import get_relevance_score
+
+            feedback_raw = get_relevance_score(mem.get("id", ""))
+            feedback_norm = (feedback_raw + 1.0) / 2.0
+
+            score = (
+                0.45 * keyword_score
+                + 0.15 * recency
+                + 0.15 * access_boost
+                + 0.15 * importance_score
+                + 0.10 * feedback_norm
+            )
 
             result = dict(mem)
             scored.append((score, result))
@@ -177,10 +220,15 @@ def _search_memories(
 
     # Track access for returned memories (skip for internal/assembly calls)
     if record_access:
+        session_id = _get_current_session_id()
         for mem in results:
             mem_id = mem.get("id", "")
             if mem_id:
                 _record_access(mem_id)
+                if session_id:
+                    from memem.telemetry import record_session_recall
+
+                    record_session_recall(session_id, mem_id)
 
     return results
 

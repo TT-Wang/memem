@@ -77,6 +77,63 @@ def _record_access(memory_id: str) -> None:
 
 
 # ============================================================================
+# Session-level recall tracking (closed-loop relevance scoring)
+# ============================================================================
+
+_SESSION_RECALLS_FILE = MEMEM_DIR / "session_recalls.json"
+
+
+def record_session_recall(session_id: str, memory_id: str) -> None:
+    """Record that a memory was recalled during a specific session.
+
+    Deduplicates within a session — calling twice with the same
+    ``(session_id, memory_id)`` pair writes only one entry. Atomic
+    writes via tmp + fsync + os.replace.
+    """
+    if not session_id or not memory_id:
+        return
+    MEMEM_DIR.mkdir(parents=True, exist_ok=True)
+    lock_path = _SESSION_RECALLS_FILE.with_suffix(".lock")
+    fd = open(lock_path, "w")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        data: dict = {}
+        if _SESSION_RECALLS_FILE.exists():
+            try:
+                data = json.loads(_SESSION_RECALLS_FILE.read_text())
+            except (json.JSONDecodeError, OSError):
+                data = {}
+
+        key = session_id[:12]
+        mid = memory_id[:8]
+        recalls = data.get(key, [])
+        if mid not in recalls:
+            recalls.append(mid)
+            data[key] = recalls
+
+            tmp_path = _SESSION_RECALLS_FILE.with_suffix(".tmp")
+            with open(tmp_path, "w") as out:
+                out.write(json.dumps(data))
+                out.flush()
+                os.fsync(out.fileno())
+            os.replace(tmp_path, _SESSION_RECALLS_FILE)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        fd.close()
+
+
+def get_session_recalls(session_id: str) -> list[str]:
+    """Return the list of memory IDs recalled during a session."""
+    if not _SESSION_RECALLS_FILE.exists():
+        return []
+    try:
+        data = json.loads(_SESSION_RECALLS_FILE.read_text())
+        return data.get(session_id[:12], [])
+    except (json.JSONDecodeError, OSError):
+        return []
+
+
+# ============================================================================
 # Event log (audit trail)
 # ============================================================================
 
