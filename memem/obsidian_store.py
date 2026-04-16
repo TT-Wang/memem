@@ -515,8 +515,22 @@ def _is_duplicate(content: str, scope_id: str = "default", threshold: float = 0.
     return None if return_match else False
 
 
+_RELATED_THRESHOLD = 0.15
+_SAME_PROJECT_BONUS = 0.05
+
+
 def _find_related(content: str, exclude_id: str, scope_id: str = "default", limit: int = 3) -> list[str]:
-    """Return up to `limit` memory IDs (8-char prefix) related to content, excluding exclude_id."""
+    """Return up to `limit` memory IDs (8-char prefix) related to content, excluding exclude_id.
+
+    Searches across ALL projects rather than restricting to ``scope_id``'s
+    project. Same-project matches get a small additive bonus
+    (_SAME_PROJECT_BONUS) as a tiebreaker, but a strong cross-project match
+    still wins over a weak same-project one — important in practice because
+    mining historically tagged many project-specific memories as ``general``
+    (the session cwd wasn't available to the extractor). The threshold is
+    0.15; empirically the genuinely-related cluster sits in 0.18–0.25 while
+    0.1 is noise.
+    """
     content_words = _word_set(content)
     if not content_words:
         return []
@@ -525,10 +539,10 @@ def _find_related(content: str, exclude_id: str, scope_id: str = "default", limi
     content_trigrams = _ngram_set(content, 3)
 
     normalized = _normalize_scope_id(scope_id)
-    project = None if normalized == "general" else normalized
+    caller_project = None if normalized == "general" else normalized
 
     scored = []
-    for mem in _obsidian_memories(project):
+    for mem in _obsidian_memories(None):
         mid = mem.get("id", "")
         if mid == exclude_id or mid.startswith(exclude_id) or exclude_id.startswith(mid[:8]):
             continue
@@ -540,8 +554,11 @@ def _find_related(content: str, exclude_id: str, scope_id: str = "default", limi
         bigram_c = _containment(content_bigrams, _ngram_set(mem_text, 2))
         trigram_c = _containment(content_trigrams, _ngram_set(mem_text, 3))
         score = 0.5 * word_c + 0.3 * bigram_c + 0.2 * trigram_c
-        if score > 0.2:
-            scored.append((score, mid[:8]))
+        if score <= _RELATED_THRESHOLD:
+            continue
+        if caller_project and mem.get("project") == caller_project:
+            score += _SAME_PROJECT_BONUS
+        scored.append((score, mid[:8]))
 
     scored.sort(key=lambda x: x[0], reverse=True)
     return [mid for _, mid in scored[:limit]]

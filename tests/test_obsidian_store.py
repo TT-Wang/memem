@@ -48,6 +48,62 @@ def test_synonym_expansion():
     assert "db" in ws or "database" in ws
 
 
+def test_find_related_cross_project(tmp_vault, tmp_cortex_dir):
+    """_find_related must scan across all projects and surface strong
+    cross-project matches, not just same-project ones.
+
+    The mining pipeline historically tagged many project-specific memories
+    as ``project: general`` (the Haiku extractor only saw conversation
+    text, not session cwd). A same-project-only filter therefore hid the
+    most semantically-relevant memories for a given query.
+    """
+    import importlib
+
+    from memem import models, obsidian_store, search_index
+    importlib.reload(models)
+    importlib.reload(search_index)
+    importlib.reload(obsidian_store)
+
+    m_general_match = obsidian_store._make_memory(
+        content=(
+            "Substrate uses PostgreSQL 16 with asyncpg driver and SQLAlchemy 2.0 "
+            "async ORM. pgvector extension for vector embeddings. "
+            "async_sessionmaker manages session lifecycle."
+        ),
+        title="Substrate — PostgreSQL asyncpg SQLAlchemy async stack",
+        project="general",
+        source_type="mined",
+    )
+    m_unrelated = obsidian_store._make_memory(
+        content="Raw redis LPUSH/RPOP for FIFO event bus with fan-out to multiple consumers.",
+        title="Redis event bus patterns",
+        project="general",
+        source_type="mined",
+    )
+    m_same_project = obsidian_store._make_memory(
+        content="pytest is the testing framework used throughout the Substrate repo.",
+        title="Substrate uses pytest for testing",
+        project="substrate",
+        source_type="mined",
+    )
+    obsidian_store._save_memory(m_general_match)
+    obsidian_store._save_memory(m_unrelated)
+    obsidian_store._save_memory(m_same_project)
+
+    query_content = (
+        "Substrate's database layer is built on PostgreSQL with asyncpg and "
+        "SQLAlchemy 2.0 async ORM (async_sessionmaker, pgvector)."
+    )
+    related = obsidian_store._find_related(
+        query_content, exclude_id="zzzz9999", scope_id="substrate"
+    )
+    assert m_general_match["id"][:8] in related, (
+        f"strong cross-project match missing; got {related}"
+    )
+    # Unrelated memory must NOT be linked
+    assert m_unrelated["id"][:8] not in related
+
+
 def test_purge_mined_memories_clears_fts_and_index(tmp_vault, tmp_cortex_dir):
     """Regression guard: --purge-mined must also clear FTS5 + _index.md entries."""
     import importlib

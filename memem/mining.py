@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import subprocess
 from pathlib import Path
 
@@ -383,17 +384,40 @@ def _extract_json_string(output: str) -> str | None:
 
 
 def _repair_json(s: str) -> str:
-    """Attempt to close any unclosed brackets/braces in a JSON string."""
+    """Attempt to close any unclosed brackets/braces in a JSON string.
+
+    Skips over characters inside string literals so a memory title like
+    ``"see [note"`` can't fool the bracket counter into stacking a phantom
+    closer. If the input ends mid-string (truncated output), also closes
+    the string — best-effort but often produces valid JSON.
+    """
     stack = []
     matching = {"{": "}", "[": "]"}
+    in_string = False
+    escape = False
     for ch in s:
+        if escape:
+            escape = False
+            continue
+        if in_string:
+            if ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            continue
         if ch in matching:
             stack.append(matching[ch])
         elif ch in ("}", "]"):
             if stack and stack[-1] == ch:
                 stack.pop()
-    # Append missing closers in reverse order
-    return s + "".join(reversed(stack))
+    closers = []
+    if in_string:
+        closers.append('"')
+    closers.extend(reversed(stack))
+    return s + "".join(closers)
 
 
 def _summarize_session_haiku(messages: list[str]) -> list[dict]:
@@ -592,6 +616,50 @@ def _summarize_session_haiku(messages: list[str]) -> list[dict]:
     return all_insights
 
 
+def _detect_session_cwd(jsonl_path: str) -> str:
+    """Return the cwd from the first usable record of a Claude Code session.
+
+    Claude Code writes a ``cwd`` field on every message record in the JSONL
+    log; we only need the first one because all records in a session share
+    the same working directory. Returns empty string if the file is missing,
+    unreadable, or has no records with a cwd.
+    """
+    try:
+        with open(jsonl_path) as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                cwd = obj.get("cwd", "")
+                if cwd:
+                    return cwd
+    except OSError:
+        pass
+    return ""
+
+
+def _detect_project_from_cwd(cwd: str) -> str:
+    """Map a session's cwd to a project name by trailing path segment.
+
+    Returns ``"general"`` when cwd is empty, the user's home, the filesystem
+    root, or otherwise unmappable. This is a best-effort fallback — the
+    Haiku prompt has primary responsibility for assigning ``project``, but
+    it only sees the conversation text and routinely emits ``"general"``
+    when the topic isn't self-evidently project-specific.
+    """
+    if not cwd:
+        return "general"
+    home = os.path.expanduser("~")
+    normalized = cwd.rstrip("/")
+    if not normalized or normalized == home.rstrip("/"):
+        return "general"
+    return os.path.basename(normalized) or "general"
+
+
 def _is_agent_session(messages: list[str]) -> bool:
     """Detect agent/module sessions that contain system prompts, not real conversations."""
     if not messages:
@@ -654,6 +722,13 @@ def mine_session(jsonl_path: str) -> dict:
                 "status": STATUS_COMPLETE,
             }
 
+        # Haiku sees only the conversation text, not the session's cwd, so it
+        # emits `project: "general"` whenever the topic isn't self-evidently
+        # project-specific. Override from the recorded cwd where possible so
+        # substrate / cortex-plugin / vibereader work doesn't silently end up
+        # tagged "general" and leak across project-scoped recalls.
+        detected_project = _detect_project_from_cwd(_detect_session_cwd(jsonl_path))
+
         memories_saved = 0
         memories_merged = 0
         duplicates_skipped = 0
@@ -663,6 +738,9 @@ def mine_session(jsonl_path: str) -> dict:
         vault_snapshot = _obsidian_memories()
         for insight in insights:
             project = insight["project"]
+            if project == "general" and detected_project != "general":
+                project = detected_project
+                insight["project"] = project
             content = insight["content"]
 
             existing, score = _find_best_match(content, scope_id=project)
@@ -856,11 +934,15 @@ def mine_all(bypass_gate: bool = True) -> dict:
 
     if newly_mined > 0:
         _generate_index()
-        # Collect all seen projects for consolidation
+        # Collect all seen projects for consolidation. Normalize scope IDs at
+        # build time so pre-normalization aliases (e.g. memories still tagged
+        # "cortex" after the cortex→cortex-plugin rename) don't produce a
+        # zero-memory consolidation pass that gets silently skipped.
+        from memem.models import _normalize_scope_id
         seen_projects: set[str] = set()
         for mem in _obsidian_memories():
             project = mem.get("project", "general")
-            seen_projects.add(project)
+            seen_projects.add(_normalize_scope_id(project))
 
         # Consolidate memories — merge redundant, delete obsolete
         try:
