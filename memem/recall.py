@@ -39,28 +39,74 @@ def _parse_ts(ts: str) -> float:
 
 
 def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 10) -> list[dict]:
-    """FTS5-first search: query SQLite index, load full memories from Obsidian."""
+    """Candidate-union search: parallel FTS + ngram → dedupe → re-rank → top-N.
+
+    Runs two candidate generators in parallel:
+      • FTS5 (surface-form keyword match, fast, may miss paraphrases)
+      • ngram containment (word/bigram/trigram overlap over the cached vault;
+        catches paraphrase matches FTS misses)
+
+    Takes the union of candidate IDs (preserving FTS order for FTS hits,
+    appending ngram-only hits at the end). Loads full memories from the
+    cache, then applies the 5-signal re-ranker (FTS rank, recency, access
+    telemetry, importance, feedback) to the full union BEFORE truncation —
+    so ngram-only candidates compete on equal footing with FTS hits and
+    don't get silently dropped by an early FTS limit. Strict superset of
+    the old FTS-only behavior: every memory FTS would have returned is
+    still present in the union.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    scope = scope_id or "default"
+    candidate_limit = limit * 4  # generous — re-ranker filters noise
+
     try:
+        from memem.obsidian_store import _ngram_search_candidates
         from memem.search_index import _search_fts
-        fts_ids = _search_fts(query, scope_id or "default", limit * 2)
-        if not fts_ids:
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            fts_future = pool.submit(_search_fts, query, scope, candidate_limit)
+            ngram_future = pool.submit(_ngram_search_candidates, query, scope, candidate_limit)
+            try:
+                fts_ids = fts_future.result(timeout=10) or []
+            except Exception as exc:
+                log.debug("FTS candidate generation failed: %s", exc)
+                fts_ids = []
+            try:
+                ngram_ids = ngram_future.result(timeout=10) or []
+            except Exception as exc:
+                log.debug("ngram candidate generation failed: %s", exc)
+                ngram_ids = []
+
+        if not fts_ids and not ngram_ids:
             return []
 
-        # Preserve FTS order as a position map so scoring is O(1) and
-        # immune to ValueError if a memory id ever falls out of fts_ids.
+        # Preserve FTS rank for its hits; ngram-only hits get no FTS rank.
         fts_rank_by_id = {mid: i for i, mid in enumerate(fts_ids)}
         total_fts = len(fts_ids)
+        union_ids: list[str] = list(fts_ids)
+        seen = set(fts_ids)
+        for mid in ngram_ids:
+            if mid not in seen:
+                union_ids.append(mid)
+                seen.add(mid)
 
-        results = []
-        for mid in fts_ids:
+        # Load full memories from cache (O(1) per lookup after m1)
+        mems: list[dict] = []
+        for mid in union_ids:
             mem = _find_memory(mid)
             if mem and mem.get("status", "active") != "deprecated":
-                results.append(mem)
+                mems.append(mem)
+        if not mems:
+            return []
 
-        # Apply temporal + importance weighting
-        tel_scored = []
-        for mem in results:
-            tel = _get_telemetry(mem.get("id", ""))
+        # 5-signal re-rank across the FULL union (not after any truncation)
+        from memem.feedback import get_relevance_score
+
+        scored: list[tuple[float, dict]] = []
+        for mem in mems:
+            mem_id = mem.get("id", "")
+            tel = _get_telemetry(mem_id)
             last_touch = tel.get("last_accessed") or mem.get("updated_at") or mem.get("created_at", "")
             try:
                 if last_touch:
@@ -75,16 +121,13 @@ def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 1
             access_boost = min(tel.get("access_count", 0) / 10.0, 1.0)
             importance = mem.get("importance", 3) / 5.0
 
-            # FTS already ranked by relevance, add temporal/importance boost.
-            # Falls back to mid-rank (0.5) if the id is unexpectedly missing.
-            mem_id = mem.get("id", "")
-            rank_pos = fts_rank_by_id.get(mem_id, total_fts // 2)
-            fts_rank = 1.0 - (rank_pos / total_fts) if total_fts else 0.5
-
-            # Relevance feedback: closed-loop signal from session outcomes.
-            # Raw score is [-1, 1]; normalize to [0, 1] so 0.0 (neutral/unknown)
-            # maps to 0.5 and doesn't bias ranking for memories with no feedback.
-            from memem.feedback import get_relevance_score
+            if mem_id in fts_rank_by_id and total_fts:
+                rank_pos = fts_rank_by_id[mem_id]
+                fts_rank = 1.0 - (rank_pos / total_fts)
+            else:
+                # ngram-only hit — give a neutral FTS score so ngram signal
+                # isn't forced to beat a "0 FTS rank" penalty.
+                fts_rank = 0.5
 
             feedback_raw = get_relevance_score(mem_id)
             feedback_norm = (feedback_raw + 1.0) / 2.0
@@ -96,12 +139,12 @@ def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 1
                 + 0.15 * importance
                 + 0.10 * feedback_norm
             )
-            tel_scored.append((score, mem))
+            scored.append((score, mem))
 
-        tel_scored.sort(key=lambda x: x[0], reverse=True)
-        return [mem for _, mem in tel_scored[:limit]]
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [mem for _, mem in scored[:limit]]
     except Exception as exc:
-        log.debug("FTS search failed, falling back to file scan: %s", exc)
+        log.debug("Union search failed, falling back to file scan: %s", exc)
         return []  # Fallback: caller will use file scan
 
 

@@ -770,6 +770,46 @@ _RELATED_THRESHOLD = 0.15
 _SAME_PROJECT_BONUS = 0.05
 
 
+def _ngram_search_candidates(query: str, scope_id: str = "default", limit: int = 20) -> list[str]:
+    """Return memory IDs ranked by ngram containment against `query`.
+
+    Second candidate generator alongside FTS5, used by the union-rank path
+    in recall.py. Catches semantic/paraphrase matches that FTS surface-form
+    matching misses (e.g. query "postgres async" matching memory content
+    "asyncpg driver"). Operates on the in-memory vault cache so post-m1
+    cost is O(N) dict iteration with no disk I/O.
+
+    Uses the same scoring as `_find_related` (0.5 word + 0.3 bigram +
+    0.2 trigram containment) with threshold 0.2 — higher than _find_related's
+    0.15 because search candidates need broader recall than link suggestions
+    don't (re-ranker filters noise downstream).
+    """
+    query_words = _word_set(query)
+    if not query_words:
+        return []
+    query_bigrams = _ngram_set(query, 2)
+    query_trigrams = _ngram_set(query, 3)
+    normalized = _normalize_scope_id(scope_id) if scope_id else "general"
+    scope_arg = None if normalized == "general" else normalized
+
+    scored: list[tuple[float, str]] = []
+    for mem in _obsidian_memories(scope_arg):
+        mem_text = mem.get("essence", "") + " " + mem.get("title", "")
+        mem_words = _word_set(mem_text)
+        if not mem_words:
+            continue
+        word_c = _containment(query_words, mem_words)
+        bigram_c = _containment(query_bigrams, _ngram_set(mem_text, 2))
+        trigram_c = _containment(query_trigrams, _ngram_set(mem_text, 3))
+        score = 0.5 * word_c + 0.3 * bigram_c + 0.2 * trigram_c
+        if score < 0.2:
+            continue
+        scored.append((score, mem.get("id", "")))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [mid for _, mid in scored[:limit]]
+
+
 def _find_related(content: str, exclude_id: str, scope_id: str = "default", limit: int = 3) -> list[str]:
     """Return up to `limit` memory IDs (8-char prefix) related to content, excluding exclude_id.
 
