@@ -14,6 +14,8 @@ import logging
 import os
 import re
 import tempfile
+import threading
+import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -54,6 +56,150 @@ log = logging.getLogger("memem-obsidian")
 
 # Alias for backward compat
 _now = now_iso
+
+
+# ---------------------------------------------------------------------------
+# In-memory vault cache
+# ---------------------------------------------------------------------------
+# Parsing every markdown file in the vault on every `_obsidian_memories()` or
+# `_find_memory()` call is expensive — a single search-with-graph-expansion
+# can fan out to 40+ full-vault scans (O(N²) on vault size per recall). The
+# cache below keeps parsed memories in memory and refreshes stale entries via
+# mtime comparison. Invalidation is hybrid:
+#   (1) event-driven: _save_memory / _update_memory / _delete_memory update
+#       the cache directly in the current process
+#   (2) throttled mtime sweep: every _VAULT_SWEEP_INTERVAL seconds, scan file
+#       mtimes and re-parse changed files / evict deleted files
+#
+# The sweep covers cross-process writes (miner daemon vs. MCP server).
+
+_VAULT_CACHE: dict[str, dict] = {}           # memory_id → mem dict
+_VAULT_CACHE_FILES: dict[str, dict] = {}     # file path → {"mtime": float, "id": str}
+_VAULT_CACHE_LOCK = threading.RLock()
+_VAULT_LAST_SWEEP: float = 0.0
+_VAULT_SWEEP_INTERVAL: float = 30.0  # seconds — tests override via _set_sweep_interval
+
+
+def _set_sweep_interval(seconds: float) -> None:
+    """Test hook: change the mtime-sweep throttle without patching globals."""
+    global _VAULT_SWEEP_INTERVAL, _VAULT_LAST_SWEEP
+    with _VAULT_CACHE_LOCK:
+        _VAULT_SWEEP_INTERVAL = seconds
+        _VAULT_LAST_SWEEP = 0.0
+
+
+def _trigger_sweep() -> None:
+    """Test hook: force an immediate mtime sweep regardless of throttle."""
+    global _VAULT_LAST_SWEEP
+    with _VAULT_CACHE_LOCK:
+        _VAULT_LAST_SWEEP = 0.0
+    _sweep_vault_cache()
+
+
+def _reset_cache() -> None:
+    """Test hook: drop the entire cache. Next read repopulates from disk."""
+    with _VAULT_CACHE_LOCK:
+        _VAULT_CACHE.clear()
+        _VAULT_CACHE_FILES.clear()
+        global _VAULT_LAST_SWEEP
+        _VAULT_LAST_SWEEP = 0.0
+
+
+def _sweep_vault_cache() -> None:
+    """Refresh the cache from disk: parse changed files, evict deleted ones.
+
+    Cheap when nothing changed (just a stat per file). Called under
+    `_VAULT_CACHE_LOCK` by `_ensure_cache_warm`.
+    """
+    global _VAULT_LAST_SWEEP
+    with _VAULT_CACHE_LOCK:
+        _VAULT_LAST_SWEEP = time.time()
+        if not OBSIDIAN_MEMORIES_DIR.exists():
+            _VAULT_CACHE.clear()
+            _VAULT_CACHE_FILES.clear()
+            return
+        current_paths = {str(p) for p in OBSIDIAN_MEMORIES_DIR.glob("*.md")}
+        # Evict cache entries whose file is gone
+        for stale in [f for f in _VAULT_CACHE_FILES if f not in current_paths]:
+            old_id = _VAULT_CACHE_FILES[stale]["id"]
+            _VAULT_CACHE.pop(old_id, None)
+            del _VAULT_CACHE_FILES[stale]
+        # Parse new or modified files
+        for path_str in current_paths:
+            try:
+                mtime = os.stat(path_str).st_mtime
+            except OSError:
+                continue
+            cached = _VAULT_CACHE_FILES.get(path_str)
+            if cached and cached["mtime"] == mtime:
+                continue
+            mem = _parse_obsidian_memory_file(Path(path_str))
+            if not mem:
+                continue
+            mid = mem.get("id", "")
+            if not mid:
+                continue
+            if cached and cached["id"] != mid:
+                _VAULT_CACHE.pop(cached["id"], None)
+            _VAULT_CACHE[mid] = mem
+            _VAULT_CACHE_FILES[path_str] = {"mtime": mtime, "id": mid}
+
+
+def _ensure_cache_warm() -> None:
+    """Populate the cache on first use; sweep periodically after that."""
+    with _VAULT_CACHE_LOCK:
+        needs_warm = not _VAULT_CACHE_FILES
+        needs_sweep = (time.time() - _VAULT_LAST_SWEEP) >= _VAULT_SWEEP_INTERVAL
+    if needs_warm or needs_sweep:
+        _sweep_vault_cache()
+
+
+def _cache_refresh_from_disk(mem_id: str) -> None:
+    """Re-parse the on-disk file for `mem_id` and update the cache.
+
+    Call after any mutation that writes a memory to disk so the cache holds
+    the canonical fields (obsidian_file, file, related, etc) rather than
+    the in-memory dict that may lack derived fields.
+    """
+    if not mem_id:
+        return
+    with _VAULT_CACHE_LOCK:
+        # Find the file for this id by inspecting current cache metadata.
+        file_path = None
+        for f, meta in _VAULT_CACHE_FILES.items():
+            if meta["id"] == mem_id:
+                file_path = f
+                break
+    if file_path is None:
+        # Fall back to glob — slug-based filename
+        matches = list(OBSIDIAN_MEMORIES_DIR.glob(f"*-{mem_id[:8]}.md"))
+        if not matches:
+            return
+        file_path = str(matches[0])
+    try:
+        mtime = os.stat(file_path).st_mtime
+    except OSError:
+        return
+    mem = _parse_obsidian_memory_file(Path(file_path))
+    if not mem:
+        return
+    new_id = mem.get("id", "")
+    if not new_id:
+        return
+    with _VAULT_CACHE_LOCK:
+        _VAULT_CACHE[new_id] = mem
+        _VAULT_CACHE_FILES[file_path] = {"mtime": mtime, "id": new_id}
+
+
+def _cache_evict(mem_id: str) -> None:
+    """Remove a memory from the cache (called by _delete_memory)."""
+    if not mem_id:
+        return
+    with _VAULT_CACHE_LOCK:
+        _VAULT_CACHE.pop(mem_id, None)
+        stale_files = [f for f, meta in _VAULT_CACHE_FILES.items() if meta["id"] == mem_id]
+        for f in stale_files:
+            del _VAULT_CACHE_FILES[f]
 
 
 # ---------------------------------------------------------------------------
@@ -347,32 +493,37 @@ def _extract_memory_id_from_filename(md_file: Path) -> str:
 def _obsidian_memories(scope_id: str | None = None, include_deprecated: bool = False) -> list[dict]:
     if not OBSIDIAN_MEMORIES_DIR.exists():
         return []
-
+    _ensure_cache_warm()
+    with _VAULT_CACHE_LOCK:
+        cached = list(_VAULT_CACHE.values())
+    normalized = _normalize_scope_id(scope_id) if scope_id is not None else "general"
     memories = []
-    for md_file in sorted(OBSIDIAN_MEMORIES_DIR.glob("*.md")):
-        mem = _parse_obsidian_memory_file(md_file)
-        if not mem:
-            continue
+    for mem in cached:
         if not include_deprecated and mem.get("status") == "deprecated":
             continue
-        project = mem.get("project", "general")
-        normalized = _normalize_scope_id(scope_id) if scope_id is not None else "general"
-        if normalized != "general" and project != normalized:
+        if normalized != "general" and mem.get("project", "general") != normalized:
             continue
         memories.append(mem)
+    # Preserve previous sort-by-filename ordering so downstream code that
+    # relied on it (e.g. deterministic iteration) keeps working.
+    memories.sort(key=lambda m: m.get("file", "") or m.get("obsidian_file", ""))
     return memories
 
 
 def _find_memory(memory_id: str) -> dict | None:
-    """Find memory by exact ID or 8-char prefix. Single pass."""
-    prefix_match = None
-    for mem in _obsidian_memories():
-        mid = mem.get("id", "")
-        if mid == memory_id:
-            return mem
-        if prefix_match is None and len(memory_id) >= 8 and mid.startswith(memory_id):
-            prefix_match = mem
-    return prefix_match
+    """Find memory by exact ID or 8-char prefix. Cache-backed: O(1) exact,
+    O(N) dict-iter for prefix (but no disk I/O)."""
+    if not memory_id:
+        return None
+    _ensure_cache_warm()
+    with _VAULT_CACHE_LOCK:
+        if memory_id in _VAULT_CACHE:
+            return _VAULT_CACHE[memory_id]
+        if len(memory_id) >= 8:
+            for mid, mem in _VAULT_CACHE.items():
+                if mid.startswith(memory_id):
+                    return mem
+    return None
 
 
 def _load_obsidian_memories(picked_ids: list[str]) -> list[dict]:
@@ -643,6 +794,7 @@ def _save_memory(mem: dict):
             mem["related"] = related
 
     _write_obsidian_memory(mem)
+    _cache_refresh_from_disk(mem.get("id", ""))
     if INDEX_PATH.exists():
         _append_or_update_index_line(mem)
     _log_event("save", mem.get("id", ""), title=mem.get("title", ""))
@@ -674,6 +826,7 @@ def _update_memory(memory_id: str, new_content: str, new_title: str = "") -> Non
     elif "related" in mem:
         mem["related"] = []
     _write_obsidian_memory(mem)
+    _cache_refresh_from_disk(mem.get("id", ""))
     _append_or_update_index_line(mem)
     _log_event("update", memory_id)
     _index_memory(mem)
@@ -682,10 +835,12 @@ def _update_memory(memory_id: str, new_content: str, new_title: str = "") -> Non
 def _delete_memory(memory_id: str) -> bool:
     try:
         mem = _find_memory(memory_id)
+        full_id = mem.get("id", memory_id) if mem else memory_id
         if mem:
             obsidian_path = Path(mem.get("file", ""))
             if obsidian_path.exists():
                 obsidian_path.unlink()
+        _cache_evict(full_id)
         _remove_index_line(memory_id)
         _log_event("delete", memory_id)
         _remove_from_index(memory_id)
@@ -702,6 +857,7 @@ def _deprecate_memory(memory_id: str, reason: str = "superseded") -> bool:
     mem["status"] = "deprecated"
     mem["valid_to"] = _now()
     _write_obsidian_memory(mem)
+    _cache_refresh_from_disk(mem.get("id", ""))
     _remove_index_line(memory_id)
     _log_event("deprecate", memory_id, reason=reason)
     _remove_from_index(memory_id)
@@ -872,6 +1028,7 @@ def purge_mined_memories(mined_sessions_file: Path) -> dict:
                 obsidian_path.unlink()
                 mem_id = mem.get("id", "")
                 if mem_id:
+                    _cache_evict(mem_id)
                     _remove_from_index(mem_id)
                     _remove_index_line(mem_id)
                 deleted += 1

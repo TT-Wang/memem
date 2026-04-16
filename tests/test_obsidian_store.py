@@ -104,6 +104,131 @@ def test_find_related_cross_project(tmp_vault, tmp_cortex_dir):
     assert m_unrelated["id"][:8] not in related
 
 
+def test_vault_cache_returns_same_set_as_baseline(tmp_vault, tmp_cortex_dir):
+    """Accuracy regression: _obsidian_memories() with cache must return the
+    same set of IDs as a fresh parse of the vault would."""
+    import importlib
+
+    from memem import obsidian_store
+    importlib.reload(obsidian_store)
+
+    for title, content in [
+        ("m1", "Content about python testing and pytest usage"),
+        ("m2", "Content about async database connections and PostgreSQL"),
+        ("m3", "Content about terminal keyboard handling and TUI events"),
+    ]:
+        obsidian_store._save_memory(obsidian_store._make_memory(
+            content=content, title=title, project="general", source_type="user",
+        ))
+
+    cached_ids = {m.get("id") for m in obsidian_store._obsidian_memories()}
+
+    # Force a full re-parse by dropping the cache; must produce identical set
+    obsidian_store._reset_cache()
+    fresh_ids = {m.get("id") for m in obsidian_store._obsidian_memories()}
+    assert cached_ids == fresh_ids, f"cache/disk drift: {cached_ids ^ fresh_ids}"
+    assert len(cached_ids) == 3
+
+
+def test_vault_cache_cross_process_write_via_sweep(tmp_vault, tmp_cortex_dir):
+    """Cross-process invalidation: if another process writes a file while the
+    cache is warm, the next read after a sweep must see the new content."""
+    import importlib
+
+    from memem import obsidian_store
+    importlib.reload(obsidian_store)
+    obsidian_store._set_sweep_interval(0.05)  # short throttle for testability
+
+    m = obsidian_store._make_memory(
+        content="Initial content about python",
+        title="CrossProcTest",
+        project="general", source_type="user",
+    )
+    obsidian_store._save_memory(m)
+    mid = m["id"]
+
+    # Warm the cache
+    before = obsidian_store._find_memory(mid)
+    assert before is not None
+    assert "Initial content" in before.get("essence", "")
+
+    # Simulate a cross-process write: touch the file and rewrite essence
+    import time
+    from pathlib import Path
+    md_file = Path(before["file"])
+    new_body = md_file.read_text().replace("Initial content", "MUTATED content")
+    time.sleep(0.02)  # ensure mtime differs
+    md_file.write_text(new_body)
+
+    # Bump mtime into the future to guarantee detection
+    new_mtime = md_file.stat().st_mtime + 1
+    import os as _os
+    _os.utime(md_file, (new_mtime, new_mtime))
+
+    # Force a sweep and re-read
+    obsidian_store._trigger_sweep()
+    after = obsidian_store._find_memory(mid)
+    assert after is not None
+    assert "MUTATED content" in after.get("essence", ""), (
+        f"sweep failed to pick up cross-process write: {after.get('essence', '')[:80]}"
+    )
+
+
+def test_vault_cache_evicts_deleted_files(tmp_vault, tmp_cortex_dir):
+    """When a file is deleted (e.g. by another process), the sweep must
+    evict its entry from the cache."""
+    import importlib
+
+    from memem import obsidian_store
+    importlib.reload(obsidian_store)
+    obsidian_store._set_sweep_interval(0.05)
+
+    m = obsidian_store._make_memory(
+        content="About to be deleted", title="DelTest",
+        project="general", source_type="user",
+    )
+    obsidian_store._save_memory(m)
+    mid = m["id"]
+    assert obsidian_store._find_memory(mid) is not None
+
+    # External deletion (bypass _delete_memory)
+    from pathlib import Path
+    Path(obsidian_store._VAULT_CACHE[mid]["file"]).unlink()
+
+    obsidian_store._trigger_sweep()
+    assert obsidian_store._find_memory(mid) is None
+
+
+def test_vault_cache_perf_10_lookups(tmp_vault, tmp_cortex_dir):
+    """Warm-cache perf: 10 sequential _find_memory calls should complete
+    in under 50ms (no disk I/O after warmup)."""
+    import importlib
+    import time
+
+    from memem import obsidian_store
+    importlib.reload(obsidian_store)
+
+    ids = []
+    for i in range(20):
+        mm = obsidian_store._make_memory(
+            content=f"Fixture memory number {i} about some topic or another",
+            title=f"perf_m{i}",
+            project="general",
+            source_type="user",
+        )
+        obsidian_store._save_memory(mm)
+        ids.append(mm["id"])
+
+    # Warm the cache
+    obsidian_store._find_memory(ids[0])
+
+    start = time.time()
+    for mid in ids[:10]:
+        obsidian_store._find_memory(mid)
+    elapsed = time.time() - start
+    assert elapsed < 0.05, f"10 warm lookups took {elapsed*1000:.1f}ms, expected <50ms"
+
+
 def test_update_memory_refreshes_related(tmp_vault, tmp_cortex_dir):
     """After a merge rewrites a memory's content, _update_memory must
     recompute `related` so wiki-links match the post-merge topic, not the
