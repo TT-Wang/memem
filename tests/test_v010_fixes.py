@@ -219,53 +219,6 @@ def test_find_settled_sessions_bypass_gate_param(tmp_cortex_dir, tmp_path, monke
     assert old_session in results_bypass
 
 
-def test_smart_recall_respects_scope_id(tmp_vault, monkeypatch):
-    """v0.10.2 fix #5: smart_recall must filter by scope_id in the Haiku path.
-
-    Previously smart_recall only honored scope_id on the fallback branches.
-    When Haiku picked memories from the global index, they were loaded and
-    returned without any scope filter, leaking cross-project memories.
-    """
-    from memem import recall
-    importlib.reload(recall)
-
-    fake_memories = [
-        {"id": "aaaa1111", "title": "A1", "project": "projectA", "body": "from A", "essence": "from A"},
-        {"id": "bbbb2222", "title": "B1", "project": "projectB", "body": "from B", "essence": "from B"},
-    ]
-
-    # Stub the loader and the memory_recall fallback
-    monkeypatch.setattr(recall, "_load_obsidian_memories", lambda ids: list(fake_memories))
-    monkeypatch.setattr(recall, "memory_recall", lambda prompt, scope_id="default", limit=10: "FALLBACK")
-
-    # Stub INDEX_PATH directly on the recall module (bypasses the import-time binding)
-    class FakeIndex:
-        @staticmethod
-        def exists():
-            return True
-
-        @staticmethod
-        def read_text():
-            return "(aaaa1111) A1\n(bbbb2222) B1\n"
-    monkeypatch.setattr(recall, "INDEX_PATH", FakeIndex)
-
-    # Make the capabilities check think Claude is available
-    import memem.capabilities
-    monkeypatch.setattr(memem.capabilities, "assembly_available", lambda: True)
-
-    # Fake Haiku subprocess returning both IDs
-    class FakeResult:
-        returncode = 0
-        stdout = "aaaa1111\nbbbb2222\n"
-        stderr = ""
-    monkeypatch.setattr(recall.subprocess, "run", lambda *a, **kw: FakeResult())
-
-    # Scoped call: only projectA memory should survive
-    output = recall.smart_recall("test", scope_id="projectA")
-    assert "A1" in output, f"projectA memory missing from output: {output!r}"
-    assert "B1" not in output, f"smart_recall leaked projectB memory: {output!r}"
-
-
 def test_context_assemble_returns_materials_on_haiku_failure(tmp_vault, monkeypatch):
     """v0.10.2 fix #4: context_assemble must return raw materials on failure.
 

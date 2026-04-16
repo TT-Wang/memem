@@ -33,7 +33,7 @@ _POSITIVE_PATTERNS = [
 ]
 
 _NEGATIVE_PATTERNS = [
-    re.compile(r"\b(no|wrong|don't|stop|revert|undo|rollback|broken|bug|fail|incorrect)\b", re.I),
+    re.compile(r"\b(wrong|don't|stop|revert|undo|rollback|broken|bug|fail|incorrect)\b", re.I),
     re.compile(r"\b(that's not right|not what I|try again|start over|scrap)\b", re.I),
 ]
 

@@ -9,10 +9,13 @@ import fcntl
 import json
 import logging
 import os
+from datetime import UTC, datetime, timedelta
 
 from memem.models import EVENT_LOG, MEMEM_DIR, TELEMETRY_FILE, now_iso
 
 log = logging.getLogger("memem-telemetry")
+
+_SESSION_RECALLS_MAX_AGE_DAYS = 30
 
 
 # ============================================================================
@@ -83,12 +86,46 @@ def _record_access(memory_id: str) -> None:
 _SESSION_RECALLS_FILE = MEMEM_DIR / "session_recalls.json"
 
 
+def _entry_recalls(entry) -> list[str]:
+    """Return the recalls list for a session entry (handles legacy list format)."""
+    if isinstance(entry, list):
+        return entry
+    if isinstance(entry, dict):
+        return entry.get("recalls", [])
+    return []
+
+
+def _prune_old_recalls(data: dict) -> dict:
+    """Drop session entries older than _SESSION_RECALLS_MAX_AGE_DAYS.
+
+    Entries without a timestamp (legacy list format) are kept — they
+    predate pruning and we don't know when they were written. They
+    migrate to the new format on their next touch.
+    """
+    cutoff = datetime.now(UTC) - timedelta(days=_SESSION_RECALLS_MAX_AGE_DAYS)
+    pruned = {}
+    for key, entry in data.items():
+        if isinstance(entry, dict) and "ts" in entry:
+            try:
+                ts = datetime.fromisoformat(entry["ts"])
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=UTC)
+                if ts < cutoff:
+                    continue
+            except (ValueError, TypeError):
+                pass  # malformed timestamp — keep the entry
+        pruned[key] = entry
+    return pruned
+
+
 def record_session_recall(session_id: str, memory_id: str) -> None:
     """Record that a memory was recalled during a specific session.
 
     Deduplicates within a session — calling twice with the same
-    ``(session_id, memory_id)`` pair writes only one entry. Atomic
-    writes via tmp + fsync + os.replace.
+    ``(session_id, memory_id)`` pair writes only one entry. Prunes
+    entries older than 30 days on write so the file doesn't grow
+    unboundedly over a year of daily use. Atomic writes via tmp +
+    fsync + os.replace.
     """
     if not session_id or not memory_id:
         return
@@ -104,33 +141,55 @@ def record_session_recall(session_id: str, memory_id: str) -> None:
             except (json.JSONDecodeError, OSError):
                 data = {}
 
+        data = _prune_old_recalls(data)
+
         key = session_id[:12]
         mid = memory_id[:8]
-        recalls = data.get(key, [])
-        if mid not in recalls:
+        entry = data.get(key)
+        recalls = _entry_recalls(entry)
+        changed = mid not in recalls
+        if changed:
             recalls.append(mid)
-            data[key] = recalls
+        data[key] = {"ts": now_iso(), "recalls": recalls}
 
-            tmp_path = _SESSION_RECALLS_FILE.with_suffix(".tmp")
-            with open(tmp_path, "w") as out:
-                out.write(json.dumps(data))
-                out.flush()
-                os.fsync(out.fileno())
-            os.replace(tmp_path, _SESSION_RECALLS_FILE)
+        tmp_path = _SESSION_RECALLS_FILE.with_suffix(".tmp")
+        with open(tmp_path, "w") as out:
+            out.write(json.dumps(data))
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(tmp_path, _SESSION_RECALLS_FILE)
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
         fd.close()
 
 
 def get_session_recalls(session_id: str) -> list[str]:
-    """Return the list of memory IDs recalled during a session."""
+    """Return the list of memory IDs recalled during a session.
+
+    Uses a shared (read) lock on the recalls file to avoid reading a
+    partially-written state while a concurrent writer is mid-update.
+    """
     if not _SESSION_RECALLS_FILE.exists():
         return []
+    lock_path = _SESSION_RECALLS_FILE.with_suffix(".lock")
     try:
+        fd = open(lock_path, "w")
+    except OSError:
+        # Lock dir not writable (rare) — fall back to an unlocked read.
+        try:
+            data = json.loads(_SESSION_RECALLS_FILE.read_text())
+            return _entry_recalls(data.get(session_id[:12]))
+        except (json.JSONDecodeError, OSError):
+            return []
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH)
         data = json.loads(_SESSION_RECALLS_FILE.read_text())
-        return data.get(session_id[:12], [])
+        return _entry_recalls(data.get(session_id[:12]))
     except (json.JSONDecodeError, OSError):
         return []
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        fd.close()
 
 
 # ============================================================================

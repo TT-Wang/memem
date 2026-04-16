@@ -316,7 +316,12 @@ def _build_chunks(
         if i < n and overlap_chars > 0:
             overlap_consumed = 0
             back = 0
-            while back < len(chunk):
+            # Clamp to len(chunk) - 1 so the next chunk always advances by
+            # at least one message; without this, a chunk of many tiny
+            # messages (all fitting within overlap_chars) could roll back
+            # entirely and re-emit start_i, producing no forward progress.
+            max_rollback = len(chunk) - 1
+            while back < max_rollback:
                 cand = chunk[len(chunk) - 1 - back]
                 cand_cost = len(cand) + sep_cost
                 if overlap_consumed + cand_cost > overlap_chars:
@@ -325,6 +330,10 @@ def _build_chunks(
                 back += 1
             if back > 0:
                 i -= back  # next chunk starts `back` messages earlier
+            assert i > start_i, (
+                f"_build_chunks overlap rollback erased all progress: "
+                f"start_i={start_i}, i={i}, chunk_len={len(chunk)}, back={back}"
+            )
 
     return chunks
 
@@ -856,9 +865,9 @@ def mine_all(bypass_gate: bool = True) -> dict:
         # Consolidate memories — merge redundant, delete obsolete
         try:
             for project in seen_projects:
-                result = _consolidate_project(project)
-                if result["merged"] > 0 or result["deleted"] > 0:
-                    log.info("Consolidation: project=%s merged=%d deleted=%d", project, result["merged"], result["deleted"])
+                consolidation_result = _consolidate_project(project)
+                if consolidation_result["merged"] > 0 or consolidation_result["deleted"] > 0:
+                    log.info("Consolidation: project=%s merged=%d deleted=%d", project, consolidation_result["merged"], consolidation_result["deleted"])
         except Exception as exc:
             log.warning("Consolidation failed: %s", exc)
 

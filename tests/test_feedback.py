@@ -3,6 +3,28 @@
 import importlib
 import json
 
+
+def test_classify_no_worries_is_neutral():
+    """Bare "no" should no longer count as a negative signal.
+
+    Previously '\bno\b' was in the correction regex, so routine phrases
+    like "no worries", "no problem", "no need" accumulated negative hits
+    and poisoned the relevance scores of recalled memories over time.
+    """
+    from memem import feedback
+    importlib.reload(feedback)
+
+    messages = [
+        "User: can you help me debug this",
+        "Assistant: Sure, what's the issue?",
+        "User: no worries, I figured it out",
+        "User: no problem, thanks anyway",
+        "User: yes, that's fine",
+    ]
+    score = feedback._classify_session_outcome(messages)
+    assert score >= 0.0, f"'no worries' phrasing should not be negative, got {score}"
+
+
 # ── Outcome classification ──────────────────────────────────────────
 
 

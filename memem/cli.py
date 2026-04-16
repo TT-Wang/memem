@@ -10,7 +10,7 @@ from memem.obsidian_store import (
     _generate_index,
     purge_mined_memories,
 )
-from memem.recall import memory_recall, smart_recall
+from memem.recall import memory_recall
 from memem.session_state import MINED_SESSIONS_FILE
 from memem.storage import _register_server_pid
 
@@ -109,11 +109,6 @@ def dispatch_cli(argv: list[str], mcp) -> None:
                   "or `memory_search(query=...)` for more._\n")
             for mem in compact_memories:
                 print(_format_compact_index_line(mem))
-        return
-
-    if cmd == "--recall-smart":
-        query = " ".join(argv[2:]) if len(argv) >= 3 else ""
-        print(smart_recall(query) if query else "No query provided.")
         return
 
     if cmd == "--recall":

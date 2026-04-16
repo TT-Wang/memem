@@ -29,3 +29,23 @@ def test_remove_from_index(tmp_cortex_dir):
     assert "to-remove" in _search_fts("deleteme")
     _remove_from_index("to-remove")
     assert "to-remove" not in _search_fts("deleteme")
+
+
+def test_fts_special_query_chars(tmp_cortex_dir):
+    """Queries containing FTS5 operators / special chars must not raise
+    or silently return bogus results. Bare AND / OR / NOT and prefix `*`
+    used to either leak through as operators or trigger a swallowed
+    sqlite parse error that returned []."""
+    from memem.search_index import _index_memory, _search_fts
+    mem = {
+        "id": "tok-query-test",
+        "title": "JWT auth notes",
+        "essence": "Use RS256 for signing",
+        "project": "general",
+        "domain_tags": ["auth"],
+    }
+    _index_memory(mem)
+    for q in ["NOT auth", "jwt OR *", "AND OR NOT", "title:jwt", 'with " quote', ""]:
+        results = _search_fts(q, limit=10)
+        assert isinstance(results, list), f"query {q!r} should return a list, got {type(results)}"
+    assert "tok-query-test" in _search_fts("JWT auth", limit=10)

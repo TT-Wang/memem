@@ -5,11 +5,32 @@ Obsidian is the source of truth, this is the query engine.
 """
 
 import logging
+import re
 import sqlite3
 
 from memem.models import MEMEM_DIR, SEARCH_DB, _normalize_scope_id
 
 log = logging.getLogger("memem-search")
+
+_FTS5_OPERATORS = {"AND", "OR", "NOT", "NEAR"}
+_FTS5_TOKEN_CAP = 20
+
+
+def _sanitize_fts_query(query: str) -> str:
+    """Tokenize user input for safe use in an FTS5 MATCH query.
+
+    FTS5 treats bare words like AND / OR / NOT as operators and `*` / `:`
+    as prefix / column syntax. Passing raw user input into MATCH can raise
+    SQLite errors or silently produce wrong results. We extract alphanumeric
+    tokens, drop reserved operator words, and wrap each remaining token as
+    a phrase literal joined with implicit AND, capped at 20 tokens to bound
+    query cost on long inputs (e.g. 200-char content snippets).
+    """
+    tokens = re.findall(r"[A-Za-z0-9_]+", query)
+    safe = [t for t in tokens if t.upper() not in _FTS5_OPERATORS]
+    if not safe:
+        return ""
+    return " ".join(f'"{t}"' for t in safe[:_FTS5_TOKEN_CAP])
 
 
 def _init_search_db() -> sqlite3.Connection:
@@ -59,11 +80,13 @@ def _remove_from_index(memory_id: str) -> None:
 
 def _search_fts(query: str, scope_id: str = "default", limit: int = 20) -> list[str]:
     """FTS5 search, returns list of memory IDs ranked by relevance."""
+    safe_query = _sanitize_fts_query(query)
+    if not safe_query:
+        return []
+    conn = None
     try:
         conn = _init_search_db()
         normalized = _normalize_scope_id(scope_id)
-        # Escape FTS5 special chars
-        safe_query = query.replace('"', '""')
         if normalized != "general":
             cursor = conn.execute(
                 "SELECT memory_id FROM memories_fts WHERE memories_fts MATCH ? AND project = ? ORDER BY rank LIMIT ?",
@@ -74,12 +97,13 @@ def _search_fts(query: str, scope_id: str = "default", limit: int = 20) -> list[
                 "SELECT memory_id FROM memories_fts WHERE memories_fts MATCH ? ORDER BY rank LIMIT ?",
                 (safe_query, limit),
             )
-        results = [row[0] for row in cursor.fetchall()]
-        conn.close()
-        return results
-    except Exception as exc:
-        log.debug("FTS search failed: %s", exc)
+        return [row[0] for row in cursor.fetchall()]
+    except sqlite3.OperationalError as exc:
+        log.warning("FTS search failed for query=%r: %s", query[:100], exc)
         return []
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def _rebuild_search_index() -> int:

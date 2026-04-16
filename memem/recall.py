@@ -1,16 +1,20 @@
 import logging
-import re
-import subprocess
 from collections import Counter
 from datetime import UTC, datetime
 
-from memem.models import DEFAULT_LAYER, INDEX_PATH, LAST_BRIEF_PATH
+from memem.models import DEFAULT_LAYER, LAST_BRIEF_PATH
 from memem.obsidian_store import (
     _find_memory,
-    _load_obsidian_memories,
     _obsidian_memories,
     _word_set,
 )
+from memem.telemetry import (
+    _get_telemetry,
+    _record_access,
+)
+from memem.transcripts import transcript_search
+
+log = logging.getLogger("memem-recall")
 
 
 def _get_current_session_id() -> str:
@@ -32,13 +36,6 @@ def _parse_ts(ts: str) -> float:
         return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
     except (ValueError, TypeError):
         return 0.0
-from memem.telemetry import (
-    _get_telemetry,
-    _record_access,
-)
-from memem.transcripts import transcript_search
-
-log = logging.getLogger("memem-recall")
 
 
 def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 10) -> list[dict]:
@@ -496,89 +493,3 @@ def memory_list(scope_id: str = "default") -> str:
     return "\n".join(lines)
 
 
-def smart_recall(prompt: str, scope_id: str = "default") -> str:
-    """Use Claude Haiku to intelligently select relevant memories from the index.
-
-    Unlike `memory_recall` which performs keyword search, this function sends the
-    full memory index to Haiku and asks it to pick relevant memory IDs based on
-    semantic understanding of the prompt. Falls back to `memory_recall` when the
-    index is unavailable or Haiku returns no results.
-    """
-    if not INDEX_PATH.exists():
-        return memory_recall(prompt, scope_id=scope_id, limit=10)
-
-    index_content = INDEX_PATH.read_text()
-    if not index_content.strip():
-        return memory_recall(prompt, scope_id=scope_id, limit=10)
-
-    # Degraded mode: if claude CLI is unavailable, fall back to keyword recall
-    # (which uses FTS5 only). No user-facing failure.
-    from memem.capabilities import assembly_available
-    if not assembly_available():
-        log.info("smart_recall: claude CLI unavailable, falling back to memory_recall (degraded)")
-        return memory_recall(prompt, scope_id=scope_id, limit=10)
-
-    system_prompt = "You are a memory selector. Output ONLY 8-character memory IDs, one per line, nothing else."
-    user_prompt = (
-        f"USER MESSAGE:\n{prompt}\n\n"
-        f"MEMORY INDEX:\n{index_content}\n\n"
-        "Select any memories that could be relevant to the user's message. "
-        "Be generous — include anything that might help, even loosely related. "
-        "Let the user's intent guide you. Output ONLY the 8-char IDs from parentheses, one per line."
-    )
-
-    picked_ids = []
-    try:
-        result = subprocess.run(
-            ["claude", "-p", "--model", "haiku", "--system-prompt", system_prompt],
-            input=user_prompt,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            for line in result.stdout.strip().split("\n"):
-                match = re.search(r"\b([0-9a-f]{8})\b", line.strip().strip("-").strip())
-                if match:
-                    picked_ids.append(match.group(1))
-    except Exception as exc:
-        log.debug("Smart recall Haiku failed: %s", exc)
-
-    if not picked_ids:
-        return memory_recall(prompt, scope_id=scope_id, limit=10)
-
-    picked_files = _load_obsidian_memories(picked_ids)
-
-    # v0.10.2 fix: apply scope_id filter here. Previously smart_recall only
-    # respected scope_id in the fallback branches — the Haiku-driven path
-    # loaded the global index, picked from it, and returned unfiltered
-    # results, leaking cross-project memories for scoped queries.
-    if scope_id and scope_id != "default":
-        picked_files = [m for m in picked_files if m.get("project") == scope_id]
-
-    if not picked_files:
-        return memory_recall(prompt, scope_id=scope_id, limit=10)
-
-    by_project: dict[str, list[dict]] = {}
-    for mem in picked_files:
-        by_project.setdefault(mem["project"], []).append(mem)
-
-    sections = []
-    sorted_projects = sorted(project for project in by_project if project != "general")
-    if "general" in by_project:
-        sorted_projects.append("general")
-
-    for project in sorted_projects:
-        lines = [f"### {project}"]
-        for mem in by_project[project]:
-            entry = f"- **{mem['title']}**"
-            if mem["body"]:
-                entry += f"\n  {mem['body'][:500]}"
-            lines.append(entry)
-        sections.append("\n".join(lines))
-
-    transcript_results = transcript_search(prompt, limit=3)
-    if transcript_results and "No matching" not in transcript_results:
-        sections.append(f"### Related Session Logs\n\n{transcript_results}")
-
-    return "\n\n".join(sections) if sections else f"No memories found for: {prompt}"
