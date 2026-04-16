@@ -104,6 +104,60 @@ def test_find_related_cross_project(tmp_vault, tmp_cortex_dir):
     assert m_unrelated["id"][:8] not in related
 
 
+def test_update_memory_refreshes_related(tmp_vault, tmp_cortex_dir):
+    """After a merge rewrites a memory's content, _update_memory must
+    recompute `related` so wiki-links match the post-merge topic, not the
+    pre-merge one."""
+    import importlib
+
+    from memem import models, obsidian_store, search_index
+    importlib.reload(models)
+    importlib.reload(search_index)
+    importlib.reload(obsidian_store)
+
+    # Topic A: two memories about async Python databases
+    a1 = obsidian_store._make_memory(
+        content="Use asyncpg with SQLAlchemy 2.0 async_sessionmaker for PostgreSQL.",
+        title="asyncpg + SQLAlchemy 2.0 pattern",
+        project="general", source_type="user",
+    )
+    a2 = obsidian_store._make_memory(
+        content="SQLAlchemy 2.0 async ORM uses async_sessionmaker and AsyncGenerator.",
+        title="SQLAlchemy async ORM patterns",
+        project="general", source_type="user",
+    )
+    # Topic B: unrelated — terminal keyboard handling
+    b1 = obsidian_store._make_memory(
+        content="Textual TUI handles arrow keys via on_key(event) with event.key dispatch.",
+        title="Textual TUI keyboard handling",
+        project="general", source_type="user",
+    )
+    target = obsidian_store._make_memory(
+        content="Textual keyboard event dispatch uses event.key matching in on_key.",
+        title="Target: keyboard handling note",
+        project="general", source_type="user",
+    )
+    for m in (a1, a2, b1, target):
+        obsidian_store._save_memory(m)
+
+    # Update target to be ABOUT topic A. Its related set must shift.
+    new_content = (
+        "Use asyncpg with SQLAlchemy 2.0 async_sessionmaker and AsyncGenerator "
+        "for async PostgreSQL sessions in modern Python."
+    )
+    obsidian_store._update_memory(target["id"], new_content)
+
+    refreshed = obsidian_store._find_memory(target["id"])
+    related_ids = set(refreshed.get("related", []))
+    a_ids = {a1["id"][:8], a2["id"][:8]}
+    assert related_ids & a_ids, (
+        f"updated memory should link to topic-A memories; got {related_ids}"
+    )
+    assert b1["id"][:8] not in related_ids, (
+        f"stale topic-B link survived update: {related_ids}"
+    )
+
+
 def test_purge_mined_memories_clears_fts_and_index(tmp_vault, tmp_cortex_dir):
     """Regression guard: --purge-mined must also clear FTS5 + _index.md entries."""
     import importlib

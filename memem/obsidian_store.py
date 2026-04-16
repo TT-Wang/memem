@@ -650,7 +650,14 @@ def _save_memory(mem: dict):
 
 
 def _update_memory(memory_id: str, new_content: str, new_title: str = "") -> None:
-    """Update an existing memory's content and optionally its title."""
+    """Update an existing memory's content and optionally its title.
+
+    Refreshes ``related`` links from the new content before writing so the
+    wiki-link graph stays accurate when a merge changes a memory's topic.
+    Previously the old ``related`` list survived unchanged — links could
+    then point at memories that were chosen for the pre-merge content but
+    no longer match the post-merge content.
+    """
     threat = scan_memory_content(new_content)
     if threat:
         raise ValueError(f"Update blocked: {threat}")
@@ -661,6 +668,11 @@ def _update_memory(memory_id: str, new_content: str, new_title: str = "") -> Non
     if new_title:
         mem["title"] = new_title
     mem["updated_at"] = _now()
+    refreshed = _find_related(new_content, exclude_id=mem.get("id", ""), scope_id=mem.get("project", "default"))
+    if refreshed:
+        mem["related"] = refreshed
+    elif "related" in mem:
+        mem["related"] = []
     _write_obsidian_memory(mem)
     _append_or_update_index_line(mem)
     _log_event("update", memory_id)
