@@ -105,6 +105,45 @@ def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 1
         return []  # Fallback: caller will use file scan
 
 
+def _expand_graph(seed_mems: list[dict], max_total: int, hops: int = 2) -> list[dict]:
+    """Breadth-first graph expansion over `related[]` edges, cap-aware.
+
+    Preserves the ordering guarantee: seeds come first, then 1-hop neighbors,
+    then 2-hop neighbors. The cap applies in that order, so 1-hop results
+    are never squeezed out by 2-hop results — a strict superset of the
+    prior 1-hop-only behavior when the cap is the same.
+
+    Dedupe is by 8-char id prefix (same as the prior code).
+    """
+    if not seed_mems:
+        return []
+    seen_ids = {m.get("id", "")[:8] for m in seed_mems}
+    results: list[dict] = list(seed_mems)
+    frontier = list(seed_mems)
+    for _hop in range(hops):
+        if len(results) >= max_total:
+            break
+        next_frontier: list[dict] = []
+        for mem in frontier:
+            for related_id in mem.get("related", []):
+                if related_id in seen_ids:
+                    continue
+                seen_ids.add(related_id)
+                related_mem = _find_memory(related_id)
+                if related_mem is None:
+                    continue
+                results.append(related_mem)
+                next_frontier.append(related_mem)
+                if len(results) >= max_total:
+                    break
+            if len(results) >= max_total:
+                break
+        if not next_frontier:
+            break
+        frontier = next_frontier
+    return results[:max_total]
+
+
 def _search_memories(
     query: str,
     scope_id: str | None = None,
@@ -115,21 +154,11 @@ def _search_memories(
     # Try FTS-first path
     fts_results = _search_memories_fts(query, scope_id, limit)
     if fts_results:
-        if expand_links:
-            # Expand linked memories (for memory_recall backward-compat path)
-            seen_ids = {mem.get("id", "")[:8] for mem in fts_results}
-            linked = []
-            for mem in fts_results:
-                for related_id in mem.get("related", []):
-                    if related_id in seen_ids:
-                        continue
-                    seen_ids.add(related_id)
-                    related_mem = _find_memory(related_id)
-                    if related_mem:
-                        linked.append(related_mem)
-            results = (fts_results + linked)[:limit * 2]
-        else:
-            results = fts_results[:limit]
+        results = (
+            _expand_graph(fts_results, max_total=limit * 2, hops=2)
+            if expand_links
+            else fts_results[:limit]
+        )
         if record_access:
             session_id = _get_current_session_id()
             for mem in results:
@@ -274,26 +303,18 @@ def _format_full_memory(mem: dict) -> str:
     return "\n".join(lines)
 
 
-def _linked_memories(primary: list[dict]) -> list[dict]:
-    """One-hop graph traversal: return memories linked via the `related` field.
+def _linked_memories(primary: list[dict], hops: int = 2) -> list[dict]:
+    """Graph traversal over `related[]`: return linked memories not in primary.
 
-    Given a list of primary memories, follow each memory's `related[]` list
-    exactly one hop and return the deduplicated set of linked memories that
-    aren't already in `primary`. Does not recurse — linked memories' own
-    `related[]` is ignored.
+    Defaults to 2-hop since Wave 1 made cache lookups O(1) — the extra hop
+    is cheap and widens the net so "neighbor of neighbor" memories get
+    surfaced. Always a strict superset of 1-hop: 1-hop results appear
+    before 2-hop results in the expansion order, so truncation (if any
+    happens at the caller) never drops 1-hop in favor of 2-hop.
     """
-    seen = {mem.get("id", "")[:8] for mem in primary if mem.get("id")}
-    linked: list[dict] = []
-    for mem in primary:
-        for related_id in mem.get("related", []) or []:
-            key = related_id[:8]
-            if key in seen:
-                continue
-            linked_mem = _find_memory(related_id)
-            if linked_mem:
-                seen.add(key)
-                linked.append(linked_mem)
-    return linked
+    primary_ids = {m.get("id", "")[:8] for m in primary if m.get("id")}
+    expanded = _expand_graph(primary, max_total=max(len(primary) * 10, 20), hops=hops)
+    return [m for m in expanded if m.get("id", "")[:8] not in primary_ids]
 
 
 def memory_search(query: str, limit: int = 10, scope_id: str = "default") -> str:

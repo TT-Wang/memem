@@ -221,7 +221,9 @@ def test_memory_get_handles_not_found(monkeypatch):
 # Test 9: graph traversal one hop
 # ---------------------------------------------------------------------------
 
-def test_graph_traversal_one_hop(monkeypatch):
+def test_graph_traversal_two_hops(monkeypatch):
+    """Default is 2-hop expansion (per m4). A→B→C chain: searching for A
+    must surface B (1-hop) AND C (2-hop) in the Related section."""
     id_a = "aaaa0001" + "0" * 28
     id_b = "bbbb0002" + "0" * 28
     id_c = "cccc0003" + "0" * 28
@@ -233,7 +235,6 @@ def test_graph_traversal_one_hop(monkeypatch):
     mem_c = _make_mem(mid=id_c, title="Gamma memory", essence="gamma two hops away",
                       layer=2)
 
-    # _search_memories returns only A; B is a one-hop link; C is B's link (two hops, not included)
     monkeypatch.setattr("memem.recall._search_memories", lambda *a, **kw: [mem_a])
 
     def fake_find_memory(mid: str) -> dict | None:
@@ -246,12 +247,34 @@ def test_graph_traversal_one_hop(monkeypatch):
 
     from memem.recall import memory_search
     result = memory_search("keyword")
-
-    # B should be in related section (one hop)
+    # Both 1-hop (B) and 2-hop (C) should surface
     assert "Beta memory" in result or "bbbb0002" in result
-    # C should NOT be in output (two hops)
-    assert "Gamma memory" not in result
-    assert "cccc0003" not in result
+    assert "Gamma memory" in result or "cccc0003" in result
+
+
+def test_graph_traversal_two_hop_is_superset_of_one_hop():
+    """Regression guarantee: _expand_graph with hops=2 returns a strict
+    superset of hops=1 for the same seed set. No 1-hop memory is dropped
+    in favor of 2-hop ones."""
+    from memem.recall import _expand_graph
+
+    mem_a = {"id": "aaaa" + "1" * 28, "related": ["bbbb1111"]}
+    mem_b = {"id": "bbbb" + "1" * 28, "related": ["cccc1111"]}
+    mem_c = {"id": "cccc" + "1" * 28, "related": []}
+
+    import memem.recall as recall
+    # fake cache
+    fake_store = {m["id"][:8]: m for m in [mem_a, mem_b, mem_c]}
+    orig_find = recall._find_memory
+    recall._find_memory = lambda mid: fake_store.get(mid[:8])
+    try:
+        one_hop = _expand_graph([mem_a], max_total=20, hops=1)
+        two_hop = _expand_graph([mem_a], max_total=20, hops=2)
+        assert {m["id"] for m in one_hop}.issubset({m["id"] for m in two_hop})
+        assert mem_c["id"] in {m["id"] for m in two_hop}
+        assert mem_c["id"] not in {m["id"] for m in one_hop}
+    finally:
+        recall._find_memory = orig_find
 
 
 # ---------------------------------------------------------------------------
