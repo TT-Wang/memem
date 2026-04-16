@@ -234,15 +234,10 @@ def _looks_like_memem_subprocess(jsonl_path: Path) -> bool:
                 if not text:
                     return False
                 head = text.lstrip()[:200]
-                if any(
+                return any(
                     head.startswith(prefix)
                     for prefix in _MEMEM_SUBPROCESS_PROMPT_PREFIXES
-                ):
-                    return True
-                # Playbook refine substring check (no stable prefix).
-                if head.startswith("# ") and _PLAYBOOK_REFINE_MARKER in head:
-                    return True
-                return False
+                ) or (head.startswith("# ") and _PLAYBOOK_REFINE_MARKER in head)
     except OSError:
         return False
     return False

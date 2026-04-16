@@ -61,6 +61,7 @@ def test_find_settled_sessions_skips_memem_subprocess_fossils(tmp_cortex_dir, tm
     """
     import json as _json
     from pathlib import Path as _Path
+
     from memem import session_state
     importlib.reload(session_state)
 
