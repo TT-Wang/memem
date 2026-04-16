@@ -709,7 +709,7 @@ def _generate_index(scope_id: str = "default") -> str:
 
     today = datetime.now(UTC).strftime("%Y-%m-%d")
     lines = [
-        "# Cortex Memory Index",
+        "# memem Memory Index",
         f"Updated: {today} | Total: {len(memories)} memories",
     ]
 
