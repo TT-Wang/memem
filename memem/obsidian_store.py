@@ -211,6 +211,26 @@ def _write_obsidian_memory(mem: dict):
     frontmatter += "---"
 
     body = f"\n\n{mem.get('essence', '')}"
+
+    # Append Obsidian [[wiki-links]] for related memories so the graph
+    # view shows connections. The `related` frontmatter field stores bare
+    # 8-char IDs which Obsidian doesn't recognize as links — wiki-links
+    # in the body are what make the graph light up.
+    if related:
+        link_lines = []
+        for rid in related:
+            rid = rid.strip()[:8]
+            if not rid:
+                continue
+            # Find the filename for this ID by scanning the memories dir.
+            # This is O(1) per ID because glob with prefix is fast on most
+            # filesystems, and we only do it at write time (not recall).
+            matches = list(OBSIDIAN_MEMORIES_DIR.glob(f"*-{rid}.md"))
+            if matches:
+                link_lines.append(f"- [[{matches[0].stem}]]")
+        if link_lines:
+            body += "\n\n## Related\n" + "\n".join(link_lines) + "\n"
+
     filepath = OBSIDIAN_MEMORIES_DIR / filename
     _atomic_write(filepath, frontmatter + body)
     mem["obsidian_file"] = filename
