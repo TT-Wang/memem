@@ -17,7 +17,22 @@ LOG_FILE="$MEMEM_DIR/miner.log"
 
 mkdir -p "$MEMEM_DIR"
 
+is_ephemeral_test_state_dir() {
+    if [ -n "${MEMEM_ALLOW_TEST_MINER:-}" ]; then
+        return 1
+    fi
+    case "$MEMEM_DIR" in
+        /tmp/pytest-*|/tmp/pytest-of-*|*/pytest-*|*/pytest-of-*) return 0 ;;
+    esac
+    [ -n "${PYTEST_CURRENT_TEST:-}" ]
+}
+
 start_wrapper() {
+    if is_ephemeral_test_state_dir; then
+        echo "Refusing to start miner wrapper from ephemeral test state: $MEMEM_DIR"
+        return 0
+    fi
+
     # Check if wrapper already running
     if [ -f "$WRAPPER_PID_FILE" ]; then
         OLD_PID=$(cat "$WRAPPER_PID_FILE")

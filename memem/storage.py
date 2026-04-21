@@ -48,6 +48,18 @@ def _ensure_vault_exists():
 MINER_OPT_IN_MARKER = MEMEM_DIR / ".miner-opted-in"
 
 
+def _is_ephemeral_test_state_dir(path: Path = MEMEM_DIR) -> bool:
+    """True for pytest temp state dirs that must not launch persistent miners."""
+    if os.environ.get("MEMEM_ALLOW_TEST_MINER"):
+        return False
+    path_str = str(path)
+    return (
+        "/pytest-" in path_str
+        or "/pytest-of-" in path_str
+        or bool(os.environ.get("PYTEST_CURRENT_TEST"))
+    )
+
+
 def _auto_start_miner():
     """Start the miner daemon if the user has explicitly opted in.
 
@@ -59,6 +71,9 @@ def _auto_start_miner():
     still readable, but nothing mines in the background.
     """
     if not MINER_OPT_IN_MARKER.exists():
+        return
+    if _is_ephemeral_test_state_dir():
+        log.warning("auto-start-miner skipped for ephemeral test state: %s", MEMEM_DIR)
         return
     try:
         miner_pid_file = MEMEM_DIR / "miner.pid"

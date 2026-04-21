@@ -7,6 +7,8 @@ description is in the docstring and in the relevant CHANGELOG entry.
 import importlib
 import time
 
+import pytest
+
 
 def test_get_installed_at_does_not_lazy_create(tmp_cortex_dir):
     """v0.10.2 fix #1: _get_installed_at must NOT recreate the marker on read.
@@ -141,6 +143,37 @@ def test_find_settled_sessions_skips_memem_subprocess_fossils(tmp_cortex_dir, tm
         assert fossil not in results, (
             f"{label} subprocess fossil should be filtered, but was returned"
         )
+
+
+def test_miner_refuses_pytest_temp_state(monkeypatch):
+    """Miner daemons must not persist when tests point MEMEM_DIR at pytest temp state."""
+    monkeypatch.setenv(
+        "MEMEM_DIR",
+        "/tmp/pytest-of-claude-user/pytest-283/test_example/.lexie/memem-state",
+    )
+    monkeypatch.delenv("MEMEM_ALLOW_TEST_MINER", raising=False)
+
+    from memem import miner_daemon, models
+    importlib.reload(models)
+    importlib.reload(miner_daemon)
+
+    assert miner_daemon._is_ephemeral_test_state_dir()
+
+
+def test_miner_quota_limit_is_fatal(tmp_cortex_dir, tmp_path, monkeypatch):
+    """Hard Claude account limits should stop the daemon instead of retrying every poll."""
+    from memem import miner_daemon
+    importlib.reload(miner_daemon)
+
+    def fake_run_server_command(args):
+        raise miner_daemon.RetryableMinerError(
+            "You've hit your limit · resets Apr 24, 11am (UTC)"
+        )
+
+    monkeypatch.setattr(miner_daemon, "_run_server_command", fake_run_server_command)
+
+    with pytest.raises(miner_daemon.FatalMinerError):
+        miner_daemon._mine_session(tmp_path / "session.jsonl")
 
 
 def test_find_settled_sessions_skips_root_project(tmp_cortex_dir, tmp_path, monkeypatch):

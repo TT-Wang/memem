@@ -120,6 +120,22 @@ def test_miner_wrapper_status_runtime(tmp_path):
     assert "No module named" not in (result.stdout + result.stderr)
 
 
+def test_miner_wrapper_refuses_pytest_temp_state(tmp_path):
+    """Wrapper start must not leave real daemons running from pytest temp state."""
+    state = Path("/tmp/pytest-of-claude-user/pytest-999/test_wrapper/.memem")
+    env = os.environ.copy()
+    env["MEMEM_DIR"] = str(state)
+    env["MEMEM_OBSIDIAN_VAULT"] = str(tmp_path / "obsidian-brain")
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "memem" / "miner-wrapper.sh"), "start"],
+        capture_output=True, text=True, timeout=15, env=env,
+    )
+
+    assert result.returncode == 0
+    assert "Refusing to start miner wrapper" in result.stdout
+    assert not (state / "miner-wrapper.pid").exists()
+
+
 def test_mine_cron_script_runs(tmp_path):
     """Actually execute mine-cron.sh — catches the PYTHONPATH bug that broke the cron path."""
     env = os.environ.copy()

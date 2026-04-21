@@ -10,6 +10,7 @@ Usage:
     python3 miner_daemon.py run      # run in foreground (for debugging)
 """
 
+import fcntl
 import json
 import logging
 import logging.handlers
@@ -33,6 +34,8 @@ from memem.session_state import (
 PID_FILE = MEMEM_DIR / "miner.pid"
 LOG_FILE = MEMEM_DIR / "miner.log"
 POLL_INTERVAL = 60
+GLOBAL_LOCK_FILE = Path.home() / ".memem" / "miner.global.lock"
+_GLOBAL_LOCK_FH = None
 
 log = logging.getLogger("memem-miner")
 
@@ -66,6 +69,76 @@ class RetryableMinerError(RuntimeError):
     """Raised for transient per-session failures."""
 
 
+def _is_ephemeral_test_state_dir(path: Path = MEMEM_DIR) -> bool:
+    """True for pytest temp state dirs that must not start persistent miners."""
+    if os.environ.get("MEMEM_ALLOW_TEST_MINER"):
+        return False
+    path_str = str(path)
+    return (
+        "/pytest-" in path_str
+        or "/pytest-of-" in path_str
+        or bool(os.environ.get("PYTEST_CURRENT_TEST"))
+    )
+
+
+def _refuse_ephemeral_test_miner() -> bool:
+    if not _is_ephemeral_test_state_dir():
+        return False
+    message = f"Refusing to start miner from ephemeral test state: {MEMEM_DIR}"
+    print(message)
+    log.warning(message)
+    return True
+
+
+def _acquire_global_lock() -> bool:
+    """Allow only one memem miner per OS user, regardless of MEMEM_DIR."""
+    global _GLOBAL_LOCK_FH
+    GLOBAL_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(GLOBAL_LOCK_FILE, "a+")
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        fh.close()
+        return False
+    fh.seek(0)
+    fh.truncate()
+    fh.write(f"{os.getpid()}\n")
+    fh.flush()
+    _GLOBAL_LOCK_FH = fh
+    return True
+
+
+def _release_global_lock() -> None:
+    global _GLOBAL_LOCK_FH
+    if _GLOBAL_LOCK_FH is None:
+        return
+    try:
+        _GLOBAL_LOCK_FH.seek(0)
+        _GLOBAL_LOCK_FH.truncate()
+        fcntl.flock(_GLOBAL_LOCK_FH.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+    try:
+        _GLOBAL_LOCK_FH.close()
+    except OSError:
+        pass
+    _GLOBAL_LOCK_FH = None
+
+
+def _ensure_single_miner() -> bool:
+    if _acquire_global_lock():
+        return True
+    message = f"Another memem miner is already running (global lock: {GLOBAL_LOCK_FILE})"
+    print(message)
+    log.warning(message)
+    return False
+
+
+def _is_quota_limit_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return "hit your limit" in text or "rate limit" in text or "quota" in text
+
+
 def _write_pid():
     PID_FILE.write_text(str(os.getpid()))
 
@@ -85,11 +158,14 @@ def _read_pid() -> int | None:
 def _cleanup(signum=None, frame=None):
     log.info("Miner daemon stopping (signal %s)", signum)
     PID_FILE.unlink(missing_ok=True)
+    _release_global_lock()
     sys.exit(0)
 
 
 def start_daemon():
     _configure_logging()
+    if _refuse_ephemeral_test_miner():
+        return
     existing = _read_pid()
     if existing:
         print(f"Miner daemon already running (PID {existing})")
@@ -125,6 +201,9 @@ def start_daemon():
     os.dup2(devnull_r.fileno(), sys.stdin.fileno())
     os.dup2(devnull_w.fileno(), sys.stdout.fileno())
     os.dup2(devnull_w.fileno(), sys.stderr.fileno())
+
+    if not _ensure_single_miner():
+        raise SystemExit(0)
 
     _write_pid()
     signal.signal(signal.SIGTERM, _cleanup)
@@ -198,6 +277,8 @@ def _mine_session(jsonl_path: Path) -> tuple[int, bool]:
             log.info("  -> no new memories found")
         return saved, True
     except RetryableMinerError as exc:
+        if _is_quota_limit_error(exc):
+            raise FatalMinerError(f"Claude quota/rate limit reached: {exc}") from exc
         log.error("  -> retryable mining failure: %s", exc)
         return 0, False
 
@@ -254,6 +335,10 @@ if __name__ == "__main__":
         status_daemon()
     elif cmd == "run":
         _configure_logging()
+        if _refuse_ephemeral_test_miner():
+            raise SystemExit(0)
+        if not _ensure_single_miner():
+            raise SystemExit(0)
         _write_pid()
         signal.signal(signal.SIGTERM, _cleanup)
         signal.signal(signal.SIGINT, _cleanup)
