@@ -145,6 +145,35 @@ def test_find_settled_sessions_skips_memem_subprocess_fossils(tmp_cortex_dir, tm
         )
 
 
+def test_find_settled_sessions_skips_lexie_project_by_default(tmp_cortex_dir, tmp_path, monkeypatch):
+    """Lexie owns its own mining pipeline; memem should not mine its sessions by default."""
+    from memem import session_state
+    importlib.reload(session_state)
+
+    projects = tmp_path / "projects"
+    lexie_dir = projects / "-home-claude-user-lexie"
+    normal_dir = projects / "-home-claude-user-other"
+    lexie_dir.mkdir(parents=True)
+    normal_dir.mkdir(parents=True)
+
+    old_time = time.time() - 1800
+    lexie_session = lexie_dir / "lexie-session.jsonl"
+    normal_session = normal_dir / "normal-session.jsonl"
+    lexie_session.write_text("x" * 10000)
+    normal_session.write_text("y" * 10000)
+
+    import os as _os
+    _os.utime(lexie_session, (old_time, old_time))
+    _os.utime(normal_session, (old_time, old_time))
+
+    monkeypatch.setattr(session_state, "SESSIONS_DIRS", [projects])
+
+    results = session_state.find_settled_sessions(bypass_gate=True)
+
+    assert normal_session in results
+    assert lexie_session not in results
+
+
 def test_miner_refuses_pytest_temp_state(monkeypatch):
     """Miner daemons must not persist when tests point MEMEM_DIR at pytest temp state."""
     monkeypatch.setenv(

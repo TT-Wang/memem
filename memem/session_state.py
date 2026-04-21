@@ -18,6 +18,31 @@ if _extra:
     SESSIONS_DIRS.extend(Path(path) for path in _extra.split(":") if path)
 
 SETTLE_SECONDS = int(_env("MEMEM_MINER_SETTLE_SECONDS", "CORTEX_MINER_SETTLE_SECONDS", default="300"))
+DEFAULT_EXCLUDED_SESSION_PROJECTS = ("-home-claude-user-lexie",)
+
+
+def _excluded_session_projects() -> set[str]:
+    raw = _env(
+        "MEMEM_EXCLUDED_SESSION_PROJECTS",
+        "CORTEX_EXCLUDED_SESSION_PROJECTS",
+        default=":".join(DEFAULT_EXCLUDED_SESSION_PROJECTS),
+    ).strip()
+    if raw.lower() in {"", "0", "false", "none"}:
+        return set()
+    return {item.strip() for item in raw.replace(",", ":").split(":") if item.strip()}
+
+
+def _project_dir_for_session(jsonl_path: Path, sessions_dir: Path) -> str:
+    try:
+        rel = jsonl_path.relative_to(sessions_dir)
+    except ValueError:
+        return ""
+    return rel.parts[0] if rel.parts else ""
+
+
+def _is_excluded_session_project(jsonl_path: Path, sessions_dir: Path) -> bool:
+    project_dir = _project_dir_for_session(jsonl_path, sessions_dir)
+    return bool(project_dir and project_dir in _excluded_session_projects())
 
 
 def session_fingerprint(path: Path) -> dict:
@@ -263,6 +288,8 @@ def find_settled_sessions(
         if not sessions_dir.exists():
             continue
         for jsonl_path in sessions_dir.rglob("*.jsonl"):
+            if _is_excluded_session_project(jsonl_path, sessions_dir):
+                continue
             if "/subagents/" in str(jsonl_path):
                 continue
             # Skip sessions under the `-root` project. `/.claude/projects/-root/`
