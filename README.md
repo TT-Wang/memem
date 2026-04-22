@@ -196,6 +196,7 @@ It does NOT save:
 | Memories | `~/obsidian-brain/memem/memories/*.md` | Source of truth (human-readable markdown) |
 | Playbooks | `~/obsidian-brain/memem/playbooks/*.md` | Per-project curated briefings |
 | Search DB | `~/.memem/search.db` | SQLite FTS5 index (machine-fast lookup) |
+| Graph DB | `~/.memem/graph.db` | Rebuildable typed/scored memory-edge index |
 | Telemetry | `~/.memem/telemetry.json` | Access tracking (atomic writes) |
 | Event log | `~/.memem/events.jsonl` | Append-only audit trail |
 | Capabilities | `~/.memem/.capabilities` | Degraded-mode flags written by bootstrap |
@@ -213,6 +214,9 @@ You can point memem elsewhere via `MEMEM_DIR` and `MEMEM_OBSIDIAN_VAULT` env var
 | `memory_import(source_path)` | Bulk import from files, directories, or chat exports. |
 | `transcript_search(query)` | Search raw Claude Code session JSONL logs (not the mined memories). |
 | `context_assemble(query, project)` | On-demand query-tailored briefing from playbooks + memories + transcripts. |
+| `memory_graph(memory_id)` | Inspect typed/scored graph neighbors for one memory. |
+| `memory_graph_audit()` | Report graph quality issues: orphans, dead links, hubs, stale edges. |
+| `memory_graph_rebuild(scope_id)` | Rebuild the graph side index from the Obsidian vault. |
 
 ## What slash commands does memem add?
 
@@ -274,6 +278,7 @@ memem is split into small, focused modules:
 - `security.py` — prompt injection + credential exfil scanning
 - `telemetry.py` — access tracking, event log (atomic writes, fcntl-locked)
 - `search_index.py` — SQLite FTS5 index
+- `graph_index.py` — typed/scored related-memory graph side index
 - `obsidian_store.py` — memory I/O, dedup scoring, contradiction detection
 - `playbook.py` — per-project playbook grow + refine
 - `assembly.py` — context assembly via Haiku
@@ -288,6 +293,24 @@ memem is split into small, focused modules:
 - 15% recency (0.995^hours decay)
 - 15% access history (usage reinforcement)
 - 20% importance (1-5 scale from Haiku)
+
+**Related-memory graph:**
+
+The Obsidian markdown files remain the source of truth. The `related: [...]`
+frontmatter stays intentionally simple so memories are portable and readable.
+memem also builds `~/.memem/graph.db`, a local SQLite side index with typed,
+scored edges such as `same_topic`, `supports`, `depends_on`, `supersedes`, and
+`contradicts`. Recall uses this graph when available and falls back to the
+Markdown `related` field if the graph has not been built yet.
+
+Useful maintenance commands:
+
+```bash
+memem graph rebuild
+memem graph audit
+memem graph stats
+memem graph neighbors <memory-id>
+```
 
 **Memory schema** (markdown frontmatter):
 ```yaml

@@ -159,12 +159,66 @@ def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 1
 
 
 def _expand_graph(seed_mems: list[dict], max_total: int, hops: int = 2) -> list[dict]:
-    """Breadth-first graph expansion over `related[]` edges, cap-aware.
+    """Breadth-first graph expansion over typed graph edges, cap-aware.
 
-    Preserves the ordering guarantee: seeds come first, then 1-hop neighbors,
-    then 2-hop neighbors. The cap applies in that order, so 1-hop results
-    are never squeezed out by 2-hop results — a strict superset of the
-    prior 1-hop-only behavior when the cap is the same.
+    Uses graph.db when available and falls back to Markdown `related[]`.
+    Normal recall excludes historical/conflict edges so deprecated decisions
+    don't leak into compact recall unless the caller asks for a timeline.
+    """
+    graph_results = _expand_graph_index(seed_mems, max_total=max_total, hops=hops)
+    if len(graph_results) > len(seed_mems):
+        return graph_results
+    return _expand_related_frontmatter(seed_mems, max_total=max_total, hops=hops)
+
+
+def _expand_graph_index(seed_mems: list[dict], max_total: int, hops: int = 2) -> list[dict]:
+    """Typed graph expansion via graph.db. Returns seeds only if unavailable."""
+    if not seed_mems:
+        return []
+    try:
+        from memem.graph_index import _NORMAL_RECALL_TYPES, _neighbors
+    except Exception as exc:
+        log.debug("graph index unavailable; using related[] fallback: %s", exc)
+        return list(seed_mems)
+
+    seen_ids = {m.get("id", "")[:8] for m in seed_mems}
+    results: list[dict] = list(seed_mems)
+    frontier = list(seed_mems)
+    min_scores = [0.18, 0.30]
+    for hop in range(hops):
+        if len(results) >= max_total:
+            break
+        next_frontier: list[dict] = []
+        min_score = min_scores[min(hop, len(min_scores) - 1)]
+        for mem in frontier:
+            for edge in _neighbors(
+                mem.get("id", ""),
+                relation_types=_NORMAL_RECALL_TYPES,
+                limit=max_total,
+                min_score=min_score,
+            ):
+                related_id = edge.get("dst_id", "")
+                rid8 = related_id[:8]
+                if not rid8 or rid8 in seen_ids:
+                    continue
+                related_mem = _find_memory(related_id)
+                if related_mem is None or related_mem.get("status", "active") == "deprecated":
+                    continue
+                seen_ids.add(rid8)
+                results.append(related_mem)
+                next_frontier.append(related_mem)
+                if len(results) >= max_total:
+                    break
+            if len(results) >= max_total:
+                break
+        if not next_frontier:
+            break
+        frontier = next_frontier
+    return results[:max_total]
+
+
+def _expand_related_frontmatter(seed_mems: list[dict], max_total: int, hops: int = 2) -> list[dict]:
+    """Legacy BFS over Markdown `related[]` edges.
 
     Dedupe is by 8-char id prefix (same as the prior code).
     """
@@ -183,7 +237,7 @@ def _expand_graph(seed_mems: list[dict], max_total: int, hops: int = 2) -> list[
                     continue
                 seen_ids.add(related_id)
                 related_mem = _find_memory(related_id)
-                if related_mem is None:
+                if related_mem is None or related_mem.get("status", "active") == "deprecated":
                     continue
                 results.append(related_mem)
                 next_frontier.append(related_mem)
@@ -281,19 +335,8 @@ def _search_memories(
     primary = [mem for _, mem in scored[:limit]]
 
     if expand_links:
-        # Expand linked memories (for memory_recall backward-compat path)
-        seen_ids = {mem.get("id", "")[:8] for mem in primary}
-        linked = []
-        for mem in primary:
-            for related_id in mem.get("related", []):
-                if related_id in seen_ids:
-                    continue
-                seen_ids.add(related_id)
-                related_mem = _find_memory(related_id)
-                if related_mem:
-                    linked.append(related_mem)
         max_total = limit * 2
-        results = (primary + linked)[:max_total]
+        results = _expand_graph(primary, max_total=max_total, hops=2)
     else:
         results = primary[:limit]
 
@@ -468,6 +511,14 @@ def memory_timeline(
         for m in all_mems
         if anchor_id8 in {r[:8] for r in m.get("related", []) or []}
     }
+    try:
+        from memem.graph_index import _HISTORY_TYPES, _neighbors, _reverse_neighbors
+        for edge in _neighbors(anchor_id8, relation_types=_HISTORY_TYPES, limit=50):
+            forward_ids.add(edge.get("dst_id", "")[:8])
+        for edge in _reverse_neighbors(anchor_id8, relation_types=_HISTORY_TYPES, limit=50):
+            reverse_ids.add(edge.get("src_id", "")[:8])
+    except Exception as exc:
+        log.debug("graph timeline expansion unavailable; using related[] only: %s", exc)
 
     candidates: dict[str, dict] = {}
     for mem in all_mems:
@@ -565,5 +616,4 @@ def memory_list(scope_id: str = "default") -> str:
             f"- [{mem.get('id', '')[:8]}] {mem.get('title', 'Untitled')[:50]} | project:{mem.get('project', 'general')}"
         )
     return "\n".join(lines)
-
 

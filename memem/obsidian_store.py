@@ -822,6 +822,24 @@ def _find_related(content: str, exclude_id: str, scope_id: str = "default", limi
     0.15; empirically the genuinely-related cluster sits in 0.18–0.25 while
     0.1 is noise.
     """
+    try:
+        from memem.graph_index import _suggest_related
+        candidate = {
+            "id": exclude_id,
+            "title": "",
+            "essence": content,
+            "project": _normalize_scope_id(scope_id),
+            "domain_tags": [],
+            "importance": 3,
+            "layer": DEFAULT_LAYER,
+            "status": "active",
+        }
+        suggested = _suggest_related(candidate, limit=limit)
+        if suggested:
+            return suggested
+    except Exception as exc:
+        log.debug("graph scorer unavailable for related lookup; using lexical fallback: %s", exc)
+
     content_words = _word_set(content)
     if not content_words:
         return []
@@ -929,7 +947,12 @@ def _save_memory(mem: dict):
     content = mem.get("essence", "")
     mem_id = mem.get("id", "")
     if content and mem_id:
-        related = _find_related(content, exclude_id=mem_id, scope_id=mem.get("project", "default"))
+        try:
+            from memem.graph_index import _suggest_related
+            related = _suggest_related(mem)
+        except Exception as exc:
+            log.debug("graph related suggestion failed; using lexical fallback: %s", exc)
+            related = _find_related(content, exclude_id=mem_id, scope_id=mem.get("project", "default"))
         if related:
             mem["related"] = related
 
@@ -939,6 +962,13 @@ def _save_memory(mem: dict):
         _append_or_update_index_line(mem)
     _log_event("save", mem.get("id", ""), title=mem.get("title", ""))
     _index_memory(mem)
+    try:
+        from memem.graph_index import _refresh_edges_for_memory
+        refreshed = _find_memory(mem.get("id", ""))
+        if refreshed:
+            _refresh_edges_for_memory(refreshed)
+    except Exception as exc:
+        log.debug("graph refresh failed for saved memory %s: %s", mem.get("id", "")[:8], exc)
 
 
 def _update_memory(memory_id: str, new_content: str, new_title: str = "") -> None:
@@ -960,7 +990,12 @@ def _update_memory(memory_id: str, new_content: str, new_title: str = "") -> Non
     if new_title:
         mem["title"] = new_title
     mem["updated_at"] = _now()
-    refreshed = _find_related(new_content, exclude_id=mem.get("id", ""), scope_id=mem.get("project", "default"))
+    try:
+        from memem.graph_index import _suggest_related
+        refreshed = _suggest_related(mem)
+    except Exception as exc:
+        log.debug("graph related refresh failed; using lexical fallback: %s", exc)
+        refreshed = _find_related(new_content, exclude_id=mem.get("id", ""), scope_id=mem.get("project", "default"))
     if refreshed:
         mem["related"] = refreshed
     elif "related" in mem:
@@ -970,6 +1005,13 @@ def _update_memory(memory_id: str, new_content: str, new_title: str = "") -> Non
     _append_or_update_index_line(mem)
     _log_event("update", memory_id)
     _index_memory(mem)
+    try:
+        from memem.graph_index import _refresh_edges_for_memory
+        refreshed_mem = _find_memory(mem.get("id", ""))
+        if refreshed_mem:
+            _refresh_edges_for_memory(refreshed_mem)
+    except Exception as exc:
+        log.debug("graph refresh failed for updated memory %s: %s", memory_id[:8], exc)
 
 
 def _delete_memory(memory_id: str) -> bool:
@@ -984,6 +1026,11 @@ def _delete_memory(memory_id: str) -> bool:
         _remove_index_line(memory_id)
         _log_event("delete", memory_id)
         _remove_from_index(memory_id)
+        try:
+            from memem.graph_index import _remove_edges_for_memory
+            _remove_edges_for_memory(full_id)
+        except Exception as exc:
+            log.debug("graph edge removal failed for deleted memory %s: %s", memory_id[:8], exc)
         return True
     except Exception:
         return False
@@ -1001,6 +1048,11 @@ def _deprecate_memory(memory_id: str, reason: str = "superseded") -> bool:
     _remove_index_line(memory_id)
     _log_event("deprecate", memory_id, reason=reason)
     _remove_from_index(memory_id)
+    try:
+        from memem.graph_index import _remove_edges_for_memory
+        _remove_edges_for_memory(mem.get("id", memory_id))
+    except Exception as exc:
+        log.debug("graph edge removal failed for deprecated memory %s: %s", memory_id[:8], exc)
     return True
 
 

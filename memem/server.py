@@ -29,6 +29,15 @@ def _build_mcp():
     from mcp.server.fastmcp import FastMCP
     from pydantic import Field
 
+    from memem.graph_index import (
+        _rebuild_graph as _memory_graph_rebuild,
+    )
+    from memem.graph_index import (
+        format_graph_audit as _memory_graph_audit,
+    )
+    from memem.graph_index import (
+        format_graph_neighbors as _memory_graph_neighbors,
+    )
     from memem.operations import memory_import as _memory_import
     from memem.operations import memory_save as _memory_save
     from memem.recall import (
@@ -292,6 +301,45 @@ def _build_mcp():
             depth_after=depth_after,
             scope_id=scope_id,
         )
+
+    @mcp.tool()
+    def memory_graph(
+        memory_id: Annotated[
+            str,
+            Field(
+                description="Memory ID or 8-char prefix to inspect in the typed memory graph.",
+                min_length=8,
+                max_length=64,
+            ),
+        ],
+        include_history: Annotated[
+            bool,
+            Field(description="Include supersedes/contradicts/history edges, not just normal recall edges."),
+        ] = False,
+        limit: Annotated[
+            int,
+            Field(description="Maximum graph edges to return.", ge=1, le=100),
+        ] = 20,
+    ) -> str:
+        """Inspect typed, scored graph neighbors for one memory."""
+        return _memory_graph_neighbors(memory_id, include_history=include_history, limit=limit)
+
+    @mcp.tool()
+    def memory_graph_audit() -> str:
+        """Audit graph quality: orphans, dead links, one-way links, hubs, and stale edges."""
+        return _memory_graph_audit()
+
+    @mcp.tool()
+    def memory_graph_rebuild(
+        scope_id: Annotated[
+            str,
+            Field(description='Optional project scope. "default" rebuilds all active memories.'),
+        ] = "default",
+    ) -> str:
+        """Rebuild the local typed graph side index from Obsidian memories."""
+        scope = None if scope_id in ("", "default", "general") else scope_id
+        count = _memory_graph_rebuild(scope_id=scope)
+        return f"Graph rebuilt: {count} edges"
 
     @mcp.tool()
     def memory_save(

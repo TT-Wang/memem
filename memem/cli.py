@@ -199,6 +199,29 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         print(f"Search index rebuilt: {count} memories indexed")
         return
 
+    if cmd in ("graph", "--graph") and len(argv) >= 3:
+        action = argv[2]
+        if action == "rebuild":
+            from memem.graph_index import _rebuild_graph
+            scope = argv[3] if len(argv) >= 4 else None
+            count = _rebuild_graph(scope_id=scope)
+            print(f"Graph rebuilt: {count} edges")
+            return
+        if action == "audit":
+            from memem.graph_index import format_graph_audit
+            print(format_graph_audit())
+            return
+        if action == "stats":
+            from memem.graph_index import _graph_stats
+            print(json.dumps(_graph_stats(), indent=2, sort_keys=True))
+            return
+        if action == "neighbors" and len(argv) >= 4:
+            from memem.graph_index import format_graph_neighbors
+            include_history = "--history" in argv
+            print(format_graph_neighbors(argv[3], include_history=include_history))
+            return
+        raise SystemExit("Usage: memem graph {rebuild|audit|stats|neighbors <memory_id> [--history]}")
+
     if cmd == "--migrate-schema":
         from memem.obsidian_store import _obsidian_memories, _write_obsidian_memory
         from memem.telemetry import _log_event
