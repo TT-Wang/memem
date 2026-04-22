@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "memem": {
+      "command": "bash",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/bootstrap.sh"],
+      "env": {
+        "CLAUDE_PLUGIN_ROOT": "${CLAUDE_PLUGIN_ROOT}"
+      }
+    }
+  }
+}
