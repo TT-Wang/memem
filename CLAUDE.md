@@ -7,7 +7,7 @@ Machine index: SQLite FTS5 at `~/.memem/search.db` for fast retrieval.
 
 ## Auto-recall
 
-The UserPromptSubmit hook fires on your first message and assembles a query-tailored context briefing using `context_assemble`. This uses your message to find relevant memories and produce a focused brief — not a raw index dump.
+The UserPromptSubmit hook fires on your first message and builds an `active_memory_slice` from the current query. This uses your message to activate the relevant working-state memories and produces a focused slice — not a raw index dump.
 
 For deeper recall during the session, use the MCP tools below.
 
@@ -29,7 +29,7 @@ Memories are organized into layers:
 
 `memory_recall` (legacy) still works as a backward-compat alias that's equivalent to memory_search + memory_get on top results.
 
-**Topic-shift detection** — the `UserPromptSubmit` hook automatically detects when the conversation drifts to a new topic (keyword overlap < 30% with the last briefing) and re-fires `context_assemble` to refresh your context. You don't need to call it manually.
+**Topic-shift detection** — the `UserPromptSubmit` hook automatically detects when the conversation drifts to a new topic (keyword overlap < 30% with the last briefing) and re-fires `active_memory_slice` to refresh your context. You don't need to call it manually.
 
 **Graph traversal** — `memory_search` and `memory_get` automatically follow the `related[]` field one hop and include linked memories in a separate section.
 
@@ -91,6 +91,7 @@ Then tell the user: history mining is running in the background (log at `~/.meme
 | `memory_import` | Import from files, directories, or chat exports |
 | `transcript_search` | Search raw Claude Code session logs |
 | `context_assemble` | On-demand query-tailored briefing from all knowledge |
+| `active_memory_slice` | On-demand runtime working-state slice from active recall candidates |
 
 ## Backward compatibility
 

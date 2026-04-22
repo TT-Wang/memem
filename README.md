@@ -160,7 +160,7 @@ You type your first message. The UserPromptSubmit hook fires and sees zero memor
 
 You work normally. The miner daemon runs silently in the background. When your session ends and settles for 5 minutes, the miner extracts memories from the transcript using Claude Haiku and writes them to your vault.
 
-**Session 2 onwards:** the hook sends your first message to `context_assemble`, which gives Haiku the relevant memories and asks it to synthesize a tailored briefing. You see a status banner like `[memem] 12 memories · miner OK · assembly OK` followed by the brief. Claude starts with full context — no re-explaining.
+**Session 2 onwards:** the hook sends your first message through `active_memory_slice`, which builds a structured working-state briefing from the relevant memories, playbooks, transcripts, and graph neighbors. You see an active slice prompt with goals, constraints, background, decisions, failure patterns, open tensions, and artifacts. Claude starts with the current working state instead of a generic briefing.
 
 ## 30-Second Setup
 
@@ -283,11 +283,10 @@ Session ends → miner daemon sees the JSONL file in ~/.claude/projects/
 ```
 First message in a new session → auto-recall.sh hook fires
   → Reads ~/.memem/.capabilities for status banner
-  → If claude CLI is available → sends (message, memories) to Haiku
-      → Haiku synthesizes a focused briefing (300-800 tokens usually)
-      → Brief injected into Claude's context as "memem context briefing"
-  → If claude CLI is missing → falls back to FTS-only keyword recall
-  → Either way, Claude starts its reply with relevant context already loaded
+  → Builds an active memory slice from recall candidates + graph/playbook/transcript context
+  → Emits a structured "Active Memory Slice" prompt block
+  → If the slice engine is unavailable → falls back to compact recall
+  → Either way, Claude starts its reply with active work-state context already loaded
 ```
 
 ## Architecture

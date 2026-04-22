@@ -2,10 +2,10 @@
 # memem auto-recall hook — topic-shift detection on UserPromptSubmit.
 #
 # Flow:
-#   1. Load .last-brief.json (keyword set from last SUCCESSFUL assembly)
+#   1. Load .last-brief.json (keyword set from last successful briefing)
 #   2. Compute keyword overlap with current message
-#   3. If overlap < MEMEM_TOPIC_SHIFT_THRESHOLD (default 0.30), try assembly
-#   4. ONLY on successful assembly, update .last-brief.json
+#   3. If overlap < MEMEM_TOPIC_SHIFT_THRESHOLD (default 0.30), try active slice
+#   4. ONLY on successful slice generation, update .last-brief.json
 #   5. On failure/empty, leave .last-brief.json untouched so the next
 #      prompt with similar keywords will retry — never silently starve
 #
@@ -71,6 +71,33 @@ def emit_empty():
     print(EMPTY_RESPONSE)
     sys.exit(0)
 
+def detect_scope(hook: dict) -> str:
+    cwd = hook.get("cwd") or os.environ.get("PWD") or os.getcwd()
+    if not cwd:
+        return "default"
+    cwd = str(cwd).rstrip("/")
+    home = os.path.expanduser("~").rstrip("/")
+    if not cwd or cwd == "/" or cwd == home:
+        return "default"
+    return os.path.basename(cwd) or "default"
+
+def run_active_slice(query: str, scope: str) -> str:
+    try:
+        env = os.environ.copy()
+        env["PYTHONPATH"] = plugin_root + os.pathsep + env.get("PYTHONPATH", "")
+        result = subprocess.run(
+            [sys.executable, "-m", "memem.server", "active-slice", query, "--scope", scope, "--no-llm"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return ""
+
 # Parse hook input from the tempfile (avoids argv size limits)
 try:
     hook = json.loads(input_file.read_text())
@@ -79,8 +106,9 @@ except Exception:
 
 session_id = hook.get("session_id", "") or ""
 message = hook.get("message", hook.get("query", "")) or ""
+scope = detect_scope(hook)
 
-# If no plugin root, we cannot assemble — emit empty
+# If no plugin root, we cannot assemble an active slice — emit empty
 if not plugin_root or plugin_root == '${CLAUDE_PLUGIN_ROOT}':
     emit_empty()
 
@@ -101,12 +129,16 @@ last_keywords = set(last_data.get("keywords", []))
 last_session  = last_data.get("session_id", "")
 last_primed   = last_data.get("primed", False)
 
-# v0.11.0: if SessionStart just primed us for this session, the first
-# UserPromptSubmit should skip context_assemble — SessionStart already
-# injected the same material, doing it twice doubles the token cost.
+# v0.12.0: if SessionStart just primed us for this session, the first
+# UserPromptSubmit should still receive an active slice. SessionStart
+# injects the broad index; the first real prompt should get the runtime
+# working-state slice instead of the older context_assemble briefing.
 # Consume the primed flag (rewrite .last-brief.json without it) so the
 # next prompt uses normal topic-shift logic.
 if last_primed and last_session == session_id:
+    assembled = run_active_slice(message, scope)
+    if not assembled:
+        emit_empty()
     try:
         last_brief.write_text(json.dumps({
             "session_id": session_id,
@@ -115,7 +147,23 @@ if last_primed and last_session == session_id:
         }))
     except Exception:
         pass
-    emit_empty()
+
+    try:
+        topic_log.parent.mkdir(parents=True, exist_ok=True)
+        ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        snippet = message[:100].replace('"', "'").replace('\n', ' ').replace('\r', '')
+        with topic_log.open("a") as fh:
+            fh.write(f'{ts} session={session_id} overlap=primed msg="{snippet}"\n')
+    except Exception:
+        pass
+
+    print(json.dumps({
+        "hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": assembled,
+        }
+    }))
+    sys.exit(0)
 
 # Compute overlap ratio
 if last_keywords and last_session == session_id:
@@ -139,25 +187,13 @@ if not is_first_message and overlap >= threshold:
 
 # --- Topic shift triggered (or first message) ---
 
-# Run context assembly
-assembled = ""
-if plugin_root:
-    try:
-        env = os.environ.copy()
-        env["PYTHONPATH"] = plugin_root + os.pathsep + env.get("PYTHONPATH", "")
-        result = subprocess.run(
-            [sys.executable, "-m", "memem.server", "--assemble-context", message, "default"],
-            capture_output=True, text=True, timeout=30, env=env,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            assembled = result.stdout.strip()
-    except Exception:
-        pass
+# Run active slice generation
+assembled = run_active_slice(message, scope)
 
 # If assembly failed or returned empty, leave last-brief UNTOUCHED so the
 # next prompt with similar keywords will retry. Silent starvation was the
 # bug we fixed in v0.10.2 — previously .last-brief.json was written before
-# this check, causing any transient Haiku failure to suppress future recall.
+# this check, causing any transient briefing failure to suppress future recall.
 if not assembled:
     emit_empty()
 

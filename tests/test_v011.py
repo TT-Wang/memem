@@ -152,7 +152,7 @@ def test_session_start_hook_writes_primed_marker(tmp_path, monkeypatch):
 
 
 def test_auto_recall_consumes_primed_flag(tmp_path):
-    """First UserPromptSubmit after a primed SessionStart returns empty, clears flag."""
+    """First UserPromptSubmit after a primed SessionStart emits an active slice and clears the flag."""
     memem_dir = tmp_path / ".memem"
     memem_dir.mkdir()
 
@@ -185,7 +185,8 @@ def test_auto_recall_consumes_primed_flag(tmp_path):
 
     data = json.loads(result.stdout)
     ctx = data["hookSpecificOutput"]["additionalContext"]
-    assert ctx == "", f"first prompt after prime should return empty, got: {ctx[:200]!r}"
+    assert "# Active Memory Slice" in ctx
+    assert "## Goals" in ctx
 
     # The primed flag should be cleared after consumption
     data = json.loads(marker.read_text())
@@ -193,3 +194,43 @@ def test_auto_recall_consumes_primed_flag(tmp_path):
     assert data.get("session_id") == "primed-test"
     # Keywords should now be populated from the current message
     assert len(data.get("keywords", [])) > 0
+
+
+def test_auto_recall_topic_shift_uses_active_slice(tmp_path):
+    """When the topic changes, auto-recall should re-emit an active slice."""
+    memem_dir = tmp_path / ".memem"
+    memem_dir.mkdir()
+    marker = memem_dir / ".last-brief.json"
+    marker.write_text(json.dumps({
+        "session_id": "topic-test",
+        "keywords": ["old", "topic"],
+        "timestamp": "2026-04-14T00:00:00Z",
+    }))
+
+    vault = tmp_path / "vault"
+    (vault / "memem" / "memories").mkdir(parents=True)
+    (vault / "memem" / "playbooks").mkdir(parents=True)
+
+    env = os.environ.copy()
+    env["MEMEM_DIR"] = str(memem_dir)
+    env["MEMEM_OBSIDIAN_VAULT"] = str(vault)
+    env["CLAUDE_PLUGIN_ROOT"] = str(REPO)
+    env["PYTHONPATH"] = str(REPO) + os.pathsep + env.get("PYTHONPATH", "")
+
+    result = subprocess.run(
+        ["bash", str(REPO / "hooks" / "auto-recall.sh")],
+        input=json.dumps({
+            "session_id": "topic-test",
+            "message": "brief me the project forge workflow",
+        }),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+    assert result.returncode == 0, f"hook failed: {result.stderr}"
+
+    data = json.loads(result.stdout)
+    ctx = data["hookSpecificOutput"]["additionalContext"]
+    assert "# Active Memory Slice" in ctx
+    assert "## Goals" in ctx
