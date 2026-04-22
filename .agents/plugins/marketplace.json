@@ -8,7 +8,7 @@
       "name": "memem",
       "source": {
         "source": "local",
-        "path": "./"
+        "path": "./plugins/memem"
       },
       "policy": {
         "installation": "AVAILABLE",
