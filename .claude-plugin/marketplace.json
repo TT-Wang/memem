@@ -11,7 +11,10 @@
   "plugins": [
     {
       "name": "memem",
-      "source": "./",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
       "description": "Persistent, self-evolving memory for Claude Code. Local-first, no cloud, browsable Obsidian vault.",
       "version": "0.11.0",
       "author": {
