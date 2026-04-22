@@ -71,8 +71,8 @@ memem uses a 3-tier recall workflow inspired by [claude-mem](https://github.com/
               │
               ▼
    ┌─────────────────────────────┐
-   │ Topic-shift detection       │ → auto-refreshes context
-   │ (UserPromptSubmit hook)     │    when conversation drifts
+   │ UserPromptSubmit hook       │ → always runs active slice
+   │ (active_slice engine)       │    and refreshes working state
    └─────────────────────────────┘
 ```
 
@@ -160,7 +160,7 @@ You type your first message. The UserPromptSubmit hook fires and sees zero memor
 
 You work normally. The miner daemon runs silently in the background. When your session ends and settles for 5 minutes, the miner extracts memories from the transcript using Claude Haiku and writes them to your vault.
 
-**Session 2 onwards:** the hook sends your first message through `active_memory_slice`, which builds a structured working-state briefing from the relevant memories, playbooks, transcripts, and graph neighbors. You see an active slice prompt with goals, constraints, background, decisions, failure patterns, open tensions, and artifacts. Claude starts with the current working state instead of a generic briefing.
+**During the session:** every user prompt goes through `active_memory_slice`, which builds a structured working-state briefing from the relevant memories, playbooks, transcripts, and graph neighbors. You see an active slice prompt with goals, constraints, background, decisions, failure patterns, open tensions, and artifacts. Claude starts with the current working state instead of a generic briefing.
 
 ## 30-Second Setup
 

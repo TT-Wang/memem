@@ -7,7 +7,7 @@ Machine index: SQLite FTS5 at `~/.memem/search.db` for fast retrieval.
 
 ## Auto-recall
 
-The UserPromptSubmit hook fires on your first message and builds an `active_memory_slice` from the current query. This uses your message to activate the relevant working-state memories and produces a focused slice — not a raw index dump.
+The UserPromptSubmit hook fires on every message and builds an `active_memory_slice` from the current query. This uses your message to activate the relevant working-state memories and produces a focused slice — not a raw index dump.
 
 For deeper recall during the session, use the MCP tools below.
 
@@ -29,7 +29,7 @@ Memories are organized into layers:
 
 `memory_recall` (legacy) still works as a backward-compat alias that's equivalent to memory_search + memory_get on top results.
 
-**Topic-shift detection** — the `UserPromptSubmit` hook automatically detects when the conversation drifts to a new topic (keyword overlap < 30% with the last briefing) and re-fires `active_memory_slice` to refresh your context. You don't need to call it manually.
+**Always-wake recall** — the `UserPromptSubmit` hook runs `active_memory_slice` on every prompt. Topic overlap is tracked only for telemetry and tuning; it no longer gates activation. You don't need to call it manually.
 
 **Graph traversal** — `memory_search` and `memory_get` automatically follow the `related[]` field one hop and include linked memories in a separate section.
 

@@ -234,3 +234,43 @@ def test_auto_recall_topic_shift_uses_active_slice(tmp_path):
     ctx = data["hookSpecificOutput"]["additionalContext"]
     assert "# Active Memory Slice" in ctx
     assert "## Goals" in ctx
+
+
+def test_auto_recall_same_topic_still_uses_active_slice(tmp_path):
+    """Same-topic prompts should still wake memem and emit an active slice."""
+    memem_dir = tmp_path / ".memem"
+    memem_dir.mkdir()
+    marker = memem_dir / ".last-brief.json"
+    marker.write_text(json.dumps({
+        "session_id": "topic-test",
+        "keywords": ["brief", "project", "forge", "workflow"],
+        "timestamp": "2026-04-14T00:00:00Z",
+    }))
+
+    vault = tmp_path / "vault"
+    (vault / "memem" / "memories").mkdir(parents=True)
+    (vault / "memem" / "playbooks").mkdir(parents=True)
+
+    env = os.environ.copy()
+    env["MEMEM_DIR"] = str(memem_dir)
+    env["MEMEM_OBSIDIAN_VAULT"] = str(vault)
+    env["CLAUDE_PLUGIN_ROOT"] = str(REPO)
+    env["PYTHONPATH"] = str(REPO) + os.pathsep + env.get("PYTHONPATH", "")
+
+    result = subprocess.run(
+        ["bash", str(REPO / "hooks" / "auto-recall.sh")],
+        input=json.dumps({
+            "session_id": "topic-test",
+            "message": "brief me the project forge workflow",
+        }),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+    assert result.returncode == 0, f"hook failed: {result.stderr}"
+
+    data = json.loads(result.stdout)
+    ctx = data["hookSpecificOutput"]["additionalContext"]
+    assert "# Active Memory Slice" in ctx
+    assert "## Goals" in ctx

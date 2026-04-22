@@ -1,15 +1,13 @@
 #!/usr/bin/env bash
-# memem auto-recall hook — topic-shift detection on UserPromptSubmit.
+# memem auto-recall hook — always-wake active slice on UserPromptSubmit.
 #
 # Flow:
-#   1. Load .last-brief.json (keyword set from last successful briefing)
-#   2. Compute keyword overlap with current message
-#   3. If overlap < MEMEM_TOPIC_SHIFT_THRESHOLD (default 0.30), try active slice
-#   4. ONLY on successful slice generation, update .last-brief.json
-#   5. On failure/empty, leave .last-brief.json untouched so the next
-#      prompt with similar keywords will retry — never silently starve
+#   1. Load .last-brief.json for telemetry and session bookkeeping
+#   2. Run active_memory_slice for every user prompt
+#   3. Update .last-brief.json only after successful slice generation
 #
-# Silent (empty context) when topic is unchanged.
+# The hook no longer gates activation on keyword overlap. The active slice
+# engine is the decision layer; overlap is kept only for logging and tuning.
 #
 # v0.10.2 fixes:
 #   - Move .last-brief.json write AFTER successful assembly (was writing
@@ -129,64 +127,6 @@ last_keywords = set(last_data.get("keywords", []))
 last_session  = last_data.get("session_id", "")
 last_primed   = last_data.get("primed", False)
 
-# v0.12.0: if SessionStart just primed us for this session, the first
-# UserPromptSubmit should still receive an active slice. SessionStart
-# injects the broad index; the first real prompt should get the runtime
-# working-state slice instead of the older context_assemble briefing.
-# Consume the primed flag (rewrite .last-brief.json without it) so the
-# next prompt uses normal topic-shift logic.
-if last_primed and last_session == session_id:
-    assembled = run_active_slice(message, scope)
-    if not assembled:
-        emit_empty()
-    try:
-        last_brief.write_text(json.dumps({
-            "session_id": session_id,
-            "keywords": sorted(current_keywords),
-            "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-        }))
-    except Exception:
-        pass
-
-    try:
-        topic_log.parent.mkdir(parents=True, exist_ok=True)
-        ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-        snippet = message[:100].replace('"', "'").replace('\n', ' ').replace('\r', '')
-        with topic_log.open("a") as fh:
-            fh.write(f'{ts} session={session_id} overlap=primed msg="{snippet}"\n')
-    except Exception:
-        pass
-
-    print(json.dumps({
-        "hookSpecificOutput": {
-            "hookEventName": "UserPromptSubmit",
-            "additionalContext": assembled,
-        }
-    }))
-    sys.exit(0)
-
-# Compute overlap ratio
-if last_keywords and last_session == session_id:
-    smaller = min(len(current_keywords), len(last_keywords))
-    if smaller > 0:
-        overlap = len(current_keywords & last_keywords) / smaller
-    else:
-        overlap = 0.0
-    is_first_message = False
-else:
-    # Different session or no prior data — always trigger
-    overlap = 0.0
-    is_first_message = True
-
-threshold = float(os.environ.get("MEMEM_TOPIC_SHIFT_THRESHOLD", "0.3"))
-
-# If overlap is sufficient, stay silent WITHOUT updating last-brief
-# (nothing to update — we're continuing the same topic)
-if not is_first_message and overlap >= threshold:
-    emit_empty()
-
-# --- Topic shift triggered (or first message) ---
-
 # Run active slice generation
 assembled = run_active_slice(message, scope)
 
@@ -197,7 +137,17 @@ assembled = run_active_slice(message, scope)
 if not assembled:
     emit_empty()
 
-# Assembly succeeded — NOW commit the keyword set + log the shift
+# Compute overlap ratio for telemetry only.
+if last_keywords and last_session == session_id:
+    smaller = min(len(current_keywords), len(last_keywords))
+    if smaller > 0:
+        overlap = len(current_keywords & last_keywords) / smaller
+    else:
+        overlap = 0.0
+else:
+    overlap = 0.0
+
+# Assembly succeeded — NOW commit the keyword set + log the wakeup.
 try:
     last_brief.parent.mkdir(parents=True, exist_ok=True)
     last_brief.write_text(json.dumps({
@@ -213,7 +163,8 @@ try:
     ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     snippet = message[:100].replace('"', "'").replace('\n', ' ').replace('\r', '')
     with topic_log.open("a") as fh:
-        fh.write(f'{ts} session={session_id} overlap={overlap:.2f} msg="{snippet}"\n')
+        mode = "primed" if last_primed and last_session == session_id else "wakeup"
+        fh.write(f'{ts} session={session_id} overlap={overlap:.2f} mode={mode} msg="{snippet}"\n')
 except Exception:
     pass
 
