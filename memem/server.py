@@ -29,6 +29,7 @@ def _build_mcp():
     from mcp.server.fastmcp import FastMCP
     from pydantic import Field
 
+    from memem.active_slice_engine import active_slice_response as _active_slice_response
     from memem.graph_index import (
         _rebuild_graph as _memory_graph_rebuild,
     )
@@ -340,6 +341,42 @@ def _build_mcp():
         scope = None if scope_id in ("", "default", "general") else scope_id
         count = _memory_graph_rebuild(scope_id=scope)
         return f"Graph rebuilt: {count} edges"
+
+    @mcp.tool()
+    def active_memory_slice(
+        query: Annotated[
+            str,
+            Field(
+                description=(
+                    "Current work request. The engine turns vault recall candidates "
+                    "into a structured runtime working state: goals, constraints, "
+                    "background, decisions, risks, artifacts, open tensions, and "
+                    "non-mutating delta proposals."
+                ),
+                min_length=1,
+                max_length=2000,
+            ),
+        ],
+        scope_id: Annotated[
+            str,
+            Field(description='Project scope. Default "default".'),
+        ] = "default",
+        raw_json: Annotated[
+            bool,
+            Field(description="Return raw structured JSON instead of markdown projection."),
+        ] = False,
+        use_llm: Annotated[
+            bool,
+            Field(description="Use bounded Haiku activation when available; fallback is deterministic heuristic mode."),
+        ] = True,
+    ) -> str:
+        """Generate an Active Memory Slice runtime working state for ongoing work.
+
+        This is above memory_search/context_assemble: recall produces candidates,
+        then the slice engine activates only the working-state items needed now.
+        It never auto-commits delta proposals to the vault.
+        """
+        return _active_slice_response(query, scope_id=scope_id, raw_json=raw_json, use_llm=use_llm)
 
     @mcp.tool()
     def memory_save(

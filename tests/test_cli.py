@@ -90,3 +90,21 @@ def test_unknown_command(tmp_vault, capsys):
 def test_rebuild_index(tmp_vault, capsys):
     out = _dispatch(["--rebuild-index"], capsys)
     assert "Index rebuilt" in out.out
+
+
+def test_active_slice_cli_no_llm(tmp_vault, tmp_cortex_dir, capsys, monkeypatch):
+    from memem import transcripts
+    monkeypatch.setattr(transcripts, "transcript_search", lambda *a, **kw: "No matching transcripts found")
+
+    out = _dispatch(["active-slice", "Prepare", "project", "review", "--scope", "memem", "--no-llm"], capsys)
+    assert "# Active Memory Slice" in out.out
+    assert "## Goals" in out.out
+
+
+def test_active_slice_cli_json(tmp_vault, tmp_cortex_dir, capsys, monkeypatch):
+    from memem import transcripts
+    monkeypatch.setattr(transcripts, "transcript_search", lambda *a, **kw: "No matching transcripts found")
+
+    out = _dispatch(["active-slice", "Prepare review", "--scope", "memem", "--json", "--no-llm"], capsys)
+    assert '"goals"' in out.out
+    assert '"activation_mode": "heuristic"' in out.out

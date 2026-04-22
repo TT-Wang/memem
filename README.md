@@ -87,6 +87,25 @@ memem uses a 3-tier recall workflow inspired by [claude-mem](https://github.com/
 
 Token efficiency: session start injects ~50 tokens per L1-L3 memory (ID + title + snippet) instead of full content. Claude drills into specific memories via `memory_get(ids=[...])` only when it needs full detail.
 
+**Active Memory Slice runtime kernel:**
+
+For ongoing work, `active_memory_slice(query, scope_id)` sits above recall. It
+uses `memory_search`/FTS/graph/playbooks/transcripts as candidate generation,
+then activates a structured working state:
+
+```text
+Memory Vault
+→ Candidate Generation
+→ Activation Judgement
+→ Active Memory Slice
+→ Delta Proposals
+→ Memory Vault
+```
+
+The slice explicitly separates goals, constraints, background, decisions,
+preferences, failure patterns, artifacts, open tensions, and candidate deltas.
+Delta proposals are advisory in v1 and are not auto-committed to the vault.
+
 Opt-in features:
 - **`MEMEM_SHOW_BANNER=1`** — show a one-line status banner at session start (off by default)
 - **`MEMEM_PRETOOL_GATING=1`** — enrich Read tool calls with memories about the target file (off by default)
@@ -217,6 +236,7 @@ You can point memem elsewhere via `MEMEM_DIR` and `MEMEM_OBSIDIAN_VAULT` env var
 | `memory_graph(memory_id)` | Inspect typed/scored graph neighbors for one memory. |
 | `memory_graph_audit()` | Report graph quality issues: orphans, dead links, hubs, stale edges. |
 | `memory_graph_rebuild(scope_id)` | Rebuild the graph side index from the Obsidian vault. |
+| `active_memory_slice(query, scope_id)` | Build a structured runtime working state for current work. |
 
 ## What slash commands does memem add?
 
@@ -279,6 +299,11 @@ memem is split into small, focused modules:
 - `telemetry.py` — access tracking, event log (atomic writes, fcntl-locked)
 - `search_index.py` — SQLite FTS5 index
 - `graph_index.py` — typed/scored related-memory graph side index
+- `active_slice.py` — active slice schemas and markdown projection
+- `activation.py` — heuristic + bounded LLM activation judgement
+- `boundaries.py` — scope/deprecated/budget/redundancy filters
+- `delta.py` — non-mutating candidate delta proposals
+- `active_slice_engine.py` — candidate generation and slice orchestration
 - `obsidian_store.py` — memory I/O, dedup scoring, contradiction detection
 - `playbook.py` — per-project playbook grow + refine
 - `assembly.py` — context assembly via Haiku

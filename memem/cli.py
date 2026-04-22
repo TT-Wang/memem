@@ -116,6 +116,34 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         print(memory_recall(query, limit=10) if query else "No query provided.")
         return
 
+    if cmd in ("active-slice", "--active-slice"):
+        raw_json = "--json" in argv
+        use_llm = "--no-llm" not in argv
+        scope = "default"
+        query_parts = []
+        skip_next = False
+        for idx, arg in enumerate(argv[2:], start=2):
+            if skip_next:
+                skip_next = False
+                continue
+            if arg == "--json" or arg == "--no-llm":
+                continue
+            if arg == "--scope":
+                try:
+                    scope = argv[idx + 1]
+                    skip_next = True
+                except IndexError:
+                    pass
+                continue
+            query_parts.append(arg)
+        query = " ".join(query_parts).strip()
+        if not query:
+            print("No query provided.")
+            return
+        from memem.active_slice_engine import active_slice_response
+        print(active_slice_response(query, scope_id=scope, use_llm=use_llm, raw_json=raw_json))
+        return
+
     if cmd == "--mine-session" and len(argv) >= 3:
         try:
             print(json.dumps(mine_session(argv[2])))
