@@ -1,0 +1,50 @@
+{
+  "name": "memem",
+  "version": "0.11.0",
+  "description": "Persistent, self-evolving memory for Claude Code. Local-first, no cloud, browsable Obsidian vault.",
+  "author": {
+    "name": "TT-Wang",
+    "url": "https://github.com/TT-Wang"
+  },
+  "homepage": "https://github.com/TT-Wang/memem",
+  "repository": "https://github.com/TT-Wang/memem",
+  "license": "MIT",
+  "keywords": [
+    "memory",
+    "context",
+    "knowledge",
+    "recall",
+    "learning",
+    "persistent-memory",
+    "obsidian"
+  ],
+  "skills": "./skills/",
+  "mcpServers": {
+    "memem": {
+      "command": "bash",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/bootstrap.sh"],
+      "env": {
+        "CLAUDE_PLUGIN_ROOT": "${CLAUDE_PLUGIN_ROOT}"
+      }
+    }
+  },
+  "interface": {
+    "displayName": "Memem",
+    "shortDescription": "Persistent, self-evolving memory for Claude Code",
+    "longDescription": "Memem gives Claude Code durable local memory across sessions, backed by an Obsidian vault and fast recall indexes.",
+    "developerName": "TT-Wang",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write",
+      "Interactive"
+    ],
+    "websiteURL": "https://github.com/TT-Wang/memem",
+    "privacyPolicyURL": "https://github.com/TT-Wang/memem",
+    "termsOfServiceURL": "https://github.com/TT-Wang/memem",
+    "defaultPrompt": [
+      "Use memem to recall relevant project memory before answering."
+    ],
+    "screenshots": []
+  }
+}

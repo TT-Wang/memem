@@ -1,0 +1,20 @@
+{
+  "name": "memem-marketplace",
+  "interface": {
+    "displayName": "Memem Marketplace"
+  },
+  "plugins": [
+    {
+      "name": "memem",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
