@@ -120,6 +120,7 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         raw_json = "--json" in argv
         use_llm = "--no-llm" not in argv
         scope = "default"
+        query_file = ""
         query_parts = []
         skip_next = False
         for idx, arg in enumerate(argv[2:], start=2):
@@ -127,6 +128,13 @@ def dispatch_cli(argv: list[str], mcp) -> None:
                 skip_next = False
                 continue
             if arg == "--json" or arg == "--no-llm":
+                continue
+            if arg == "--query-file":
+                try:
+                    query_file = argv[idx + 1]
+                    skip_next = True
+                except IndexError:
+                    pass
                 continue
             if arg == "--scope":
                 try:
@@ -136,7 +144,13 @@ def dispatch_cli(argv: list[str], mcp) -> None:
                     pass
                 continue
             query_parts.append(arg)
-        query = " ".join(query_parts).strip()
+        if query_file:
+            if query_file == "-":
+                query = sys.stdin.read().strip()
+            else:
+                query = Path(query_file).read_text(errors="ignore").strip()
+        else:
+            query = " ".join(query_parts).strip()
         if not query:
             print("No query provided.")
             return

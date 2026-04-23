@@ -94,6 +94,8 @@ class ActiveMemorySlice(TypedDict, total=False):
     candidate_deltas: list[dict]
     projection_hint: dict
     candidate_count: int
+    recall_candidate_count: int
+    should_emit_context: bool
     activation_mode: Literal["heuristic", "llm", "hybrid"]
     confidence: float
     warnings: list[str]
@@ -307,6 +309,11 @@ def build_active_memory_slice(
     goals = selected("goals", "goal")
     if not any(item.get("source_type") == "current_query" for item in goals):
         goals.insert(0, _item_from_candidate(current_query_candidate(query, scope_id), "goal", "Current user request", 1.0))
+    constraints = selected("constraints", "constraint")
+    active_background = selected("background", "background")
+    decisions = selected("decisions", "decision")
+    preferences = selected("preferences", "preference")
+    failure_patterns = selected("failure_patterns", "failure_pattern")
 
     artifacts = []
     for entry in activation_result.get("artifact_context", []):
@@ -328,6 +335,20 @@ def build_active_memory_slice(
             "why_open": entry.get("why_open", entry.get("why", "")),
         })
 
+    selected_memory_items = [
+        item
+        for section in (goals, constraints, active_background, decisions, preferences, failure_patterns)
+        for item in section
+        if item.get("memory_id")
+    ]
+    recall_candidate_count = (
+        len(candidate_bundle.get("memory_candidates", []))
+        + len(candidate_bundle.get("transcript_candidates", []))
+        + len(candidate_bundle.get("artifact_candidates", []))
+        + (1 if candidate_bundle.get("playbook_candidate") else 0)
+    )
+    should_emit_context = bool(selected_memory_items or artifacts or tensions)
+
     slice_obj: ActiveMemorySlice = {
         "slice_id": _stable_id("slice", {"query": query, "scope": scope_id, "generated_at": now_iso()}),
         "session_id": environment.get("session_id", ""),
@@ -337,11 +358,11 @@ def build_active_memory_slice(
         "generated_at": now_iso(),
         "environment": environment,
         "goals": goals,
-        "constraints": selected("constraints", "constraint"),
-        "active_background": selected("background", "background"),
-        "decisions": selected("decisions", "decision"),
-        "preferences": selected("preferences", "preference"),
-        "failure_patterns": selected("failure_patterns", "failure_pattern"),
+        "constraints": constraints,
+        "active_background": active_background,
+        "decisions": decisions,
+        "preferences": preferences,
+        "failure_patterns": failure_patterns,
         "artifacts": artifacts,
         "open_tensions": tensions,
         "excluded_candidates": activation_result.get("ignored", []) + activation_result.get("excluded_candidates", []),
@@ -352,6 +373,8 @@ def build_active_memory_slice(
             "should_surface_open_tensions": True,
         },
         "candidate_count": len(flatten_candidate_bundle(candidate_bundle)),
+        "recall_candidate_count": recall_candidate_count,
+        "should_emit_context": should_emit_context,
         "activation_mode": activation_result.get("activation_mode", "heuristic"),
         "confidence": float(activation_result.get("confidence", 0.6)),
         "warnings": activation_result.get("warnings", []),
@@ -378,6 +401,9 @@ def _render_items(items: list[dict]) -> list[str]:
 
 
 def render_slice_as_prompt_context(slice_obj: ActiveMemorySlice) -> str:
+    if not slice_obj.get("should_emit_context", True):
+        return ""
+
     sections = [
         ("Goals", slice_obj.get("goals", [])),
         ("Constraints", slice_obj.get("constraints", [])),

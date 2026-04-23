@@ -34,10 +34,10 @@ PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
 LAST_BRIEF="${MEMEM_DIR}/.last-brief.json"
 TOPIC_LOG="${MEMEM_DIR}/topic-shifts.log"
 
-python3 - "$PLUGIN_ROOT" "$INPUT_FILE" "$LAST_BRIEF" "$TOPIC_LOG" "$MEMEM_DIR" << 'HOOKPY'
+"${MEMEM_PYTHON:-python3}" - "$PLUGIN_ROOT" "$INPUT_FILE" "$LAST_BRIEF" "$TOPIC_LOG" "$MEMEM_DIR" << 'HOOKPY'
 import sys, json, os, subprocess, re
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 
 plugin_root = sys.argv[1]
 input_file  = Path(sys.argv[2])
@@ -84,7 +84,8 @@ def run_active_slice(query: str, scope: str) -> str:
         env = os.environ.copy()
         env["PYTHONPATH"] = plugin_root + os.pathsep + env.get("PYTHONPATH", "")
         result = subprocess.run(
-            [sys.executable, "-m", "memem.server", "active-slice", query, "--scope", scope, "--no-llm"],
+            [sys.executable, "-m", "memem.server", "active-slice", "--query-file", "-", "--scope", scope, "--no-llm"],
+            input=query,
             capture_output=True,
             text=True,
             timeout=30,
@@ -153,14 +154,14 @@ try:
     last_brief.write_text(json.dumps({
         "session_id": session_id,
         "keywords": sorted(current_keywords),
-        "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }))
 except Exception:
     pass
 
 try:
     topic_log.parent.mkdir(parents=True, exist_ok=True)
-    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     snippet = message[:100].replace('"', "'").replace('\n', ' ').replace('\r', '')
     with topic_log.open("a") as fh:
         mode = "primed" if last_primed and last_session == session_id else "wakeup"

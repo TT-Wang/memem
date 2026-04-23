@@ -93,6 +93,15 @@ def test_hook_references_new_package_path():
     hook = (REPO_ROOT / "hooks" / "auto-recall.sh").read_text()
     assert "cortex_server" not in hook
     assert "memem.server" in hook
+    assert "--query-file" in hook
+
+
+def test_codex_hook_manifest_excludes_pretooluse():
+    codex_hooks = json.loads((REPO_ROOT / "hooks" / "codex-hooks.json").read_text())
+    claude_hooks = json.loads((REPO_ROOT / "hooks" / "hooks.json").read_text())
+
+    assert "PreToolUse" not in codex_hooks["hooks"]
+    assert "PreToolUse" in claude_hooks["hooks"]
 
 
 def test_miner_wrapper_uses_module_form():
@@ -179,3 +188,40 @@ def test_hook_handles_missing_plugin_root(tmp_path):
     assert result.returncode == 0, f"hook crashed: stderr={result.stderr}"
     # And it MUST have surfaced the missing-plugin-root diagnostic on stderr
     assert "CLAUDE_PLUGIN_ROOT" in result.stderr or "plugin_root" in result.stderr.lower() or result.stdout.strip()
+
+
+def test_auto_recall_hook_handles_large_prompt_without_argv_overflow(tmp_path):
+    """Large prompt payloads must flow through stdin/query-file, not argv."""
+    state = tmp_path / ".memem"
+    vault = tmp_path / "obsidian-brain"
+    (vault / "memem" / "memories").mkdir(parents=True)
+    (vault / "memem" / "playbooks").mkdir(parents=True)
+
+    env = os.environ.copy()
+    env.update({
+        "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT),
+        "MEMEM_DIR": str(state),
+        "MEMEM_OBSIDIAN_VAULT": str(vault),
+        "MEMEM_PYTHON": sys.executable,
+        "PYTHONPATH": str(REPO_ROOT) + os.pathsep + env.get("PYTHONPATH", ""),
+    })
+    hook_input = json.dumps({
+        "session_id": "large-prompt",
+        "cwd": str(REPO_ROOT),
+        "message": "large prompt " * 30000,
+    })
+
+    result = subprocess.run(
+        ["bash", str(REPO_ROOT / "hooks" / "auto-recall.sh")],
+        input=hook_input,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+    assert payload["hookSpecificOutput"]["additionalContext"] == ""
+    assert "Argument list too long" not in result.stderr
