@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Literal, TypedDict
+from typing import TYPE_CHECKING, Literal, TypedDict
+
+if TYPE_CHECKING:
+    from memem.active_slice import ActiveMemorySlice
 
 
 class DeltaProposal(TypedDict, total=False):
@@ -30,7 +33,7 @@ def _delta_id(delta_type: str, payload: dict) -> str:
     return f"delta_{hashlib.sha1(encoded.encode('utf-8')).hexdigest()[:12]}"
 
 
-def propose_deltas_from_slice(slice_obj: dict) -> list[DeltaProposal]:
+def propose_deltas_from_slice(slice_obj: ActiveMemorySlice) -> list[DeltaProposal]:
     """Propose safe memory changes without mutating the vault."""
     deltas: list[DeltaProposal] = []
     slice_id = slice_obj.get("slice_id", "")
@@ -39,7 +42,7 @@ def propose_deltas_from_slice(slice_obj: dict) -> list[DeltaProposal]:
         description = tension.get("description", "")
         if not description:
             continue
-        payload = {"description": description, "slice_id": slice_id}
+        payload: dict[str, object] = {"description": description, "slice_id": slice_id}
         deltas.append({
             "delta_id": _delta_id("add_open_tension_memory", payload),
             "delta_type": "add_open_tension_memory",
@@ -55,9 +58,15 @@ def propose_deltas_from_slice(slice_obj: dict) -> list[DeltaProposal]:
 
     # Relation deltas stay conservative: propose links between the strongest
     # selected memories in different sections when both are explicit memory IDs.
-    selected = []
-    for key in ("constraints", "decisions", "failure_patterns", "active_background"):
-        for item in slice_obj.get(key, [])[:3]:
+    selected: list[str] = []
+    sections = (
+        slice_obj.get("constraints", []),
+        slice_obj.get("decisions", []),
+        slice_obj.get("failure_patterns", []),
+        slice_obj.get("active_background", []),
+    )
+    for section in sections:
+        for item in section[:3]:
             mid = item.get("memory_id", "")
             if mid:
                 selected.append(mid)

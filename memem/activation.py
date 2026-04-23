@@ -5,8 +5,16 @@ from __future__ import annotations
 import json
 import logging
 import subprocess
+from typing import Any, cast
 
-from memem.active_slice import flatten_candidate_bundle
+from memem.active_slice import (
+    ActivationEntry,
+    ActivationResult,
+    ActivationTension,
+    Candidate,
+    CandidateBundle,
+    flatten_candidate_bundle,
+)
 from memem.capabilities import assembly_available
 
 log = logging.getLogger("memem-activation")
@@ -37,13 +45,30 @@ _ACTIVATION_SYSTEM = (
 )
 
 
-def _entry(candidate: dict, why: str, score_boost: float = 0.0) -> dict:
+def _entry(candidate: Candidate, why: str, score_boost: float = 0.0) -> ActivationEntry:
     return {
         "candidate_id": candidate.get("candidate_id", ""),
         "memory_id": candidate.get("memory_id", ""),
         "artifact_id": candidate.get("artifact_id", ""),
         "why": why,
         "score": min(1.0, float(candidate.get("score", 0.5) or 0.5) + score_boost),
+    }
+
+
+def _empty_activation_result(mode: str) -> ActivationResult:
+    return {
+        "goals": [],
+        "constraints": [],
+        "background": [],
+        "decisions": [],
+        "preferences": [],
+        "failure_patterns": [],
+        "artifact_context": [],
+        "open_tensions": [],
+        "ignored": [],
+        "activation_mode": cast(Any, mode),
+        "confidence": 0.35,
+        "warnings": [],
     }
 
 
@@ -55,11 +80,11 @@ def _contains(text: str, cues: set[str]) -> bool:
 def judge_activation_heuristically(
     query: str,
     scope_id: str,
-    environment: dict,
-    candidate_bundle: dict,
-) -> dict:
+    environment: dict[str, Any],
+    candidate_bundle: CandidateBundle,
+) -> ActivationResult:
     """Deterministic fallback activation judgement."""
-    result = {key: [] for key in _ROLE_KEYS}
+    result = _empty_activation_result("heuristic")
     candidates = flatten_candidate_bundle(candidate_bundle)
 
     for candidate in candidates:
@@ -83,22 +108,21 @@ def judge_activation_heuristically(
             result["background"].append(_entry(candidate, "relevant background candidate"))
 
         if _contains(text, _OPEN_TENSION_CUES) and ctype != "current_query":
-            result["open_tensions"].append({
+            tension: ActivationTension = {
                 "description": candidate.get("summary", candidate.get("title", ""))[:240],
                 "severity": "medium",
                 "linked_memory_ids": [candidate.get("memory_id", "")] if candidate.get("memory_id") else [],
                 "why_open": "unresolved/tension cue matched",
-            })
+            }
+            result["open_tensions"].append(tension)
 
-    result["activation_mode"] = "heuristic"
     result["confidence"] = 0.62 if candidates else 0.35
-    result["warnings"] = []
     return result
 
 
-def _bounded_candidates(candidate_bundle: dict, max_candidates: int = 30, max_chars: int = 800) -> list[dict]:
+def _bounded_candidates(candidate_bundle: CandidateBundle, max_candidates: int = 30, max_chars: int = 800) -> list[dict[str, Any]]:
     candidates = sorted(flatten_candidate_bundle(candidate_bundle), key=lambda c: c.get("score", 0.0), reverse=True)
-    bounded = []
+    bounded: list[dict[str, Any]] = []
     for candidate in candidates[:max_candidates]:
         bounded.append({
             "candidate_id": candidate.get("candidate_id", ""),
@@ -113,7 +137,7 @@ def _bounded_candidates(candidate_bundle: dict, max_candidates: int = 30, max_ch
     return bounded
 
 
-def _extract_json_object(text: str) -> dict | None:
+def _extract_json_object(text: str) -> dict[str, Any] | None:
     start = text.find("{")
     if start < 0:
         return None
@@ -136,24 +160,47 @@ def _extract_json_object(text: str) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def _sanitize_llm_result(data: dict) -> dict:
-    result = {key: [] for key in _ROLE_KEYS}
-    for key in _ROLE_KEYS:
-        value = data.get(key, [])
-        result[key] = value if isinstance(value, list) else []
-    result["activation_mode"] = "llm"
-    result["confidence"] = 0.78
-    result["warnings"] = []
+def _sanitize_llm_result(data: dict[str, Any]) -> ActivationResult:
+    result = _empty_activation_result("llm")
+    result["goals"] = cast(list[ActivationEntry], data.get("goals", []) if isinstance(data.get("goals", []), list) else [])
+    result["constraints"] = cast(
+        list[ActivationEntry],
+        data.get("constraints", []) if isinstance(data.get("constraints", []), list) else [],
+    )
+    result["background"] = cast(
+        list[ActivationEntry],
+        data.get("background", []) if isinstance(data.get("background", []), list) else [],
+    )
+    result["decisions"] = cast(
+        list[ActivationEntry],
+        data.get("decisions", []) if isinstance(data.get("decisions", []), list) else [],
+    )
+    result["preferences"] = cast(
+        list[ActivationEntry],
+        data.get("preferences", []) if isinstance(data.get("preferences", []), list) else [],
+    )
+    result["failure_patterns"] = cast(
+        list[ActivationEntry],
+        data.get("failure_patterns", []) if isinstance(data.get("failure_patterns", []), list) else [],
+    )
+    result["artifact_context"] = cast(
+        list[ActivationEntry],
+        data.get("artifact_context", []) if isinstance(data.get("artifact_context", []), list) else [],
+    )
+    result["open_tensions"] = cast(
+        list[ActivationTension],
+        data.get("open_tensions", []) if isinstance(data.get("open_tensions", []), list) else [],
+    )
     return result
 
 
 def judge_activation_with_llm(
     query: str,
     scope_id: str,
-    environment: dict,
-    candidate_bundle: dict,
+    environment: dict[str, Any],
+    candidate_bundle: CandidateBundle,
     timeout: int = 30,
-) -> dict:
+) -> ActivationResult:
     """Run bounded Haiku activation, falling back to deterministic judgement."""
     if not assembly_available():
         fallback = judge_activation_heuristically(query, scope_id, environment, candidate_bundle)

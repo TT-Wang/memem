@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from typing import Any
+
+from memem.active_slice import Candidate
 from memem.models import _normalize_scope_id
 from memem.obsidian_store import _word_set
 
@@ -17,11 +20,11 @@ ROLE_BUDGETS = {
 }
 
 
-def _candidate_key(candidate: dict) -> str:
+def _candidate_key(candidate: Candidate) -> str:
     return candidate.get("memory_id") or candidate.get("artifact_id") or candidate.get("candidate_id", "")
 
 
-def _scope_allowed(candidate: dict, scope_id: str) -> bool:
+def _scope_allowed(candidate: Candidate, scope_id: str) -> bool:
     normalized = _normalize_scope_id(scope_id)
     if normalized in {"", "default", "general"}:
         return True
@@ -31,7 +34,7 @@ def _scope_allowed(candidate: dict, scope_id: str) -> bool:
     return project in {normalized, "general"}
 
 
-def _is_deprecated(candidate: dict) -> bool:
+def _is_deprecated(candidate: Candidate) -> bool:
     return candidate.get("status", "active") == "deprecated"
 
 
@@ -44,13 +47,13 @@ def _overlap(a: str, b: str) -> float:
 
 
 def apply_pre_boundaries(
-    candidates: list[dict],
+    candidates: list[Candidate],
     scope_id: str,
     include_history: bool = False,
-) -> dict:
+) -> dict[str, Any]:
     """Filter candidates before LLM/heuristic activation."""
-    filtered: list[dict] = []
-    excluded: list[dict] = []
+    filtered: list[Candidate] = []
+    excluded: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     kept_texts: list[tuple[str, str, float]] = []
 
@@ -89,7 +92,7 @@ def apply_pre_boundaries(
     return {"candidates": filtered, "excluded_candidates": excluded}
 
 
-def _cap_entries(entries: list[dict], cap: int, ignored: list[dict], role: str) -> list[dict]:
+def _cap_entries(entries: list[dict[str, Any]], cap: int, ignored: list[dict[str, Any]], role: str) -> list[dict[str, Any]]:
     sorted_entries = sorted(entries, key=lambda e: e.get("score", 0.0), reverse=True)
     kept = sorted_entries[:cap]
     for entry in sorted_entries[cap:]:
@@ -98,11 +101,11 @@ def _cap_entries(entries: list[dict], cap: int, ignored: list[dict], role: str) 
 
 
 def apply_post_boundaries(
-    activation_result: dict,
-    candidates: list[dict],
+    activation_result: dict[str, Any],
+    candidates: list[Candidate],
     scope_id: str,
     include_history: bool = False,
-) -> dict:
+) -> dict[str, Any]:
     """Enforce role caps and re-check selected IDs after activation."""
     by_id = {}
     for candidate in candidates:

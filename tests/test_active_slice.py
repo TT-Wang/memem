@@ -59,3 +59,35 @@ def test_build_slice_resolves_artifact_id_activation():
 
     assert slice_obj["artifacts"]
     assert slice_obj["artifacts"][0]["artifact_id"] == artifact["artifact_id"]
+
+
+def test_recall_candidates_still_emit_context_when_activation_is_sparse():
+    from memem.active_slice import build_active_memory_slice, normalize_memory_candidate, render_slice_as_prompt_context
+
+    memory = normalize_memory_candidate({
+        "id": "abcdef123456",
+        "title": "Auth bug constraint",
+        "essence": "Fixing auth bugs must preserve the login constraint path.",
+        "project": "memem",
+        "importance": 4,
+        "layer": 2,
+    }, score=0.9)
+
+    slice_obj = build_active_memory_slice(
+        "Fix the auth bug",
+        "memem",
+        {},
+        {
+            "current_goal_candidates": [],
+            "memory_candidates": [memory],
+            "playbook_candidate": None,
+            "transcript_candidates": [],
+            "artifact_candidates": [],
+            "environment_candidates": [],
+        },
+        {"goals": [], "activation_mode": "heuristic", "confidence": 0.62},
+    )
+
+    assert slice_obj["should_emit_context"] is True
+    rendered = render_slice_as_prompt_context(slice_obj)
+    assert "# Active Memory Slice" in rendered

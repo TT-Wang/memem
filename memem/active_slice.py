@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any, Literal, TypedDict
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 
 from memem.models import DEFAULT_LAYER, now_iso
 
+if TYPE_CHECKING:
+    from memem.delta import DeltaProposal
+
 CandidateType = Literal["memory", "playbook", "transcript", "artifact", "environment", "current_query"]
+ArtifactType = Literal["playbook", "memory_note", "transcript", "external_file", "repo_file", "draft"]
 ActiveRole = Literal[
     "goal",
     "constraint",
@@ -58,7 +63,7 @@ class ActiveMemoryItem(TypedDict, total=False):
 
 class ActiveArtifact(TypedDict, total=False):
     artifact_id: str
-    artifact_type: Literal["playbook", "memory_note", "transcript", "external_file", "repo_file", "draft"]
+    artifact_type: ArtifactType
     title: str
     path: str
     summary: str
@@ -72,6 +77,56 @@ class ActiveTension(TypedDict, total=False):
     severity: Literal["low", "medium", "high"]
     linked_memory_ids: list[str]
     why_open: str
+
+
+class ExcludedCandidate(TypedDict, total=False):
+    candidate_id: str
+    reason: str
+    role: str
+    kept_candidate_id: str
+
+
+class ActivationEntry(TypedDict, total=False):
+    candidate_id: str
+    memory_id: str
+    artifact_id: str
+    why: str
+    score: float
+
+
+class ActivationTension(TypedDict, total=False):
+    tension_id: str
+    description: str
+    severity: Literal["low", "medium", "high"]
+    linked_memory_ids: list[str]
+    why_open: str
+    why: str
+
+
+class ActivationResult(TypedDict, total=False):
+    goals: list[ActivationEntry]
+    constraints: list[ActivationEntry]
+    background: list[ActivationEntry]
+    decisions: list[ActivationEntry]
+    preferences: list[ActivationEntry]
+    failure_patterns: list[ActivationEntry]
+    artifact_context: list[ActivationEntry]
+    open_tensions: list[ActivationTension]
+    ignored: list[ExcludedCandidate]
+    excluded_candidates: list[ExcludedCandidate]
+    candidate_deltas: list[DeltaProposal]
+    activation_mode: Literal["heuristic", "llm", "hybrid"]
+    confidence: float
+    warnings: list[str]
+
+
+class CandidateBundle(TypedDict):
+    current_goal_candidates: list[Candidate]
+    memory_candidates: list[Candidate]
+    playbook_candidate: Candidate | None
+    transcript_candidates: list[Candidate]
+    artifact_candidates: list[Candidate]
+    environment_candidates: list[Candidate]
 
 
 class ActiveMemorySlice(TypedDict, total=False):
@@ -90,8 +145,8 @@ class ActiveMemorySlice(TypedDict, total=False):
     failure_patterns: list[ActiveMemoryItem]
     artifacts: list[ActiveArtifact]
     open_tensions: list[ActiveTension]
-    excluded_candidates: list[dict]
-    candidate_deltas: list[dict]
+    excluded_candidates: list[ExcludedCandidate]
+    candidate_deltas: list[DeltaProposal]
     projection_hint: dict
     candidate_count: int
     recall_candidate_count: int
@@ -226,7 +281,7 @@ def normalize_environment_candidate(key: str, value: Any, score: float = 0.5) ->
     }
 
 
-def flatten_candidate_bundle(candidate_bundle: dict) -> list[Candidate]:
+def flatten_candidate_bundle(candidate_bundle: CandidateBundle) -> list[Candidate]:
     candidates: list[Candidate] = []
     for key in ("current_goal_candidates", "memory_candidates", "artifact_candidates", "transcript_candidates", "environment_candidates"):
         value = candidate_bundle.get(key, [])
@@ -238,7 +293,7 @@ def flatten_candidate_bundle(candidate_bundle: dict) -> list[Candidate]:
     return candidates
 
 
-def _candidate_lookup(candidate_bundle: dict) -> dict[str, Candidate]:
+def _candidate_lookup(candidate_bundle: CandidateBundle) -> dict[str, Candidate]:
     lookup: dict[str, Candidate] = {}
     for cand in flatten_candidate_bundle(candidate_bundle):
         cid = cand.get("candidate_id", "")
@@ -270,7 +325,7 @@ def _item_from_candidate(cand: Candidate, role: ActiveRole, why: str = "", score
 
 
 def _artifact_from_candidate(cand: Candidate, why: str = "", score: float | None = None) -> ActiveArtifact:
-    artifact_type = cand.get("candidate_type", "artifact")
+    artifact_type: str = cand.get("candidate_type", "artifact")
     if artifact_type not in {"playbook", "transcript", "artifact"}:
         artifact_type = "memory_note"
     if artifact_type == "artifact":
@@ -279,7 +334,7 @@ def _artifact_from_candidate(cand: Candidate, why: str = "", score: float | None
         artifact_type = "draft"
     return {
         "artifact_id": cand.get("artifact_id", cand.get("candidate_id", "")),
-        "artifact_type": artifact_type,
+        "artifact_type": cast(ArtifactType, artifact_type),
         "title": cand.get("title", "Untitled artifact"),
         "path": cand.get("source_ref", ""),
         "summary": cand.get("summary") or _compact(cand.get("content", ""), 500),
@@ -291,17 +346,20 @@ def _artifact_from_candidate(cand: Candidate, why: str = "", score: float | None
 def build_active_memory_slice(
     query: str,
     scope_id: str,
-    environment: dict,
-    candidate_bundle: dict,
-    activation_result: dict,
+    environment: dict[str, Any],
+    candidate_bundle: CandidateBundle,
+    activation_result: ActivationResult,
 ) -> ActiveMemorySlice:
     lookup = _candidate_lookup(candidate_bundle)
 
     def selected(role_key: str, role: ActiveRole) -> list[ActiveMemoryItem]:
-        items = []
-        for entry in activation_result.get(role_key, []):
+        items: list[ActiveMemoryItem] = []
+        entries = cast(list[ActivationEntry], activation_result.get(role_key, []))
+        for entry in entries:
             cid = entry.get("candidate_id") or entry.get("memory_id")
-            cand = lookup.get(cid, {})
+            if not cid:
+                continue
+            cand = lookup.get(cid)
             if cand:
                 items.append(_item_from_candidate(cand, role, entry.get("why", ""), entry.get("score")))
         return items
@@ -315,24 +373,38 @@ def build_active_memory_slice(
     preferences = selected("preferences", "preference")
     failure_patterns = selected("failure_patterns", "failure_pattern")
 
-    artifacts = []
+    artifacts: list[ActiveArtifact] = []
     for entry in activation_result.get("artifact_context", []):
         cid = entry.get("candidate_id") or entry.get("artifact_id")
-        cand = lookup.get(cid, {})
+        if not cid:
+            continue
+        cand = lookup.get(cid)
         if cand:
             artifacts.append(_artifact_from_candidate(cand, entry.get("why", ""), entry.get("score")))
 
     tensions: list[ActiveTension] = []
-    for entry in activation_result.get("open_tensions", []):
-        description = entry.get("description", "")
+    for tension_entry in activation_result.get("open_tensions", []):
+        description_value = tension_entry.get("description", "")
+        description = description_value if isinstance(description_value, str) else ""
         if not description:
             continue
+        severity_value = tension_entry.get("severity", "medium")
+        if severity_value in {"low", "medium", "high"}:
+            severity = cast(Literal["low", "medium", "high"], severity_value)
+        else:
+            severity = "medium"
+        linked_memory_ids_value = tension_entry.get("linked_memory_ids", [])
+        linked_memory_ids = linked_memory_ids_value if isinstance(linked_memory_ids_value, list) else []
+        tension_id_value = tension_entry.get("tension_id")
+        tension_id = tension_id_value if isinstance(tension_id_value, str) and tension_id_value else _stable_id("tension", description)
+        why_open_value = tension_entry.get("why_open", tension_entry.get("why", ""))
+        why_open = why_open_value if isinstance(why_open_value, str) else ""
         tensions.append({
-            "tension_id": entry.get("tension_id") or _stable_id("tension", description),
+            "tension_id": tension_id,
             "description": description,
-            "severity": entry.get("severity", "medium") if entry.get("severity") in {"low", "medium", "high"} else "medium",
-            "linked_memory_ids": entry.get("linked_memory_ids", []),
-            "why_open": entry.get("why_open", entry.get("why", "")),
+            "severity": severity,
+            "linked_memory_ids": linked_memory_ids,
+            "why_open": why_open,
         })
 
     selected_memory_items = [
@@ -347,7 +419,9 @@ def build_active_memory_slice(
         + len(candidate_bundle.get("artifact_candidates", []))
         + (1 if candidate_bundle.get("playbook_candidate") else 0)
     )
-    should_emit_context = bool(selected_memory_items or artifacts or tensions)
+    confidence = float(activation_result.get("confidence", 0.6))
+    has_recall_candidates = recall_candidate_count > 0
+    should_emit_context = bool(selected_memory_items or artifacts or tensions or (has_recall_candidates and confidence >= 0.45))
 
     slice_obj: ActiveMemorySlice = {
         "slice_id": _stable_id("slice", {"query": query, "scope": scope_id, "generated_at": now_iso()}),
@@ -376,22 +450,22 @@ def build_active_memory_slice(
         "recall_candidate_count": recall_candidate_count,
         "should_emit_context": should_emit_context,
         "activation_mode": activation_result.get("activation_mode", "heuristic"),
-        "confidence": float(activation_result.get("confidence", 0.6)),
+        "confidence": confidence,
         "warnings": activation_result.get("warnings", []),
     }
     return slice_obj
 
 
-def _render_items(items: list[dict]) -> list[str]:
-    lines = []
+def _render_items(items: Sequence[Mapping[str, Any]]) -> list[str]:
+    lines: list[str] = []
     for item in items:
         title = item.get("title", "Untitled")
         summary = item.get("summary", "")
-        score = item.get("score", item.get("relevance_score", 0.0))
+        score_value = item.get("score", item.get("relevance_score", 0.0))
         why = item.get("why_activated", "")
         prefix = f"- {title}"
-        if score:
-            prefix += f" ({float(score):.2f})"
+        if isinstance(score_value, int | float) and score_value:
+            prefix += f" ({float(score_value):.2f})"
         if summary:
             prefix += f" — {summary}"
         if why:
