@@ -245,8 +245,8 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         action = argv[2]
         if action == "rebuild":
             from memem.graph_index import _rebuild_graph
-            scope = argv[3] if len(argv) >= 4 else None
-            count = _rebuild_graph(scope_id=scope)
+            graph_scope: str | None = argv[3] if len(argv) >= 4 else None
+            count = _rebuild_graph(scope_id=graph_scope)
             print(f"Graph rebuilt: {count} edges")
             return
         if action == "audit":

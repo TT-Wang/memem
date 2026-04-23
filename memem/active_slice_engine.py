@@ -5,9 +5,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+from typing import Any, cast
 
 from memem.activation import judge_activation_heuristically, judge_activation_with_llm
 from memem.active_slice import (
+    ActivationResult,
+    ActiveMemorySlice,
+    Candidate,
+    CandidateBundle,
     build_active_memory_slice,
     current_query_candidate,
     flatten_candidate_bundle,
@@ -29,9 +34,9 @@ _MAX_TRANSCRIPT_CANDIDATES = 5
 _MAX_ARTIFACT_CANDIDATES = 8
 
 
-def _dedupe_candidates(candidates: list[dict]) -> list[dict]:
+def _dedupe_candidates(candidates: list[Candidate]) -> list[Candidate]:
     seen: set[str] = set()
-    result: list[dict] = []
+    result: list[Candidate] = []
     for candidate in candidates:
         key = candidate.get("memory_id") or candidate.get("artifact_id") or candidate.get("candidate_id", "")
         if key in seen:
@@ -41,7 +46,7 @@ def _dedupe_candidates(candidates: list[dict]) -> list[dict]:
     return result
 
 
-def _playbook_candidate(scope_id: str) -> dict | None:
+def _playbook_candidate(scope_id: str) -> Candidate | None:
     normalized = _normalize_scope_id(scope_id)
     path = PLAYBOOK_DIR / f"{normalized}.md"
     if not path.exists():
@@ -55,7 +60,7 @@ def _playbook_candidate(scope_id: str) -> dict | None:
     return normalize_artifact_candidate("playbook", f"{normalized} playbook", content[:4000], path=str(path), score=0.72, project=normalized)
 
 
-def _transcript_candidates(query: str) -> list[dict]:
+def _transcript_candidates(query: str) -> list[Candidate]:
     try:
         from memem.transcripts import transcript_search
         result = transcript_search(query, limit=_MAX_TRANSCRIPT_CANDIDATES)
@@ -71,8 +76,8 @@ def _transcript_candidates(query: str) -> list[dict]:
     ]
 
 
-def _graph_candidates(memory_candidates: list[dict]) -> list[dict]:
-    graph: list[dict] = []
+def _graph_candidates(memory_candidates: list[Candidate]) -> list[Candidate]:
+    graph: list[Candidate] = []
     try:
         from memem.graph_index import _NORMAL_RECALL_TYPES, _neighbors
         from memem.obsidian_store import _find_memory
@@ -100,15 +105,15 @@ def _graph_candidates(memory_candidates: list[dict]) -> list[dict]:
 def generate_candidates(
     query: str,
     scope_id: str,
-    environment: dict | None = None,
+    environment: dict[str, Any] | None = None,
     limit: int = 20,
-) -> dict:
+) -> CandidateBundle:
     """Generate bounded candidate pool for Active Memory Slice activation."""
     env = environment or {}
     normalized_scope = _normalize_scope_id(scope_id)
     current = [current_query_candidate(query, normalized_scope)]
 
-    memory_candidates: list[dict] = []
+    memory_candidates: list[Candidate] = []
     try:
         from memem.recall import _search_memories
         memories = _search_memories(
@@ -134,9 +139,7 @@ def generate_candidates(
         else []
     )
 
-    artifact_candidates = []
-    if playbook:
-        artifact_candidates.append(playbook)
+    artifact_candidates: list[Candidate] = []
 
     environment_candidates = [
         normalize_environment_candidate(key, value, score=0.5)
@@ -157,9 +160,9 @@ def generate_candidates(
 def generate_active_memory_slice(
     query: str,
     scope_id: str = "default",
-    environment: dict | None = None,
+    environment: dict[str, Any] | None = None,
     use_llm: bool = True,
-) -> dict:
+) -> ActiveMemorySlice:
     """Main Active Memory Slice Engine entrypoint."""
     env = dict(environment or {})
     normalized_scope = _normalize_scope_id(scope_id)
@@ -180,14 +183,17 @@ def generate_active_memory_slice(
         activation["warnings"] = list(activation.get("warnings", [])) + ["LLM activation disabled; used heuristic activation."]
 
     activation["excluded_candidates"] = list(activation.get("excluded_candidates", [])) + pre["excluded_candidates"]
-    activation = apply_post_boundaries(activation, filtered_candidates, normalized_scope, include_history=include_history)
+    activation = cast(
+        ActivationResult,
+        apply_post_boundaries(cast(dict[str, Any], activation), filtered_candidates, normalized_scope, include_history=include_history),
+    )
     slice_obj = build_active_memory_slice(query, normalized_scope, env, filtered_bundle, activation)
     slice_obj["candidate_deltas"] = propose_deltas_from_slice(slice_obj)
     return slice_obj
 
 
-def _bundle_from_candidates(candidates: list[dict], original: dict) -> dict:
-    bundle = {
+def _bundle_from_candidates(candidates: list[Candidate], original: CandidateBundle) -> CandidateBundle:
+    bundle: CandidateBundle = {
         "current_goal_candidates": [],
         "memory_candidates": [],
         "playbook_candidate": None,
@@ -209,16 +215,13 @@ def _bundle_from_candidates(candidates: list[dict], original: dict) -> dict:
             bundle["environment_candidates"].append(candidate)
         else:
             bundle["artifact_candidates"].append(candidate)
-    if bundle["playbook_candidate"] is None and original.get("playbook_candidate"):
-        # Preserve absence after boundaries; do not re-add filtered playbook.
-        pass
     return bundle
 
 
 def active_slice_response(
     query: str,
     scope_id: str = "default",
-    environment: dict | None = None,
+    environment: dict[str, Any] | None = None,
     use_llm: bool = True,
     raw_json: bool = False,
 ) -> str:
