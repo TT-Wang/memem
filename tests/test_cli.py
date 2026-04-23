@@ -5,6 +5,8 @@ state/vault dirs, and captured stdout. No subprocess spawning.
 """
 
 import importlib
+import io
+import sys
 from types import SimpleNamespace
 
 
@@ -93,8 +95,16 @@ def test_rebuild_index(tmp_vault, capsys):
 
 
 def test_active_slice_cli_no_llm(tmp_vault, tmp_cortex_dir, capsys, monkeypatch):
-    from memem import transcripts
+    from memem import obsidian_store, transcripts
+    importlib.reload(obsidian_store)
     monkeypatch.setattr(transcripts, "transcript_search", lambda *a, **kw: "No matching transcripts found")
+    obsidian_store._save_memory(obsidian_store._make_memory(
+        content="Project review must include concrete risks and next steps.",
+        title="Project review constraint",
+        project="memem",
+        source_type="user",
+        importance=5,
+    ))
 
     out = _dispatch(["active-slice", "Prepare", "project", "review", "--scope", "memem", "--no-llm"], capsys)
     assert "# Active Memory Slice" in out.out
@@ -108,3 +118,33 @@ def test_active_slice_cli_json(tmp_vault, tmp_cortex_dir, capsys, monkeypatch):
     out = _dispatch(["active-slice", "Prepare review", "--scope", "memem", "--json", "--no-llm"], capsys)
     assert '"goals"' in out.out
     assert '"activation_mode": "heuristic"' in out.out
+
+
+def test_active_slice_cli_query_file_stdin(capsys, monkeypatch):
+    from memem import active_slice_engine, cli
+    importlib.reload(cli)
+
+    captured = {}
+
+    def fake_response(query, scope_id="default", environment=None, use_llm=True, raw_json=False):
+        captured.update({
+            "query": query,
+            "scope_id": scope_id,
+            "use_llm": use_llm,
+            "raw_json": raw_json,
+        })
+        return "ok"
+
+    monkeypatch.setattr(active_slice_engine, "active_slice_response", fake_response)
+    monkeypatch.setattr(sys, "stdin", io.StringIO("large prompt body" * 1000))
+
+    cli.dispatch_cli(
+        ["memem", "active-slice", "--query-file", "-", "--scope", "memem", "--no-llm"],
+        SimpleNamespace(run=lambda **_: None),
+    )
+    out = capsys.readouterr()
+
+    assert out.out.strip() == "ok"
+    assert captured["query"].startswith("large prompt body")
+    assert captured["scope_id"] == "memem"
+    assert captured["use_llm"] is False

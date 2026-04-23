@@ -1,8 +1,14 @@
 """Shared pytest fixtures for memem tests."""
 
 import importlib
+import sys
+from pathlib import Path
 
 import pytest
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 
 @pytest.fixture
@@ -38,6 +44,11 @@ def tmp_cortex_dir(tmp_path, monkeypatch):
     importlib.reload(telemetry)
     importlib.reload(search_index)
     return state
+
+
+@pytest.fixture
+def tmp_memem_dir(tmp_cortex_dir):
+    return tmp_cortex_dir
 
 
 @pytest.fixture

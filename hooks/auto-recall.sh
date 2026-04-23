@@ -85,7 +85,8 @@ def run_active_slice(query: str, scope: str) -> str:
         env = os.environ.copy()
         env["PYTHONPATH"] = plugin_root + os.pathsep + env.get("PYTHONPATH", "")
         result = subprocess.run(
-            [sys.executable, "-m", "memem.server", "active-slice", query, "--scope", scope, "--no-llm"],
+            [sys.executable, "-m", "memem.server", "active-slice", "--query-file", "-", "--scope", scope, "--no-llm"],
+            input=query,
             capture_output=True,
             text=True,
             timeout=30,

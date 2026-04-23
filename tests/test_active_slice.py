@@ -17,10 +17,8 @@ def test_current_query_goal_without_memories():
     assert "Continue the memory proposal" in slice_obj["goals"][0]["summary"]
 
     rendered = render_slice_as_prompt_context(slice_obj)
-    assert "# Active Memory Slice" in rendered
-    assert "## Goals" in rendered
-    assert "## Constraints" in rendered
-    assert "## Open Tensions" in rendered
+    assert rendered == ""
+    assert slice_obj["should_emit_context"] is False
 
 
 def test_memory_candidate_normalization():

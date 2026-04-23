@@ -93,12 +93,22 @@ def test_hook_references_new_package_path():
     hook = (REPO_ROOT / "hooks" / "auto-recall.sh").read_text()
     assert "cortex_server" not in hook
     assert "memem.server" in hook
+    assert "--query-file" in hook
+
+
+def test_codex_hook_manifest_excludes_pretooluse():
+    codex_hooks = json.loads((REPO_ROOT / "hooks" / "codex-hooks.json").read_text())
+    claude_hooks = json.loads((REPO_ROOT / "hooks" / "hooks.json").read_text())
+
+    assert "PreToolUse" not in codex_hooks["hooks"]
+    assert "PreToolUse" in claude_hooks["hooks"]
 
 
 def test_miner_wrapper_uses_module_form():
     """Regression guard: miner-wrapper.sh must invoke daemon via `python3 -m`."""
     wrapper = (REPO_ROOT / "memem" / "miner-wrapper.sh").read_text()
-    assert "python3 -m memem.miner_daemon" in wrapper
+    assert "-m memem.miner_daemon" in wrapper
+    assert "MEMEM_PYTHON" in wrapper
     assert "PYTHONPATH" in wrapper
 
 

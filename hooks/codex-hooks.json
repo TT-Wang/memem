@@ -1,0 +1,27 @@
+{
+  "description": "memem — auto-recalls relevant memories on each prompt for Codex",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/bootstrap.sh hook session-start",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/bootstrap.sh hook auto-recall",
+            "timeout": 35
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -19,7 +19,7 @@
     "obsidian"
   ],
   "skills": "./skills/",
-  "hooks": "./hooks/hooks.json",
+  "hooks": "./hooks/codex-hooks.json",
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Memem",

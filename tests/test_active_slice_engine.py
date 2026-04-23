@@ -64,10 +64,27 @@ def test_deprecated_memory_not_in_slice(tmp_vault, tmp_cortex_dir):
     assert mem["id"] not in rendered_ids
 
 
-def test_rendered_active_slice_contains_expected_sections(tmp_vault, tmp_cortex_dir):
+def test_rendered_active_slice_empty_without_recall_candidates(tmp_vault, tmp_cortex_dir):
     from memem.active_slice_engine import active_slice_response
 
     rendered = active_slice_response("Prepare project review", scope_id="memem", use_llm=False)
+    assert rendered == ""
+
+
+def test_rendered_active_slice_contains_expected_sections_when_memory_matches(tmp_vault, tmp_cortex_dir):
+    from memem import obsidian_store
+    importlib.reload(obsidian_store)
+
+    obsidian_store._save_memory(obsidian_store._make_memory(
+        content="Project review must include concrete risks and next steps.",
+        title="Project review constraint",
+        project="memem",
+        source_type="user",
+        importance=5,
+    ))
+
+    from memem.active_slice_engine import active_slice_response
+    rendered = active_slice_response("Prepare project review risks", scope_id="memem", use_llm=False)
     assert "# Active Memory Slice" in rendered
     assert "## Goals" in rendered
     assert "## Constraints" in rendered

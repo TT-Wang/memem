@@ -384,6 +384,7 @@ def test_union_search_includes_embedding_only_candidate(tmp_vault, tmp_cortex_di
         "memem.embedding_index._search_embedding",
         lambda q, limit: [mem["id"]],
     )
+    monkeypatch.setenv("MEMEM_RECALL_EMBEDDINGS", "1")
 
     results = recall._search_memories_fts("anything", "default", limit=10)
     ids = {m.get("id") for m in results}

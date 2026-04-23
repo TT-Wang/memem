@@ -25,7 +25,7 @@ def _run_compact_index(env: dict, vault: Path | None = None) -> str:
     return result.stdout
 
 
-def _seed_vault(tmp_path: Path, count: int) -> Path:
+def _seed_vault(tmp_path: Path, count: int, project: str = "general", body: str = "seed essence body") -> Path:
     """Create an Obsidian vault seeded with `count` memory files."""
     vault = tmp_path / "vault"
     mem_dir = vault / "memem" / "memories"
@@ -36,7 +36,7 @@ def _seed_vault(tmp_path: Path, count: int) -> Path:
             f"id: aaaaaaaa{i:02d}\n"
             f"schema_version: 1\n"
             f"title: seed memory {i}\n"
-            f"project: general\n"
+            f"project: {project}\n"
             f"tags: [seed]\n"
             f"created: 2026-04-14\n"
             f"updated: 2026-04-14\n"
@@ -46,7 +46,7 @@ def _seed_vault(tmp_path: Path, count: int) -> Path:
             f"status: active\n"
             f"valid_to: \n"
             f"layer: 2\n"
-            f"---\n\nseed essence body {i}\n"
+            f"---\n\n{body} {i}\n"
         )
     return vault
 
@@ -164,9 +164,11 @@ def test_auto_recall_consumes_primed_flag(tmp_path):
         "timestamp": "2026-04-14T00:00:00Z",
         "primed": True,
     }))
+    vault = _seed_vault(tmp_path, 1, project="memem-plugin", body="auth bug fix constraint")
 
     env = os.environ.copy()
     env["MEMEM_DIR"] = str(memem_dir)
+    env["MEMEM_OBSIDIAN_VAULT"] = str(vault)
     env["CLAUDE_PLUGIN_ROOT"] = str(REPO)
     env["PATH"] = "/usr/bin:/bin"
 
@@ -174,6 +176,7 @@ def test_auto_recall_consumes_primed_flag(tmp_path):
         ["bash", str(REPO / "hooks" / "auto-recall.sh")],
         input=json.dumps({
             "session_id": "primed-test",
+            "cwd": str(REPO),
             "message": "help me fix the auth bug",
         }),
         capture_output=True,
@@ -207,9 +210,7 @@ def test_auto_recall_topic_shift_uses_active_slice(tmp_path):
         "timestamp": "2026-04-14T00:00:00Z",
     }))
 
-    vault = tmp_path / "vault"
-    (vault / "memem" / "memories").mkdir(parents=True)
-    (vault / "memem" / "playbooks").mkdir(parents=True)
+    vault = _seed_vault(tmp_path, 1, project="memem-plugin", body="brief project forge workflow")
 
     env = os.environ.copy()
     env["MEMEM_DIR"] = str(memem_dir)
@@ -221,6 +222,7 @@ def test_auto_recall_topic_shift_uses_active_slice(tmp_path):
         ["bash", str(REPO / "hooks" / "auto-recall.sh")],
         input=json.dumps({
             "session_id": "topic-test",
+            "cwd": str(REPO),
             "message": "brief me the project forge workflow",
         }),
         capture_output=True,
@@ -247,9 +249,7 @@ def test_auto_recall_same_topic_still_uses_active_slice(tmp_path):
         "timestamp": "2026-04-14T00:00:00Z",
     }))
 
-    vault = tmp_path / "vault"
-    (vault / "memem" / "memories").mkdir(parents=True)
-    (vault / "memem" / "playbooks").mkdir(parents=True)
+    vault = _seed_vault(tmp_path, 1, project="memem-plugin", body="brief project forge workflow")
 
     env = os.environ.copy()
     env["MEMEM_DIR"] = str(memem_dir)
@@ -261,6 +261,7 @@ def test_auto_recall_same_topic_still_uses_active_slice(tmp_path):
         ["bash", str(REPO / "hooks" / "auto-recall.sh")],
         input=json.dumps({
             "session_id": "topic-test",
+            "cwd": str(REPO),
             "message": "brief me the project forge workflow",
         }),
         capture_output=True,
