@@ -93,22 +93,22 @@ Show only current state. No pedagogy, no ASCII art, no tutorials.
 
 **B1. Run the status command:**
 ```bash
-PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python3 -m memem.server --status
+bash "${CLAUDE_PLUGIN_ROOT}/bootstrap.sh" --status
 ```
 
 Display the output in a code block.
 
 **B2. Check the miner state:**
 ```bash
-[ -f ~/.memem/.miner-opted-in ] && echo "OPTED_IN" || echo "NOT_OPTED_IN"
+[ -f "${MEMEM_DIR:-$HOME/.memem}/.miner-opted-in" ] && echo "OPTED_IN" || echo "NOT_OPTED_IN"
 pgrep -f "memem.server --mine-all" > /dev/null && echo "MINING_HISTORY" || echo "NOT_MINING_HISTORY"
 ```
 
 Then show a single one-line state summary matching what the signals show:
 
-- If `OPTED_IN` + `MINING_HISTORY`: "⚙️ memem active — mining past history in background. New sessions will be mined automatically."
-- If `OPTED_IN` + `NOT_MINING_HISTORY`: "✅ memem active — miner running, new sessions mined automatically."
-- If `NOT_OPTED_IN`: "🟡 memem has N memories but the miner is stopped. Type `/memem-mine` to resume, or `/memem-welcome` to re-read the intro."
+- If `OPTED_IN` + `MINING_HISTORY`: "memem active — mining past history in background. New sessions will be mined automatically."
+- If `OPTED_IN` + `NOT_MINING_HISTORY`: "memem has N memories; miner opt-in is set but no history-mining job is running."
+- If `NOT_OPTED_IN`: "memem has N memories; miner is stopped, and hook/MCP recall can still work."
 
 **B3. Tail (always, for returning users):**
 

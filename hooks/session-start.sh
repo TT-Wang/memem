@@ -15,6 +15,7 @@ set -euo pipefail
 
 MEMEM_DIR="${MEMEM_DIR:-${CORTEX_DIR:-$HOME/.memem}}"
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
+PYBIN="${MEMEM_PYTHON:-python3}"
 
 emit_empty() {
     echo '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":""}}'
@@ -32,7 +33,7 @@ mkdir -p "$MEMEM_DIR" 2>/dev/null || true
 INPUT=$(cat 2>/dev/null || echo "{}")
 
 # Parse session_id for the primed-marker write
-SESSION_ID=$(printf '%s' "$INPUT" | python3 -c "
+SESSION_ID=$(printf '%s' "$INPUT" | "$PYBIN" -c "
 import sys, json
 try:
     print(json.load(sys.stdin).get('session_id',''))
@@ -43,7 +44,7 @@ except Exception:
 # Run the compact-index helper and capture stdout to a tempfile
 BRIEF_FILE=$(mktemp)
 trap 'rm -f "$BRIEF_FILE"' EXIT
-PYTHONPATH="$PLUGIN_ROOT" python3 -m memem.server --compact-index \
+PYTHONPATH="$PLUGIN_ROOT" "$PYBIN" -m memem.server --compact-index \
     > "$BRIEF_FILE" 2>/dev/null || true
 
 if [ ! -s "$BRIEF_FILE" ]; then
@@ -62,24 +63,24 @@ fi
 # Seed .last-brief.json with primed=true so the first UserPromptSubmit
 # skips context_assemble (SessionStart already injected the same material).
 if [ -n "$SESSION_ID" ]; then
-    python3 - "$MEMEM_DIR/.last-brief.json" "$SESSION_ID" << 'PRIMEPY' 2>/dev/null || true
+    "$PYBIN" - "$MEMEM_DIR/.last-brief.json" "$SESSION_ID" << 'PRIMEPY' 2>/dev/null || true
 import sys, json
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 last_brief = Path(sys.argv[1])
 session_id = sys.argv[2]
 last_brief.parent.mkdir(parents=True, exist_ok=True)
 last_brief.write_text(json.dumps({
     "session_id": session_id,
     "keywords": [],
-    "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     "primed": True,
 }))
 PRIMEPY
 fi
 
 # Emit the brief via Python for safe multiline escaping
-python3 - "$BRIEF_FILE" "$BANNER" << 'HOOKPY'
+"$PYBIN" - "$BRIEF_FILE" "$BANNER" << 'HOOKPY'
 import sys, json
 from pathlib import Path
 brief = Path(sys.argv[1]).read_text()

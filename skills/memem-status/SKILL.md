@@ -4,9 +4,6 @@ description: Show detailed memem memory system status — memory count, projects
 allowed-tools: [Bash]
 ---
 
-Run `PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python3 -m memem.server --status` and display the results.
+Run `bash "${CLAUDE_PLUGIN_ROOT}/bootstrap.sh" --status` and display the results.
 
-If the miner is not running, offer to start it:
-```bash
-bash "${CLAUDE_PLUGIN_ROOT}/memem/miner-wrapper.sh" start
-```
+If the miner is not running, report that this is okay when the user only wants hook/MCP recall. Do not offer to start the daemon unless the user explicitly asks for automatic mining.

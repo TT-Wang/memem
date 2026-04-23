@@ -2,8 +2,8 @@
 
 You have access to a persistent memory system via memem. This memory persists across sessions, self-evolves, and gets smarter over time.
 
-Storage: Obsidian vault at `~/obsidian-brain/memem/memories/` (markdown files, single source of truth).
-Machine index: SQLite FTS5 at `~/.memem/search.db` for fast retrieval.
+Storage: Obsidian vault at `${MEMEM_OBSIDIAN_VAULT:-$HOME/obsidian-brain}/memem/memories/` (markdown files, single source of truth).
+Machine index: SQLite FTS5 at `${MEMEM_DIR:-$HOME/.memem}/search.db` for fast retrieval.
 
 ## Auto-recall
 
@@ -55,28 +55,27 @@ Call `mcp__memem__memory_save` with:
 
 ## Starting the miner (opt-in)
 
-memem is **opt-in** as of v0.9.0 — install does not start any background processes. The miner daemon only runs once the user explicitly enables it. Opt-in is tracked by the marker file `~/.memem/.miner-opted-in`.
+memem is **opt-in** as of v0.9.0 — install does not start any background processes. The miner daemon only runs once the user explicitly enables it. Opt-in is tracked by the marker file `${MEMEM_DIR:-$HOME/.memem}/.miner-opted-in`.
 
 When the user asks to start memem, start mining, enable memory extraction, or similar — **identify which of the two modes they want** and run the matching commands:
 
 **Mode 1 — "start mining new sessions" / "start the miner" / "enable memem" / "start memem"** (no history):
 ```bash
-mkdir -p ~/.memem && touch ~/.memem/.miner-opted-in
-bash "${CLAUDE_PLUGIN_ROOT}/memem/miner-wrapper.sh" start
+bash "${CLAUDE_PLUGIN_ROOT}/bootstrap.sh" --miner-start
 ```
 Then tell the user: the miner is running, it will mine new sessions automatically ~5 min after they end, and it will auto-start on future Claude Code launches.
 
 **Mode 2 — "mine everything" / "mine history" / "mine all my past sessions" / "include history"** (full history + ongoing):
 ```bash
-mkdir -p ~/.memem && touch ~/.memem/.miner-opted-in
-nohup PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python3 -m memem.server --mine-all > ~/.memem/mine-all.log 2>&1 &
-bash "${CLAUDE_PLUGIN_ROOT}/memem/miner-wrapper.sh" start
+mkdir -p "${MEMEM_DIR:-$HOME/.memem}"
+nohup bash "${CLAUDE_PLUGIN_ROOT}/bootstrap.sh" --mine-all > "${MEMEM_DIR:-$HOME/.memem}/mine-all.log" 2>&1 &
+bash "${CLAUDE_PLUGIN_ROOT}/bootstrap.sh" --miner-start
 ```
-Then tell the user: history mining is running in the background (log at `~/.memem/mine-all.log`), the ongoing miner is also running, and they can continue working normally. Warn them if the session count is large that this may take up to an hour and uses Haiku API credits.
+Then tell the user: history mining is running in the background (log at `${MEMEM_DIR:-$HOME/.memem}/mine-all.log`), the ongoing miner is also running, and they can continue working normally. Warn them if the session count is large that this may take up to an hour and uses Haiku API credits.
 
 **If unsure which mode the user wants, ask.** Don't default — the difference matters (API cost, time).
 
-**To stop / opt out:** `python3 -m memem.server --miner-opt-out` (stops daemon and removes marker so it won't auto-start next time).
+**To stop / opt out:** `bash "${CLAUDE_PLUGIN_ROOT}/bootstrap.sh" --miner-opt-out` (stops daemon and removes marker so it won't auto-start next time).
 
 ## Available tools
 

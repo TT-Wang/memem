@@ -9,6 +9,7 @@ echo "[$TIMESTAMP] Starting mine-all" >> "$LOG_FILE"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 export PYTHONPATH="$PLUGIN_ROOT${PYTHONPATH:+:$PYTHONPATH}"
-python3 -m memem.server --mine-all >> "$LOG_FILE" 2>&1
+PYBIN="${MEMEM_PYTHON:-python3}"
+"$PYBIN" -m memem.server --mine-all >> "$LOG_FILE" 2>&1
 echo "[$TIMESTAMP] Done" >> "$LOG_FILE"
 exit 0

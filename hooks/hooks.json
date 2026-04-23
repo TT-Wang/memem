@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/session-start.sh\"",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/bootstrap.sh hook session-start",
             "timeout": 10
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/auto-recall.sh\"",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/bootstrap.sh hook auto-recall",
             "timeout": 35
           }
         ]
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/pre-tool-use.sh\"",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/bootstrap.sh hook pre-tool-use",
             "timeout": 5
           }
         ]

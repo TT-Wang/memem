@@ -247,10 +247,29 @@ else
 fi
 
 export PYTHONPATH="$PLUGIN_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+export CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT"
 export MEMEM_DIR MEMEM_VAULT
+export MEMEM_OBSIDIAN_VAULT="${MEMEM_OBSIDIAN_VAULT:-$MEMEM_VAULT}"
+export MEMEM_PYTHON="$PYBIN"
 # Re-export legacy names too so any subprocess that still reads them works.
 export CORTEX_DIR="${CORTEX_DIR:-$MEMEM_DIR}"
 export CORTEX_OBSIDIAN_VAULT="${CORTEX_OBSIDIAN_VAULT:-$MEMEM_VAULT}"
+
+# Hook invocations need the resolved runtime/env, but should avoid the extra
+# MCP server capability write on every prompt.
+if [ "${1:-}" = "hook" ]; then
+    HOOK_NAME="${2:-}"
+    case "$HOOK_NAME" in
+        session-start|auto-recall|pre-tool-use)
+            rm -f "$MEMEM_DIR/last-error.md" 2>/dev/null || true
+            exec bash "$PLUGIN_ROOT/hooks/$HOOK_NAME.sh"
+            ;;
+        *)
+            echo "memem-bootstrap: unknown hook '$HOOK_NAME'" >&2
+            exit 2
+            ;;
+    esac
+fi
 
 # Write capabilities file — degraded mode if this fails, not fatal
 if ! "$PYBIN" -c "from memem.capabilities import write_capabilities; write_capabilities()" >> "$BOOTSTRAP_LOG" 2>&1; then

@@ -9,7 +9,11 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PLUGIN_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 export PYTHONPATH="$PLUGIN_ROOT${PYTHONPATH:+:$PYTHONPATH}"
-DAEMON_CMD="python3 -m memem.miner_daemon"
+PYBIN="${MEMEM_PYTHON:-python3}"
+if [ ! -x "$PYBIN" ]; then
+    PYBIN="python3"
+fi
+DAEMON_CMD=("$PYBIN" -m memem.miner_daemon)
 # Prefer MEMEM_DIR, fall back to legacy CORTEX_DIR if a user's shell still exports it.
 MEMEM_DIR="${MEMEM_DIR:-${CORTEX_DIR:-$HOME/.memem}}"
 WRAPPER_PID_FILE="$MEMEM_DIR/miner-wrapper.pid"
@@ -52,7 +56,7 @@ start_wrapper() {
 
 stop_wrapper() {
     # Stop daemon first
-    $DAEMON_CMD stop 2>/dev/null
+    "${DAEMON_CMD[@]}" stop 2>/dev/null
 
     # Stop wrapper
     if [ -f "$WRAPPER_PID_FILE" ]; then
@@ -73,7 +77,7 @@ run_loop() {
     while true; do
         echo "$(date '+%Y-%m-%d %H:%M:%S') INFO Wrapper: starting miner (foreground in wrapper)..."
         # Run miner in foreground — wrapper manages the lifecycle
-        $DAEMON_CMD run 2>> "$LOG_FILE"
+        "${DAEMON_CMD[@]}" run 2>> "$LOG_FILE"
         EXIT_CODE=$?
         if [ "$EXIT_CODE" -eq 0 ] || [ "$EXIT_CODE" -eq 75 ]; then
             echo "$(date '+%Y-%m-%d %H:%M:%S') WARN Wrapper: miner exited permanently (code $EXIT_CODE), not restarting."
@@ -98,7 +102,7 @@ case "${1:-status}" in
         else
             echo "Miner wrapper not running"
         fi
-        $DAEMON_CMD status
+        "${DAEMON_CMD[@]}" status
         ;;
     _loop)
         run_loop

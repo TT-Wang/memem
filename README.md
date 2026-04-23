@@ -262,7 +262,7 @@ For deeper debugging:
 tail -f ~/.memem/bootstrap.log   # first-run shim log
 tail -f ~/.memem/miner.log       # miner daemon log
 cat ~/.memem/events.jsonl        # memory operation audit trail
-python3 -m memem.server --status   # detailed status dump
+bash "${CLAUDE_PLUGIN_ROOT:-.}/bootstrap.sh" --status   # detailed status dump
 ```
 
 ## How does the mining pipeline work?

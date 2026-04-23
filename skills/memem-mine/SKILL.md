@@ -8,13 +8,12 @@ Start the memem miner daemon. It runs in the background and automatically extrac
 
 1. Check if the miner is already running:
 ```bash
-bash "${CLAUDE_PLUGIN_ROOT}/memem/miner-wrapper.sh" status
+bash "${CLAUDE_PLUGIN_ROOT}/bootstrap.sh" --miner-status
 ```
 
 2. If not running, start it and record the opt-in:
 ```bash
-mkdir -p ~/.memem && touch ~/.memem/.miner-opted-in
-bash "${CLAUDE_PLUGIN_ROOT}/memem/miner-wrapper.sh" start
+bash "${CLAUDE_PLUGIN_ROOT}/bootstrap.sh" --miner-start
 ```
 
 3. Tell the user:
@@ -23,6 +22,6 @@ bash "${CLAUDE_PLUGIN_ROOT}/memem/miner-wrapper.sh" start
 - Mining fires ~5 minutes after a session ends (so it only processes settled transcripts)
 - Run `/memem-status` to check memory count and health
 - The miner will also auto-start on future Claude Code launches
-- To stop it permanently: `python3 -m memem.server --miner-opt-out`
+- To stop it permanently: `bash "${CLAUDE_PLUGIN_ROOT}/bootstrap.sh" --miner-opt-out`
 
 The miner only processes sessions created after memem was installed. For mining older history, use `/memem-mine-history`.

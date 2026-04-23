@@ -17,16 +17,16 @@ find ~/.claude/projects/ -name "*.jsonl" ! -path "*/subagents/*" -size +5k | wc 
 
 4. Record the opt-in, start mining history in the background, and start the ongoing miner daemon:
 ```bash
-mkdir -p ~/.memem && touch ~/.memem/.miner-opted-in
-nohup PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python3 -m memem.server --mine-all > ~/.memem/mine-all.log 2>&1 &
+mkdir -p "${MEMEM_DIR:-$HOME/.memem}"
+nohup bash "${CLAUDE_PLUGIN_ROOT}/bootstrap.sh" --mine-all > "${MEMEM_DIR:-$HOME/.memem}/mine-all.log" 2>&1 &
 echo "History mining started in background (PID $!)"
-bash "${CLAUDE_PLUGIN_ROOT}/memem/miner-wrapper.sh" start
+bash "${CLAUDE_PLUGIN_ROOT}/bootstrap.sh" --miner-start
 ```
 
 5. Tell the user:
-- History mining is running in the background (log at `~/.memem/mine-all.log`)
+- History mining is running in the background (log at `${MEMEM_DIR:-$HOME/.memem}/mine-all.log`)
 - The ongoing miner daemon is now running — new sessions will be mined automatically too
 - They can continue working normally
 - New memories will appear as they're extracted
 - Run `/memem-status` to check progress
-- To stop everything: `python3 -m memem.server --miner-opt-out`
+- To stop everything: `bash "${CLAUDE_PLUGIN_ROOT}/bootstrap.sh" --miner-opt-out`

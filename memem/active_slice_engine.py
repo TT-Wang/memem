@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 
 from memem.activation import judge_activation_heuristically, judge_activation_with_llm
 from memem.active_slice import (
@@ -126,7 +127,12 @@ def generate_candidates(
 
     graph_candidates = _graph_candidates(memory_candidates)
     playbook = _playbook_candidate(normalized_scope)
-    transcript_candidates = _transcript_candidates(query)
+    transcript_flag = str(env.get("include_transcripts", os.environ.get("MEMEM_ACTIVE_SLICE_TRANSCRIPTS", "0"))).lower()
+    transcript_candidates = (
+        _transcript_candidates(query)
+        if transcript_flag in {"1", "true", "yes", "on"}
+        else []
+    )
 
     artifact_candidates = []
     if playbook:

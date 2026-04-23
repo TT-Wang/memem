@@ -66,4 +66,4 @@ If the user asks "what should I do now?" or seems undecided, answer with one sho
 
 **Step 8 — Opt-out:**
 
-To stop the miner and opt out: `python3 -m memem.server --miner-opt-out`
+To stop the miner and opt out: `bash "${CLAUDE_PLUGIN_ROOT}/bootstrap.sh" --miner-opt-out`

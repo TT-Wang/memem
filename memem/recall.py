@@ -1,4 +1,5 @@
 import logging
+import os
 from collections import Counter
 from datetime import UTC, datetime
 
@@ -61,14 +62,17 @@ def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 1
     candidate_limit = limit * 4  # generous — re-ranker filters noise
 
     try:
-        from memem.embedding_index import _search_embedding
         from memem.obsidian_store import _ngram_search_candidates
         from memem.search_index import _search_fts
 
+        include_embeddings = os.environ.get("MEMEM_RECALL_EMBEDDINGS", "0").lower() in {"1", "true", "yes", "on"}
         with ThreadPoolExecutor(max_workers=3) as pool:
             fts_future = pool.submit(_search_fts, query, scope, candidate_limit)
             ngram_future = pool.submit(_ngram_search_candidates, query, scope, candidate_limit)
-            emb_future = pool.submit(_search_embedding, query, candidate_limit)
+            emb_future = None
+            if include_embeddings:
+                from memem.embedding_index import _search_embedding
+                emb_future = pool.submit(_search_embedding, query, candidate_limit)
             try:
                 fts_ids = fts_future.result(timeout=10) or []
             except Exception as exc:
@@ -79,11 +83,14 @@ def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 1
             except Exception as exc:
                 log.debug("ngram candidate generation failed: %s", exc)
                 ngram_ids = []
-            try:
-                # Embedding has a longer budget — model encode dominates.
-                emb_ids = emb_future.result(timeout=30) or []
-            except Exception as exc:
-                log.debug("embedding candidate generation failed: %s", exc)
+            if emb_future is not None:
+                try:
+                    # Embedding has a longer budget — model encode dominates.
+                    emb_ids = emb_future.result(timeout=30) or []
+                except Exception as exc:
+                    log.debug("embedding candidate generation failed: %s", exc)
+                    emb_ids = []
+            else:
                 emb_ids = []
 
         if not fts_ids and not ngram_ids and not emb_ids:
@@ -579,7 +586,8 @@ def _format_memory_as_bullet(mem: dict) -> str:
 
 def memory_recall(query: str, scope_id: str = "default", limit: int = 10) -> str:
     memories = _search_memories(query, scope_id=scope_id, limit=limit)
-    transcript_results = transcript_search(query, limit=3)
+    include_transcripts = os.environ.get("MEMEM_RECALL_TRANSCRIPTS", "0").lower() in {"1", "true", "yes", "on"}
+    transcript_results = transcript_search(query, limit=3) if include_transcripts else ""
 
     if not memories and ("No matching" in transcript_results or not transcript_results):
         return f"No memories found for: {query}"
@@ -616,4 +624,3 @@ def memory_list(scope_id: str = "default") -> str:
             f"- [{mem.get('id', '')[:8]}] {mem.get('title', 'Untitled')[:50]} | project:{mem.get('project', 'general')}"
         )
     return "\n".join(lines)
-

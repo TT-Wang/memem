@@ -11,6 +11,7 @@ if [ "${MEMEM_PRETOOL_GATING:-0}" != "1" ]; then
 fi
 
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
+PYBIN="${MEMEM_PYTHON:-python3}"
 if [ -z "$PLUGIN_ROOT" ] || [ "$PLUGIN_ROOT" = '${CLAUDE_PLUGIN_ROOT}' ]; then
     echo '{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":""}}'
     exit 0
@@ -24,7 +25,7 @@ INPUT_FILE=$(mktemp)
 trap 'rm -f "$INPUT_FILE"' EXIT
 cat > "$INPUT_FILE"
 
-python3 - "$PLUGIN_ROOT" "$INPUT_FILE" <<'PYEOF'
+"$PYBIN" - "$PLUGIN_ROOT" "$INPUT_FILE" <<'PYEOF'
 import json, sys, os, subprocess
 from pathlib import Path
 
