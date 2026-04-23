@@ -1,7 +1,8 @@
-"""Context assembly and memory consolidation.
+"""Explicit assembly projection and memory consolidation.
 
-context_assemble uses Haiku to produce a query-tailored briefing from
-playbooks, memories, and transcript search results.
+context_assemble remains callable as a secondary path when a caller wants
+Haiku to rewrite playbooks, memories, and transcript search results into a
+single narrative briefing. The default runtime path is Active Memory Slice.
 
 _consolidate_project is the 'dreaming' pass that merges redundant memories
 and deprecates obsolete ones.
@@ -33,10 +34,11 @@ _ASSEMBLE_SYSTEM = (
 
 
 def context_assemble(query: str, project: str = "default") -> str:
-    """Assemble a query-tailored context briefing from all available knowledge.
+    """Assemble an explicit narrative briefing from all available knowledge.
 
-    Gathers playbook, relevant memories, and session history, then uses Haiku
-    to produce a focused briefing for the given query.
+    This is the secondary projection path. It gathers playbook, relevant
+    memories, and session history, then uses Haiku to produce a focused
+    briefing for the given query.
     """
     normalized = _normalize_scope_id(project)
 

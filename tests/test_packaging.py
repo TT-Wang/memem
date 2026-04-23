@@ -94,6 +94,7 @@ def test_hook_references_new_package_path():
     assert "cortex_server" not in hook
     assert "memem.server" in hook
     assert "--query-file" in hook
+    assert '"slice"' in hook
 
 
 def test_codex_hook_manifest_excludes_pretooluse():

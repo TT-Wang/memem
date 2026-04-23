@@ -1,15 +1,13 @@
 #!/usr/bin/env bash
-# memem SessionStart hook — fires before the user types the first message.
+# memem SessionStart hook — primes slice-first runtime context before first input.
 #
-# v0.11.0 "session-start token diet":
-#   - Injects top-N memories (default 50 via MEMEM_SESSION_START_LIMIT)
-#   - Top 5 get full content, rest are compact-index lines
-#   - Scoped to current project by default (cwd basename)
-#   - Seeds ~/.memem/.last-brief.json with `primed=true` so the
-#     immediately-following UserPromptSubmit hook skips context_assemble
-#     (avoids double-fire on first turn).
+# Flow:
+#   1. Parse session_id + cwd from hook stdin
+#   2. Generate a slice-first prompt context for the current project scope
+#   3. If non-empty, write .last-brief.json with primed=true
+#   4. Emit the rendered slice as additionalContext
 #
-# Silent by default; MEMEM_SHOW_BANNER=1 for a one-line status banner.
+# Silent by default; MEMEM_SHOW_BANNER=1 prepends a short status banner.
 
 set -euo pipefail
 
@@ -21,74 +19,128 @@ emit_empty() {
     exit 0
 }
 
-# If plugin root is missing or unexpanded, stay silent
 if [ -z "$PLUGIN_ROOT" ] || [ "$PLUGIN_ROOT" = '${CLAUDE_PLUGIN_ROOT}' ]; then
     emit_empty
 fi
 
 mkdir -p "$MEMEM_DIR" 2>/dev/null || true
 
-# Read hook input stdin (may contain session_id)
-INPUT=$(cat 2>/dev/null || echo "{}")
+INPUT_FILE=$(mktemp)
+trap 'rm -f "$INPUT_FILE"' EXIT
+cat > "$INPUT_FILE" || true
 
-# Parse session_id for the primed-marker write
-SESSION_ID=$(printf '%s' "$INPUT" | python3 -c "
-import sys, json
+"${MEMEM_PYTHON:-python3}" - "$PLUGIN_ROOT" "$INPUT_FILE" "$MEMEM_DIR" << 'HOOKPY'
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+plugin_root = sys.argv[1]
+input_file = Path(sys.argv[2])
+memem_dir = Path(sys.argv[3])
+
+EMPTY_RESPONSE = json.dumps({
+    "hookSpecificOutput": {
+        "hookEventName": "SessionStart",
+        "additionalContext": "",
+    }
+})
+
+
+def emit_empty() -> None:
+    print(EMPTY_RESPONSE)
+    raise SystemExit(0)
+
+
+def detect_scope(cwd: str) -> str:
+    trimmed = (cwd or "").rstrip("/")
+    home = str(Path.home()).rstrip("/")
+    if not trimmed or trimmed in {"", "/", home}:
+        return "default"
+    return os.path.basename(trimmed) or "default"
+
+
+def parse_budget() -> int:
+    raw = os.environ.get("MEMEM_SESSION_START_PROMPT_BUDGET", "4000").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return 4000
+    return max(1000, min(value, 12000))
+
+
+def memory_count() -> int:
+    vault_root = Path(os.environ.get("MEMEM_OBSIDIAN_VAULT", str(Path.home() / "obsidian-brain")))
+    memories_dir = vault_root / "memem" / "memories"
+    try:
+        return len(list(memories_dir.glob("*.md")))
+    except OSError:
+        return 0
+
+
+if not plugin_root or plugin_root == "${CLAUDE_PLUGIN_ROOT}":
+    emit_empty()
+
+sys.path.insert(0, plugin_root)
+
 try:
-    print(json.load(sys.stdin).get('session_id',''))
+    hook = json.loads(input_file.read_text() or "{}")
 except Exception:
-    print('')
-" 2>/dev/null || echo "")
+    hook = {}
 
-# Run the compact-index helper and capture stdout to a tempfile
-BRIEF_FILE=$(mktemp)
-trap 'rm -f "$BRIEF_FILE"' EXIT
-PYTHONPATH="$PLUGIN_ROOT" python3 -m memem.server --compact-index \
-    > "$BRIEF_FILE" 2>/dev/null || true
+session_id = str(hook.get("session_id", "") or "")
+cwd = str(hook.get("cwd") or os.environ.get("PWD") or os.getcwd())
+scope = detect_scope(cwd)
+query = "Prime the current working state for this session"
+if scope != "default":
+    query += f" in project {scope}"
 
-if [ ! -s "$BRIEF_FILE" ]; then
-    emit_empty
-fi
-
-# Optional status banner — prepended to the brief
-BANNER=""
-if [ "${MEMEM_SHOW_BANNER:-0}" = "1" ]; then
-    MEM_COUNT=$(find "${MEMEM_OBSIDIAN_VAULT:-$HOME/obsidian-brain}/memem/memories" -maxdepth 1 -name "*.md" 2>/dev/null | wc -l | tr -d ' ')
-    BANNER="[memem] $MEM_COUNT memories · /memem for status
-
-"
-fi
-
-# Seed .last-brief.json with primed=true so the first UserPromptSubmit
-# skips context_assemble (SessionStart already injected the same material).
-if [ -n "$SESSION_ID" ]; then
-    python3 - "$MEMEM_DIR/.last-brief.json" "$SESSION_ID" << 'PRIMEPY' 2>/dev/null || true
-import sys, json
-from pathlib import Path
-from datetime import datetime
-last_brief = Path(sys.argv[1])
-session_id = sys.argv[2]
-last_brief.parent.mkdir(parents=True, exist_ok=True)
-last_brief.write_text(json.dumps({
+environment = {
     "session_id": session_id,
-    "keywords": [],
-    "timestamp": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-    "primed": True,
-}))
-PRIMEPY
-fi
+    "task_mode": "session_start",
+    "repo_path": cwd,
+    "cwd": cwd,
+    "scope_id": scope,
+    "prompt_budget_chars": parse_budget(),
+}
 
-# Emit the brief via Python for safe multiline escaping
-python3 - "$BRIEF_FILE" "$BANNER" << 'HOOKPY'
-import sys, json
-from pathlib import Path
-brief = Path(sys.argv[1]).read_text()
-banner = sys.argv[2]
-content = banner + brief
+try:
+    from memem.active_slice_engine import generate_prompt_context
+
+    content = generate_prompt_context(
+        query,
+        scope_id=scope,
+        environment=environment,
+        use_llm=False,
+        mode="slice",
+    )
+except Exception:
+    content = ""
+
+if not content:
+    emit_empty()
+
+banner = ""
+if os.environ.get("MEMEM_SHOW_BANNER", "0") == "1":
+    banner = f"[memem] {memory_count()} memories · slice-first runtime active\n\n"
+
+if session_id:
+    try:
+        memem_dir.mkdir(parents=True, exist_ok=True)
+        (memem_dir / ".last-brief.json").write_text(json.dumps({
+            "session_id": session_id,
+            "keywords": [],
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "primed": True,
+        }))
+    except OSError:
+        pass
+
 print(json.dumps({
     "hookSpecificOutput": {
         "hookEventName": "SessionStart",
-        "additionalContext": content,
+        "additionalContext": banner + content,
     }
 }))
 HOOKPY

@@ -20,10 +20,22 @@ from memem.capabilities import assembly_available
 log = logging.getLogger("memem-activation")
 
 _CONSTRAINT_CUES = {"must", "never", "requires", "require", "constraint", "blocked", "cannot", "do not", "should not"}
-_FAILURE_CUES = {"bug", "failure", "regression", "failed", "fix", "issue", "risk", "loophole", "avoid"}
+_FAILURE_CUES = {"bug", "failure", "regression", "failed", "issue", "risk", "loophole", "avoid"}
 _DECISION_CUES = {"decided", "decision", "chosen", "selected", "use ", "architecture", "adopted"}
 _PREFERENCE_CUES = {"prefer", "preference", "wants", "likes", "style"}
-_OPEN_TENSION_CUES = {"tension", "unclear", "unresolved", "unknown", "tradeoff", "question", "fuzzy"}
+_OPEN_TENSION_CUES = {
+    "tension",
+    "unclear",
+    "unresolved",
+    "unknown",
+    "tradeoff",
+    "question",
+    "fuzzy",
+    "not decided",
+    "still need",
+    "blocker",
+}
+_ARTIFACT_CUES = {"file", "branch", "draft", "proposal", "implementation", "code", "document"}
 
 _ROLE_KEYS = [
     "goals",
@@ -39,19 +51,33 @@ _ROLE_KEYS = [
 
 _ACTIVATION_SYSTEM = (
     "You are selecting what should enter an AI system's current working memory. "
-    "Use only the provided candidates. Do not restate the whole vault. Assign selected "
-    "items to roles, exclude semantic duplicates, prefer constraints and unresolved risks "
-    "over generic background if budget is tight, and return strict JSON only."
+    "Use only the provided candidates. Foreground the items needed for the user's "
+    "current work right now. Distinguish goals, constraints, decisions, failure "
+    "patterns, artifacts, and unresolved tensions. Prefer concrete constraints, "
+    "active artifacts, and unresolved risks over generic background when budget is "
+    "tight. Identify distractors in ignored. Return strict JSON only."
 )
 
 
-def _entry(candidate: Candidate, why: str, score_boost: float = 0.0) -> ActivationEntry:
+def _entry(
+    candidate: Candidate,
+    why: str,
+    score_boost: float = 0.0,
+    *,
+    centrality: float | None = None,
+    role_confidence: float | None = None,
+    drop_reason: str = "",
+) -> ActivationEntry:
+    score = min(1.0, float(candidate.get("score", 0.5) or 0.5) + score_boost)
     return {
         "candidate_id": candidate.get("candidate_id", ""),
         "memory_id": candidate.get("memory_id", ""),
         "artifact_id": candidate.get("artifact_id", ""),
         "why": why,
-        "score": min(1.0, float(candidate.get("score", 0.5) or 0.5) + score_boost),
+        "score": score,
+        "centrality": float(centrality if centrality is not None else score),
+        "role_confidence": float(role_confidence if role_confidence is not None else min(1.0, score)),
+        "drop_reason": drop_reason,
     }
 
 
@@ -77,6 +103,174 @@ def _contains(text: str, cues: set[str]) -> bool:
     return any(cue in lower for cue in cues)
 
 
+def _token_set(text: str) -> set[str]:
+    return {token for token in text.lower().replace("/", " ").replace("_", " ").split() if token}
+
+
+def _query_overlap(query: str, candidate: Candidate) -> float:
+    query_terms = _token_set(query)
+    candidate_terms = _token_set(
+        f"{candidate.get('title', '')} {candidate.get('summary', '')} {candidate.get('content', '')}"
+    )
+    if not query_terms or not candidate_terms:
+        return 0.0
+    return len(query_terms & candidate_terms) / max(len(query_terms), 1)
+
+
+def score_candidate_for_role(candidate: Candidate, role: str, query: str, environment: dict[str, Any]) -> float:
+    """Role-aware scoring for heuristic activation."""
+    ctype = candidate.get("candidate_type", "")
+    text = f"{candidate.get('title', '')} {candidate.get('summary', '')} {candidate.get('content', '')}".lower()
+    base = float(candidate.get("score", 0.5) or 0.5) * 0.45
+    overlap = _query_overlap(query, candidate)
+    importance = min(float(candidate.get("importance", 3) or 3) / 5.0, 1.0) * 0.12
+    project_bonus = 0.08 if candidate.get("project") == environment.get("scope_id") else 0.0
+    current_file = str(environment.get("current_file", ""))
+    modified_files = {str(path) for path in environment.get("modified_files", [])}
+    source_ref = str(candidate.get("source_ref", ""))
+    artifact_match = 0.12 if source_ref and source_ref in modified_files | ({current_file} if current_file else set()) else 0.0
+
+    if role == "goals":
+        if ctype == "current_query":
+            return 1.0
+        return min(1.0, base + importance + (overlap * 0.3) + project_bonus)
+    if role == "constraints":
+        cue_bonus = 0.34 if _contains(text, _CONSTRAINT_CUES) else -0.1
+        return min(1.0, max(0.0, base + importance + cue_bonus + (overlap * 0.12) + project_bonus))
+    if role == "decisions":
+        cue_bonus = 0.3 if _contains(text, _DECISION_CUES) else -0.08
+        return min(1.0, max(0.0, base + importance + cue_bonus + artifact_match + (overlap * 0.14) + project_bonus))
+    if role == "preferences":
+        cue_bonus = 0.28 if _contains(text, _PREFERENCE_CUES) else -0.08
+        return min(1.0, max(0.0, base + cue_bonus + (overlap * 0.12) + project_bonus))
+    if role == "failure_patterns":
+        cue_bonus = 0.34 if _contains(text, _FAILURE_CUES) else -0.08
+        return min(1.0, max(0.0, base + importance + cue_bonus + artifact_match + (overlap * 0.14) + project_bonus))
+    if role == "artifact_context":
+        cue_bonus = 0.35 if ctype in {"playbook", "artifact", "transcript"} else -0.08
+        return min(1.0, max(0.0, base + cue_bonus + artifact_match + (overlap * 0.12) + project_bonus))
+    if role == "background":
+        return min(1.0, base + (overlap * 0.18) + (importance * 0.5))
+    return base
+
+
+def extract_open_tensions(
+    query: str,
+    candidate_bundle: CandidateBundle,
+    activation_result: ActivationResult | None = None,
+) -> list[ActivationTension]:
+    """Heuristically surface unresolved tensions in the current work state."""
+    tensions: list[ActivationTension] = []
+    lookup = {
+        candidate.get("candidate_id", ""): candidate
+        for candidate in flatten_candidate_bundle(candidate_bundle)
+        if candidate.get("candidate_id")
+    }
+    lowered_query = query.lower()
+
+    def add_tension(description: str, severity: str = "medium", linked_memory_ids: list[str] | None = None, why_open: str = "") -> None:
+        if not description:
+            return
+        entry: ActivationTension = {
+            "description": description[:240],
+            "severity": cast(Any, severity if severity in {"low", "medium", "high"} else "medium"),
+            "linked_memory_ids": linked_memory_ids or [],
+            "why_open": why_open or "heuristic tension extraction",
+            "centrality": 0.6 if severity == "high" else 0.45,
+            "role_confidence": 0.7 if severity == "high" else 0.55,
+        }
+        tensions.append(entry)
+
+    if any(cue in lowered_query for cue in _OPEN_TENSION_CUES):
+        add_tension(
+            "The current request contains unresolved language or an open tradeoff.",
+            severity="high" if "blocker" in lowered_query else "medium",
+            why_open="query contains unresolved-language cues",
+        )
+
+    selected_constraints = cast(list[ActivationEntry], activation_result.get("constraints", []) if activation_result else [])
+    selected_decisions = cast(list[ActivationEntry], activation_result.get("decisions", []) if activation_result else [])
+    artifact_candidates = list(candidate_bundle.get("artifact_candidates", []))
+    playbook_candidate = candidate_bundle.get("playbook_candidate")
+
+    if selected_constraints and not selected_decisions:
+        linked_memory_ids = [
+            candidate.get("memory_id", "")
+            for entry in selected_constraints
+            for candidate in [lookup.get(entry.get("candidate_id", ""))]
+            if candidate and candidate.get("memory_id")
+        ]
+        add_tension(
+            "Constraints are active without a supporting decision or implementation memory.",
+            severity="medium",
+            linked_memory_ids=linked_memory_ids,
+            why_open="constraint selected without supporting decision",
+        )
+
+    if query and (_contains(lowered_query, _ARTIFACT_CUES) or not (artifact_candidates or playbook_candidate)):
+        env_mode = ""
+        if isinstance(activation_result, dict):
+            env_mode = str(activation_result.get("task_mode", ""))
+        if (_contains(lowered_query, _ARTIFACT_CUES) or env_mode in {"coding", "proposal", "debug"}) and not (artifact_candidates or playbook_candidate):
+            add_tension(
+                "Current work lacks supporting artifact context.",
+                severity="high",
+                why_open="task appears artifact-driven but no artifact candidates were available",
+            )
+
+    strong_candidates = sorted(
+        [candidate for candidate in candidate_bundle.get("memory_candidates", []) if float(candidate.get("score", 0.0) or 0.0) >= 0.7],
+        key=lambda candidate: float(candidate.get("score", 0.0) or 0.0),
+        reverse=True,
+    )
+    if len(strong_candidates) >= 2:
+        first = strong_candidates[0]
+        second = strong_candidates[1]
+        first_terms = _token_set(f"{first.get('title', '')} {first.get('summary', '')}")
+        second_terms = _token_set(f"{second.get('title', '')} {second.get('summary', '')}")
+        overlap = len(first_terms & second_terms) / max(len(first_terms | second_terms), 1)
+        if overlap <= 0.15:
+            linked_ids = [candidate.get("memory_id", "") for candidate in (first, second) if candidate.get("memory_id")]
+            add_tension(
+                "Multiple strong candidate clusters suggest an unresolved tradeoff.",
+                severity="medium",
+                linked_memory_ids=linked_ids,
+                why_open="top candidates are strong but semantically divergent",
+            )
+
+    for candidate in flatten_candidate_bundle(candidate_bundle):
+        if candidate.get("candidate_type") == "current_query":
+            continue
+        text = f"{candidate.get('title', '')} {candidate.get('summary', '')} {candidate.get('content', '')}"
+        if _contains(text, _OPEN_TENSION_CUES):
+            linked_memory_ids = [candidate.get("memory_id", "")] if candidate.get("memory_id") else []
+            add_tension(
+                candidate.get("summary", candidate.get("title", ""))[:240],
+                severity="medium",
+                linked_memory_ids=linked_memory_ids,
+                why_open="candidate contains unresolved-language cues",
+            )
+
+    deduped: list[ActivationTension] = []
+    seen: set[str] = set()
+    severity_rank = {"high": 2, "medium": 1, "low": 0}
+    for tension in sorted(
+        tensions,
+        key=lambda item: (
+            severity_rank.get(str(item.get("severity", "medium")), 1),
+            float(item.get("role_confidence", 0.0) or 0.0),
+            float(item.get("centrality", 0.0) or 0.0),
+        ),
+        reverse=True,
+    ):
+        key = str(tension.get("description", "")).casefold()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(tension)
+    return deduped[:6]
+
+
 def judge_activation_heuristically(
     query: str,
     scope_id: str,
@@ -85,38 +279,83 @@ def judge_activation_heuristically(
 ) -> ActivationResult:
     """Deterministic fallback activation judgement."""
     result = _empty_activation_result("heuristic")
+    env = dict(environment or {})
+    env.setdefault("scope_id", scope_id)
     candidates = flatten_candidate_bundle(candidate_bundle)
+    role_map = {
+        "constraints": "constraint cue matched",
+        "decisions": "decision cue matched",
+        "preferences": "preference cue matched",
+        "failure_patterns": "failure/risk cue matched",
+        "artifact_context": "artifact context",
+        "background": "relevant background candidate",
+    }
+    role_buckets: dict[str, list[ActivationEntry]] = {
+        "constraints": cast(list[ActivationEntry], result["constraints"]),
+        "decisions": cast(list[ActivationEntry], result["decisions"]),
+        "preferences": cast(list[ActivationEntry], result["preferences"]),
+        "failure_patterns": cast(list[ActivationEntry], result["failure_patterns"]),
+        "artifact_context": cast(list[ActivationEntry], result["artifact_context"]),
+        "background": cast(list[ActivationEntry], result["background"]),
+    }
 
     for candidate in candidates:
         ctype = candidate.get("candidate_type", "")
         text = f"{candidate.get('title', '')} {candidate.get('summary', '')} {candidate.get('content', '')}"
         if ctype == "current_query":
-            result["goals"].append(_entry(candidate, "current user request", 0.2))
-        elif ctype in {"playbook", "artifact", "transcript"}:
-            result["artifact_context"].append(_entry(candidate, f"{ctype} context", 0.05))
-        elif ctype == "environment":
-            result["background"].append(_entry(candidate, "runtime environment fact"))
-        elif _contains(text, _CONSTRAINT_CUES):
-            result["constraints"].append(_entry(candidate, "constraint cue matched", 0.1))
-        elif _contains(text, _FAILURE_CUES):
-            result["failure_patterns"].append(_entry(candidate, "failure/risk cue matched", 0.1))
-        elif _contains(text, _DECISION_CUES):
-            result["decisions"].append(_entry(candidate, "decision cue matched", 0.05))
-        elif _contains(text, _PREFERENCE_CUES):
-            result["preferences"].append(_entry(candidate, "preference cue matched", 0.05))
+            result["goals"].append(_entry(candidate, "current user request", 0.0, centrality=1.0, role_confidence=1.0))
+            continue
+
+        if ctype == "environment":
+            score = score_candidate_for_role(candidate, "background", query, env)
+            result["background"].append(_entry(
+                candidate,
+                "runtime environment fact",
+                score - float(candidate.get("score", 0.5) or 0.5),
+                centrality=score,
+                role_confidence=score,
+            ))
+            continue
+
+        role_scores = {
+            "constraints": score_candidate_for_role(candidate, "constraints", query, env),
+            "decisions": score_candidate_for_role(candidate, "decisions", query, env),
+            "preferences": score_candidate_for_role(candidate, "preferences", query, env),
+            "failure_patterns": score_candidate_for_role(candidate, "failure_patterns", query, env),
+            "artifact_context": score_candidate_for_role(candidate, "artifact_context", query, env),
+            "background": score_candidate_for_role(candidate, "background", query, env),
+        }
+        if ctype in {"playbook", "artifact", "transcript"}:
+            best_role = "artifact_context"
+        elif _contains(text, _CONSTRAINT_CUES) and role_scores["constraints"] >= role_scores["failure_patterns"] - 0.1:
+            best_role = "constraints"
+        elif _contains(text, _FAILURE_CUES) and role_scores["failure_patterns"] > role_scores["constraints"] + 0.1:
+            best_role = "failure_patterns"
         else:
-            result["background"].append(_entry(candidate, "relevant background candidate"))
+            best_role = max(role_scores, key=lambda role: role_scores[role])
+        best_score = role_scores[best_role]
+        bucket = role_buckets[best_role]
+        bucket.append(_entry(
+            candidate,
+            role_map[best_role],
+            best_score - float(candidate.get("score", 0.5) or 0.5),
+            centrality=best_score,
+            role_confidence=best_score,
+        ))
 
-        if _contains(text, _OPEN_TENSION_CUES) and ctype != "current_query":
-            tension: ActivationTension = {
-                "description": candidate.get("summary", candidate.get("title", ""))[:240],
-                "severity": "medium",
-                "linked_memory_ids": [candidate.get("memory_id", "")] if candidate.get("memory_id") else [],
-                "why_open": "unresolved/tension cue matched",
-            }
-            result["open_tensions"].append(tension)
+    for role in ("constraints", "decisions", "preferences", "failure_patterns", "artifact_context", "background"):
+        result[role] = sorted(
+            result[role],
+            key=lambda entry: (
+                float(entry.get("score", 0.0) or 0.0),
+                float(entry.get("role_confidence", 0.0) or 0.0),
+                float(entry.get("centrality", 0.0) or 0.0),
+            ),
+            reverse=True,
+        )
 
-    result["confidence"] = 0.62 if candidates else 0.35
+    result["open_tensions"] = extract_open_tensions(query, candidate_bundle, result)
+    result["confidence"] = 0.68 if candidates else 0.35
     return result
 
 
@@ -162,35 +401,39 @@ def _extract_json_object(text: str) -> dict[str, Any] | None:
 
 def _sanitize_llm_result(data: dict[str, Any]) -> ActivationResult:
     result = _empty_activation_result("llm")
-    result["goals"] = cast(list[ActivationEntry], data.get("goals", []) if isinstance(data.get("goals", []), list) else [])
-    result["constraints"] = cast(
-        list[ActivationEntry],
-        data.get("constraints", []) if isinstance(data.get("constraints", []), list) else [],
-    )
-    result["background"] = cast(
-        list[ActivationEntry],
-        data.get("background", []) if isinstance(data.get("background", []), list) else [],
-    )
-    result["decisions"] = cast(
-        list[ActivationEntry],
-        data.get("decisions", []) if isinstance(data.get("decisions", []), list) else [],
-    )
-    result["preferences"] = cast(
-        list[ActivationEntry],
-        data.get("preferences", []) if isinstance(data.get("preferences", []), list) else [],
-    )
-    result["failure_patterns"] = cast(
-        list[ActivationEntry],
-        data.get("failure_patterns", []) if isinstance(data.get("failure_patterns", []), list) else [],
-    )
-    result["artifact_context"] = cast(
-        list[ActivationEntry],
-        data.get("artifact_context", []) if isinstance(data.get("artifact_context", []), list) else [],
-    )
-    result["open_tensions"] = cast(
-        list[ActivationTension],
-        data.get("open_tensions", []) if isinstance(data.get("open_tensions", []), list) else [],
-    )
+    for role in ("goals", "constraints", "background", "decisions", "preferences", "failure_patterns", "artifact_context"):
+        raw_entries = data.get(role, []) if isinstance(data.get(role, []), list) else []
+        sanitized: list[ActivationEntry] = []
+        for entry in raw_entries:
+            if not isinstance(entry, dict):
+                continue
+            sanitized.append(cast(ActivationEntry, {
+                "candidate_id": str(entry.get("candidate_id", "")),
+                "memory_id": str(entry.get("memory_id", "")),
+                "artifact_id": str(entry.get("artifact_id", "")),
+                "why": str(entry.get("why", "")),
+                "score": float(entry.get("score", 0.0) or 0.0),
+                "centrality": float(entry.get("centrality", entry.get("score", 0.0)) or 0.0),
+                "role_confidence": float(entry.get("role_confidence", entry.get("score", 0.0)) or 0.0),
+                "drop_reason": str(entry.get("drop_reason", "")),
+            }))
+        result[role] = sanitized
+
+    raw_tensions = data.get("open_tensions", []) if isinstance(data.get("open_tensions", []), list) else []
+    tensions: list[ActivationTension] = []
+    for entry in raw_tensions:
+        if not isinstance(entry, dict):
+            continue
+        tensions.append(cast(ActivationTension, {
+            "description": str(entry.get("description", "")),
+            "severity": entry.get("severity", "medium"),
+            "linked_memory_ids": entry.get("linked_memory_ids", []) if isinstance(entry.get("linked_memory_ids", []), list) else [],
+            "why_open": str(entry.get("why_open", "")),
+            "why": str(entry.get("why", "")),
+            "centrality": float(entry.get("centrality", 0.0) or 0.0),
+            "role_confidence": float(entry.get("role_confidence", 0.0) or 0.0),
+        }))
+    result["open_tensions"] = tensions
     return result
 
 
@@ -214,15 +457,22 @@ def judge_activation_with_llm(
         "environment": {k: environment[k] for k in sorted(environment)[:20]},
         "candidates": bounded,
         "schema": {
-            "goals": [{"candidate_id": "...", "why": "...", "score": 0.9}],
+            "goals": [{"candidate_id": "...", "why": "...", "score": 0.9, "centrality": 0.9, "role_confidence": 0.9}],
             "constraints": [],
             "background": [],
             "decisions": [],
             "preferences": [],
             "failure_patterns": [],
             "artifact_context": [],
-            "open_tensions": [{"description": "...", "severity": "medium", "linked_memory_ids": [], "why_open": "..."}],
-            "ignored": [{"candidate_id": "...", "why": "..."}],
+            "open_tensions": [{
+                "description": "...",
+                "severity": "medium",
+                "linked_memory_ids": [],
+                "why_open": "...",
+                "centrality": 0.7,
+                "role_confidence": 0.7,
+            }],
+            "ignored": [{"candidate_id": "...", "why": "...", "drop_reason": "distractor"}],
         },
     }
     prompt = json.dumps(payload, ensure_ascii=False)

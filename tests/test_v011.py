@@ -151,6 +151,43 @@ def test_session_start_hook_writes_primed_marker(tmp_path, monkeypatch):
         assert data.get("session_id") == "primed-test-session"
 
 
+def test_session_start_hook_uses_slice_projection(tmp_path):
+    """SessionStart emits rendered slice context when project playbook context exists."""
+    memem_dir = tmp_path / ".memem"
+    memem_dir.mkdir()
+    vault = tmp_path / "vault"
+    playbook_dir = vault / "memem" / "playbooks"
+    (vault / "memem" / "memories").mkdir(parents=True)
+    playbook_dir.mkdir(parents=True)
+    (playbook_dir / f"{REPO.name}.md").write_text(
+        "# Project Playbook\n\nKeep auth rollout constraints visible during active work.\n"
+    )
+
+    env = os.environ.copy()
+    env["MEMEM_DIR"] = str(memem_dir)
+    env["CLAUDE_PLUGIN_ROOT"] = str(REPO)
+    env["MEMEM_OBSIDIAN_VAULT"] = str(vault)
+    env["PYTHONPATH"] = str(REPO) + os.pathsep + env.get("PYTHONPATH", "")
+
+    result = subprocess.run(
+        ["bash", str(REPO / "hooks" / "session-start.sh")],
+        input=json.dumps({
+            "session_id": "slice-session-start",
+            "cwd": str(REPO),
+        }),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+    assert result.returncode == 0, f"hook failed: {result.stderr}"
+
+    payload = json.loads(result.stdout)
+    ctx = payload["hookSpecificOutput"]["additionalContext"]
+    assert "# Active Memory Slice" in ctx
+    assert "## Goals" in ctx
+
+
 def test_auto_recall_consumes_primed_flag(tmp_path):
     """First UserPromptSubmit after a primed SessionStart emits an active slice and clears the flag."""
     memem_dir = tmp_path / ".memem"

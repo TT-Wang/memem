@@ -106,7 +106,7 @@ def test_active_slice_cli_no_llm(tmp_vault, tmp_cortex_dir, capsys, monkeypatch)
         importance=5,
     ))
 
-    out = _dispatch(["active-slice", "Prepare", "project", "review", "--scope", "memem", "--no-llm"], capsys)
+    out = _dispatch(["slice", "Prepare", "project", "review", "--scope", "memem", "--no-llm"], capsys)
     assert "# Active Memory Slice" in out.out
     assert "## Goals" in out.out
 
@@ -139,7 +139,7 @@ def test_active_slice_cli_query_file_stdin(capsys, monkeypatch):
     monkeypatch.setattr(sys, "stdin", io.StringIO("large prompt body" * 1000))
 
     cli.dispatch_cli(
-        ["memem", "active-slice", "--query-file", "-", "--scope", "memem", "--no-llm"],
+        ["memem", "slice", "--query-file", "-", "--scope", "memem", "--no-llm"],
         SimpleNamespace(run=lambda **_: None),
     )
     out = capsys.readouterr()
@@ -148,3 +148,13 @@ def test_active_slice_cli_query_file_stdin(capsys, monkeypatch):
     assert captured["query"].startswith("large prompt body")
     assert captured["scope_id"] == "memem"
     assert captured["use_llm"] is False
+
+
+def test_active_slice_legacy_alias_still_works(tmp_vault, tmp_cortex_dir, capsys, monkeypatch):
+    from memem import transcripts
+
+    monkeypatch.setattr(transcripts, "transcript_search", lambda *a, **kw: "No matching transcripts found")
+
+    out = _dispatch(["active-slice", "Prepare review", "--scope", "memem", "--json", "--no-llm"], capsys)
+
+    assert '"goals"' in out.out

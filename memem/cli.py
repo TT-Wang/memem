@@ -15,6 +15,50 @@ from memem.session_state import MINED_SESSIONS_FILE
 from memem.storage import _register_server_pid
 
 
+def _parse_slice_command(argv: list[str]) -> tuple[str, str, bool, bool]:
+    raw_json = "--json" in argv
+    use_llm = "--no-llm" not in argv
+    scope = "default"
+    query_file = ""
+    query_parts: list[str] = []
+    skip_next = False
+
+    for idx, arg in enumerate(argv[2:], start=2):
+        if skip_next:
+            skip_next = False
+            continue
+        if arg in {"--json", "--no-llm"}:
+            continue
+        if arg == "--query-file":
+            try:
+                query_file = argv[idx + 1]
+                skip_next = True
+            except IndexError:
+                pass
+            continue
+        if arg == "--scope":
+            try:
+                scope = argv[idx + 1]
+                skip_next = True
+            except IndexError:
+                pass
+            continue
+        query_parts.append(arg)
+
+    if query_file:
+        if query_file == "-":
+            query = sys.stdin.read().strip()
+        else:
+            try:
+                query = Path(query_file).read_text(encoding="utf-8", errors="ignore").strip()
+            except OSError as exc:
+                raise SystemExit(f"Failed to read query file: {exc}") from exc
+    else:
+        query = " ".join(query_parts).strip()
+
+    return query, scope, use_llm, raw_json
+
+
 def dispatch_cli(argv: list[str], mcp) -> None:
     cmd = argv[1] if len(argv) >= 2 else None
 
@@ -116,41 +160,8 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         print(memory_recall(query, limit=10) if query else "No query provided.")
         return
 
-    if cmd in ("active-slice", "--active-slice"):
-        raw_json = "--json" in argv
-        use_llm = "--no-llm" not in argv
-        scope = "default"
-        query_file = ""
-        query_parts = []
-        skip_next = False
-        for idx, arg in enumerate(argv[2:], start=2):
-            if skip_next:
-                skip_next = False
-                continue
-            if arg == "--json" or arg == "--no-llm":
-                continue
-            if arg == "--query-file":
-                try:
-                    query_file = argv[idx + 1]
-                    skip_next = True
-                except IndexError:
-                    pass
-                continue
-            if arg == "--scope":
-                try:
-                    scope = argv[idx + 1]
-                    skip_next = True
-                except IndexError:
-                    pass
-                continue
-            query_parts.append(arg)
-        if query_file:
-            if query_file == "-":
-                query = sys.stdin.read().strip()
-            else:
-                query = Path(query_file).read_text(errors="ignore").strip()
-        else:
-            query = " ".join(query_parts).strip()
+    if cmd in ("slice", "active-slice", "--active-slice"):
+        query, scope, use_llm, raw_json = _parse_slice_command(argv)
         if not query:
             print("No query provided.")
             return

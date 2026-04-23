@@ -93,7 +93,15 @@ def apply_pre_boundaries(
 
 
 def _cap_entries(entries: list[dict[str, Any]], cap: int, ignored: list[dict[str, Any]], role: str) -> list[dict[str, Any]]:
-    sorted_entries = sorted(entries, key=lambda e: e.get("score", 0.0), reverse=True)
+    sorted_entries = sorted(
+        entries,
+        key=lambda entry: (
+            float(entry.get("score", 0.0) or 0.0),
+            float(entry.get("role_confidence", 0.0) or 0.0),
+            float(entry.get("centrality", 0.0) or 0.0),
+        ),
+        reverse=True,
+    )
     kept = sorted_entries[:cap]
     for entry in sorted_entries[cap:]:
         ignored.append({"candidate_id": entry.get("candidate_id") or entry.get("memory_id", ""), "reason": "role_budget", "role": role})

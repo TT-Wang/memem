@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# memem auto-recall hook — always-wake active slice on UserPromptSubmit.
+# memem auto-recall hook — always-wake slice-first runtime context on UserPromptSubmit.
 #
 # Flow:
 #   1. Load .last-brief.json for telemetry and session bookkeeping
-#   2. Run active_memory_slice for every user prompt
+#   2. Run slice-first prompt generation for every user prompt
 #   3. Update .last-brief.json only after successful slice generation
 #
 # The hook no longer gates activation on keyword overlap. The active slice
 # engine is the decision layer; overlap is kept only for logging and tuning.
 #
-# v0.10.2 fixes:
+# v0.10.2+ fixes:
 #   - Move .last-brief.json write AFTER successful assembly (was writing
 #     before, which caused silent context starvation after any transient
 #     Haiku failure)
@@ -84,7 +84,7 @@ def run_active_slice(query: str, scope: str) -> str:
         env = os.environ.copy()
         env["PYTHONPATH"] = plugin_root + os.pathsep + env.get("PYTHONPATH", "")
         result = subprocess.run(
-            [sys.executable, "-m", "memem.server", "active-slice", "--query-file", "-", "--scope", scope, "--no-llm"],
+            [sys.executable, "-m", "memem.server", "slice", "--query-file", "-", "--scope", scope, "--no-llm"],
             input=query,
             capture_output=True,
             text=True,
@@ -107,7 +107,7 @@ session_id = hook.get("session_id", "") or ""
 message = hook.get("message", hook.get("query", "")) or ""
 scope = detect_scope(hook)
 
-# If no plugin root, we cannot assemble an active slice — emit empty
+# If no plugin root, we cannot generate slice-first runtime context — emit empty
 if not plugin_root or plugin_root == '${CLAUDE_PLUGIN_ROOT}':
     emit_empty()
 
@@ -131,10 +131,10 @@ last_primed   = last_data.get("primed", False)
 # Run active slice generation
 assembled = run_active_slice(message, scope)
 
-# If assembly failed or returned empty, leave last-brief UNTOUCHED so the
+# If slice generation failed or returned empty, leave last-brief UNTOUCHED so the
 # next prompt with similar keywords will retry. Silent starvation was the
 # bug we fixed in v0.10.2 — previously .last-brief.json was written before
-# this check, causing any transient briefing failure to suppress future recall.
+# this check, causing any transient projection failure to suppress future recall.
 if not assembled:
     emit_empty()
 
@@ -148,7 +148,7 @@ if last_keywords and last_session == session_id:
 else:
     overlap = 0.0
 
-# Assembly succeeded — NOW commit the keyword set + log the wakeup.
+# Slice projection succeeded — NOW commit the keyword set + log the wakeup.
 try:
     last_brief.parent.mkdir(parents=True, exist_ok=True)
     last_brief.write_text(json.dumps({

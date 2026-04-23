@@ -88,7 +88,7 @@ def test_rendered_active_slice_contains_expected_sections_when_memory_matches(tm
     assert "# Active Memory Slice" in rendered
     assert "## Goals" in rendered
     assert "## Constraints" in rendered
-    assert "## Artifacts" in rendered
+    assert "## Warnings" in rendered
 
 
 def test_golden_product_proposal_continuation(tmp_vault, tmp_cortex_dir, monkeypatch):
@@ -189,3 +189,31 @@ def test_golden_project_review_deprecated_suppression(tmp_vault, tmp_cortex_dir,
 
     assert active["id"] in str(slice_obj)
     assert deprecated["id"] not in str(slice_obj)
+
+
+def test_generate_candidates_uses_normalized_environment_fields(tmp_path):
+    from memem.active_slice_engine import generate_candidates
+
+    current_file = tmp_path / "proposal.md"
+    current_file.write_text("# Proposal\n\nOpen rollout questions.\n")
+
+    bundle = generate_candidates(
+        "Continue the proposal",
+        "memem",
+        environment={
+            "task_mode": "proposal",
+            "repo_path": str(tmp_path),
+            "current_file": str(current_file),
+            "modified_files": [str(current_file)],
+            "branch": "feature/proposal-slice",
+            "stakeholder": "product",
+        },
+        limit=10,
+    )
+
+    environment_titles = {candidate["title"] for candidate in bundle["environment_candidates"]}
+    artifact_refs = {candidate.get("source_ref", "") for candidate in bundle["artifact_candidates"]}
+
+    assert "task_mode" in environment_titles
+    assert "branch" in environment_titles
+    assert str(current_file) in artifact_refs

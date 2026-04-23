@@ -84,6 +84,7 @@ class ExcludedCandidate(TypedDict, total=False):
     reason: str
     role: str
     kept_candidate_id: str
+    drop_reason: str
 
 
 class ActivationEntry(TypedDict, total=False):
@@ -92,6 +93,9 @@ class ActivationEntry(TypedDict, total=False):
     artifact_id: str
     why: str
     score: float
+    centrality: float
+    role_confidence: float
+    drop_reason: str
 
 
 class ActivationTension(TypedDict, total=False):
@@ -101,6 +105,8 @@ class ActivationTension(TypedDict, total=False):
     linked_memory_ids: list[str]
     why_open: str
     why: str
+    centrality: float
+    role_confidence: float
 
 
 class ActivationResult(TypedDict, total=False):
@@ -163,7 +169,11 @@ def _stable_id(prefix: str, payload: Any) -> str:
 
 def _compact(text: str, limit: int = 500) -> str:
     cleaned = " ".join((text or "").split())
-    return cleaned[:limit]
+    if len(cleaned) <= limit:
+        return cleaned
+    if limit <= 3:
+        return cleaned[:limit]
+    return f"{cleaned[: limit - 3].rstrip()}..."
 
 
 def current_query_candidate(query: str, scope_id: str) -> Candidate:
@@ -442,7 +452,7 @@ def build_active_memory_slice(
         "excluded_candidates": activation_result.get("ignored", []) + activation_result.get("excluded_candidates", []),
         "candidate_deltas": activation_result.get("candidate_deltas", []),
         "projection_hint": {
-            "preferred_output_mode": "briefing",
+            "preferred_output_mode": "slice",
             "must_include_constraints_first": True,
             "should_surface_open_tensions": True,
         },
@@ -458,75 +468,120 @@ def build_active_memory_slice(
 
 def _render_items(items: Sequence[Mapping[str, Any]]) -> list[str]:
     lines: list[str] = []
+    seen: set[str] = set()
     for item in items:
-        title = item.get("title", "Untitled")
-        summary = item.get("summary", "")
-        score_value = item.get("score", item.get("relevance_score", 0.0))
-        why = item.get("why_activated", "")
+        title = _compact(str(item.get("title", "Untitled") or "Untitled"), 90)
+        summary = _compact(str(item.get("summary", "") or ""), 220)
+        why = _compact(str(item.get("why_activated", "") or ""), 120)
         prefix = f"- {title}"
-        if isinstance(score_value, int | float) and score_value:
-            prefix += f" ({float(score_value):.2f})"
-        if summary:
+        if summary and summary.lower() != title.lower():
             prefix += f" — {summary}"
         if why:
-            prefix += f" _[{why}]_"
+            prefix += f" [{why}]"
+        normalized = prefix.casefold()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
         lines.append(prefix)
-    return lines or ["- None"]
+    return lines
 
 
-def render_slice_as_prompt_context(slice_obj: ActiveMemorySlice) -> str:
+def _render_tensions(tensions: Sequence[Mapping[str, Any]]) -> list[str]:
+    lines: list[str] = []
+    seen: set[str] = set()
+    for tension in tensions:
+        description = _compact(str(tension.get("description", "") or ""), 220)
+        if not description:
+            continue
+        severity = str(tension.get("severity", "medium") or "medium").lower()
+        why_open = _compact(str(tension.get("why_open", "") or ""), 120)
+        line = f"- [{severity}] {description}"
+        if why_open and why_open.casefold() not in description.casefold():
+            line += f" [{why_open}]"
+        normalized = line.casefold()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        lines.append(line)
+    return lines
+
+
+def _render_deltas(deltas: Sequence[Mapping[str, Any]]) -> list[str]:
+    lines: list[str] = []
+    for delta in deltas:
+        delta_type = _compact(str(delta.get("delta_type", "delta") or "delta"), 40)
+        reason = _compact(str(delta.get("reason", "") or ""), 220)
+        line = f"- {delta_type}"
+        if reason:
+            line += f": {reason}"
+        lines.append(line)
+    return lines
+
+
+def _render_section(title: str, lines: Sequence[str]) -> str:
+    if not lines:
+        return ""
+    return "\n".join([f"## {title}", *lines])
+
+
+def _slice_header(slice_obj: ActiveMemorySlice) -> str:
+    confidence_value = slice_obj.get("confidence", 0.0)
+    confidence = float(confidence_value) if isinstance(confidence_value, (int, float)) else 0.0
+    header_lines = [
+        "# Active Memory Slice",
+        "",
+        f"- scope: {slice_obj.get('scope_id', 'default')}",
+        f"- query: {_compact(str(slice_obj.get('query', '') or ''), 240)}",
+        f"- activation: {slice_obj.get('activation_mode', 'heuristic')}",
+        f"- confidence: {confidence:.2f}",
+    ]
+    return "\n".join(header_lines)
+
+
+def _render_slice(slice_obj: ActiveMemorySlice, max_chars: int | None = None) -> str:
     if not slice_obj.get("should_emit_context", True):
         return ""
 
     sections = [
-        ("Goals", slice_obj.get("goals", [])),
-        ("Constraints", slice_obj.get("constraints", [])),
-        ("Active Background", slice_obj.get("active_background", [])),
-        ("Decisions", slice_obj.get("decisions", [])),
-        ("Preferences", slice_obj.get("preferences", [])),
-        ("Failure Patterns", slice_obj.get("failure_patterns", [])),
+        _slice_header(slice_obj),
+        _render_section("Goals", _render_items(slice_obj.get("goals", []))),
+        _render_section("Constraints", _render_items(slice_obj.get("constraints", []))),
+        _render_section("Decisions", _render_items(slice_obj.get("decisions", []))),
+        _render_section("Failure Patterns", _render_items(slice_obj.get("failure_patterns", []))),
+        _render_section("Open Tensions", _render_tensions(slice_obj.get("open_tensions", []))),
+        _render_section("Artifacts", _render_items(slice_obj.get("artifacts", []))),
+        _render_section("Preferences", _render_items(slice_obj.get("preferences", []))),
+        _render_section("Active Background", _render_items(slice_obj.get("active_background", []))),
+        _render_section("Candidate Deltas", _render_deltas(slice_obj.get("candidate_deltas", []))),
+        _render_section("Warnings", [f"- {_compact(str(warning), 220)}" for warning in slice_obj.get("warnings", [])]),
     ]
-    lines = [
-        "# Active Memory Slice",
-        "",
-        f"- scope: {slice_obj.get('scope_id', 'default')}",
-        f"- query: {slice_obj.get('query', '')}",
-        f"- activation: {slice_obj.get('activation_mode', 'heuristic')}",
-        "",
-    ]
-    for title, items in sections:
-        lines.append(f"## {title}")
-        lines.extend(_render_items(items))
-        lines.append("")
+    blocks = [section for section in sections if section]
+    rendered = "\n\n".join(blocks).strip()
+    if max_chars is None or len(rendered) <= max_chars:
+        return rendered
 
-    lines.append("## Open Tensions")
-    tensions = slice_obj.get("open_tensions", [])
-    if tensions:
-        for tension in tensions:
-            lines.append(
-                f"- [{tension.get('severity', 'medium')}] {tension.get('description', '')} "
-                f"_{tension.get('why_open', '')}_"
-            )
-    else:
-        lines.append("- None")
-    lines.append("")
+    limited_blocks: list[str] = []
+    current_length = 0
+    for block in blocks:
+        addition = len(block) + (2 if limited_blocks else 0)
+        if limited_blocks and current_length + addition > max_chars:
+            break
+        if not limited_blocks and len(block) > max_chars:
+            return _compact(block, max_chars)
+        limited_blocks.append(block)
+        current_length += addition
 
-    lines.append("## Artifacts")
-    lines.extend(_render_items(slice_obj.get("artifacts", [])))
-    lines.append("")
+    truncated = "\n\n".join(limited_blocks).strip()
+    if len(truncated) < len(rendered):
+        suffix = "\n\n- Context truncated for budget."
+        if len(truncated) + len(suffix) <= max_chars:
+            truncated += suffix
+    return truncated
 
-    deltas = slice_obj.get("candidate_deltas", [])
-    if deltas:
-        lines.append("## Candidate Deltas")
-        for delta in deltas:
-            lines.append(f"- {delta.get('delta_type', 'delta')}: {delta.get('reason', '')}")
-        lines.append("")
 
-    warnings = slice_obj.get("warnings", [])
-    if warnings:
-        lines.append("## Warnings")
-        for warning in warnings:
-            lines.append(f"- {warning}")
-        lines.append("")
+def render_slice_as_prompt_context(slice_obj: ActiveMemorySlice) -> str:
+    return _render_slice(slice_obj)
 
-    return "\n".join(lines).strip()
+
+def render_slice_as_compact_context(slice_obj: ActiveMemorySlice, max_chars: int = 4000) -> str:
+    return _render_slice(slice_obj, max_chars=max_chars)

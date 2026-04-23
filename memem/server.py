@@ -129,7 +129,7 @@ def _build_mcp():
 
         Do NOT use for:
         - Session-level what-I-did-today logs (use `transcript_search` instead)
-        - On-demand query-tailored briefings (use `context_assemble` instead)
+        - Slice-first working context (use `active_memory_slice`)
         - Listing every memory (use `memory_list` instead)
 
         Returns: Markdown-formatted memory entries, grouped under a "### Memories"
@@ -363,7 +363,13 @@ def _build_mcp():
         ] = "default",
         raw_json: Annotated[
             bool,
-            Field(description="Return raw structured JSON instead of markdown projection."),
+            Field(
+                description=(
+                    "Return raw structured JSON instead of the markdown projection. "
+                    "The JSON includes excluded_candidates, candidate_deltas, "
+                    "warnings, and slice metrics."
+                ),
+            ),
         ] = False,
         use_llm: Annotated[
             bool,
@@ -372,9 +378,15 @@ def _build_mcp():
     ) -> str:
         """Generate an Active Memory Slice runtime working state for ongoing work.
 
-        This is above memory_search/context_assemble: recall produces candidates,
-        then the slice engine activates only the working-state items needed now.
-        It never auto-commits delta proposals to the vault.
+        This is memem's default runtime context path. Recall produces bounded
+        candidates, then the slice engine activates only the working-state items
+        needed now. By default it returns the rendered markdown slice; set
+        `raw_json=True` to inspect the underlying structure, including
+        excluded_candidates, candidate_deltas, warnings, and confidence.
+
+        `context_assemble` remains available as an explicit secondary projection
+        when you specifically want a narrative briefing instead of the working
+        state slice. This tool never auto-commits delta proposals to the vault.
         """
         return _active_slice_response(query, scope_id=scope_id, raw_json=raw_json, use_llm=use_llm)
 
@@ -671,7 +683,7 @@ def _build_mcp():
         Do NOT use for:
         - Looking up durable knowledge (use `memory_recall` — mined, ranked, faster)
         - Listing memories (use `memory_list`)
-        - Query-tailored context briefings (use `context_assemble`)
+        - Slice-first working context (use `active_memory_slice`)
 
         Returns: Markdown-formatted session excerpts with the session id,
         date, and matched text, or "No matching sessions" if nothing matches.
@@ -708,13 +720,12 @@ def _build_mcp():
             ),
         ] = "default",
     ) -> str:
-        """Assemble a query-tailored context briefing from all available knowledge.
+        """Assemble an explicit secondary briefing from all available knowledge.
 
-        This is the highest-value memem tool. It gathers the relevant subset
-        of memories, the project's playbook, and related session transcripts,
-        then uses Claude Haiku to synthesise a focused markdown briefing for
-        the given query. The result is a ready-to-read summary, NOT a raw
-        memory dump — usually 300-800 tokens of distilled relevant knowledge.
+        `active_memory_slice` is the default runtime path for live work. This
+        tool stays available for callers that explicitly want a narrative
+        markdown briefing synthesized from playbook, memory, and transcript
+        materials instead of the slice-first working state projection.
 
         Behaviour:
           - Read-only with respect to the memem memory store. Bumps access
@@ -742,11 +753,12 @@ def _build_mcp():
             returning the raw materials.
 
         Use `context_assemble` when:
-        - Starting a new session and you want the assistant loaded with context
-          before the first real question (the auto-recall hook does this on
-          `UserPromptSubmit`, but you can also call it manually)
-        - Onboarding to a project mid-session — ask "what do I know about X?"
-        - Before making a decision in an area where prior decisions exist
+        - You explicitly want a rewritten narrative brief rather than the raw
+          working-state slice
+        - You are onboarding to a project mid-session and want a compact
+          summary spanning playbook, memories, and transcripts
+        - You are comparing the assembly projection against the slice-first
+          runtime output for debugging or tuning
 
         Do NOT use for:
         - Simple keyword lookups (use `memory_recall` — faster, no LLM call)

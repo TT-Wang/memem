@@ -202,7 +202,7 @@ def clear_installed_at():
 #   - "Below is a coding conversation"     -> mining._summarize_session_haiku
 #   - "EXISTING:"                          -> mining._merge_memories
 #   - "You were asked to extract memories" -> mining corrective retry
-#   - "QUERY: "                            -> assembly.context_assemble
+#   - "QUERY: "                            -> assembly.context_assemble (explicit secondary projection)
 #   - "Review these memory entries"        -> assembly._consolidate_project
 #   - "USER MESSAGE:\n"                    -> recall.smart_recall
 #   - "# <project> — Project Playbook"     -> playbook._playbook_refine

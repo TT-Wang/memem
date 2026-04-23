@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from memem.activation import judge_activation_heuristically, judge_activation_with_llm
 from memem.active_slice import (
@@ -17,14 +17,20 @@ from memem.active_slice import (
     current_query_candidate,
     flatten_candidate_bundle,
     normalize_artifact_candidate,
-    normalize_environment_candidate,
     normalize_memory_candidate,
     normalize_transcript_candidate,
+    render_slice_as_compact_context,
     render_slice_as_prompt_context,
 )
+from memem.active_slice_metrics import summarize_slice_metrics
+from memem.artifact_context import artifact_candidates_from_environment
 from memem.boundaries import apply_post_boundaries, apply_pre_boundaries
 from memem.delta import propose_deltas_from_slice
-from memem.models import PLAYBOOK_DIR, _normalize_scope_id
+from memem.environment_context import (
+    environment_candidates_from_environment,
+    normalize_runtime_environment,
+)
+from memem.models import _normalize_scope_id
 
 log = logging.getLogger("memem-active-slice")
 
@@ -32,6 +38,7 @@ _MAX_MEMORY_CANDIDATES = 20
 _MAX_GRAPH_CANDIDATES = 20
 _MAX_TRANSCRIPT_CANDIDATES = 5
 _MAX_ARTIFACT_CANDIDATES = 8
+PromptContextMode = Literal["slice", "assembly"]
 
 
 def _dedupe_candidates(candidates: list[Candidate]) -> list[Candidate]:
@@ -47,8 +54,10 @@ def _dedupe_candidates(candidates: list[Candidate]) -> list[Candidate]:
 
 
 def _playbook_candidate(scope_id: str) -> Candidate | None:
+    from memem import models
+
     normalized = _normalize_scope_id(scope_id)
-    path = PLAYBOOK_DIR / f"{normalized}.md"
+    path = models.PLAYBOOK_DIR / f"{normalized}.md"
     if not path.exists():
         return None
     try:
@@ -109,7 +118,7 @@ def generate_candidates(
     limit: int = 20,
 ) -> CandidateBundle:
     """Generate bounded candidate pool for Active Memory Slice activation."""
-    env = environment or {}
+    env = normalize_runtime_environment(environment)
     normalized_scope = _normalize_scope_id(scope_id)
     current = [current_query_candidate(query, normalized_scope)]
 
@@ -132,20 +141,16 @@ def generate_candidates(
 
     graph_candidates = _graph_candidates(memory_candidates)
     playbook = _playbook_candidate(normalized_scope)
-    transcript_flag = str(env.get("include_transcripts", os.environ.get("MEMEM_ACTIVE_SLICE_TRANSCRIPTS", "0"))).lower()
+    transcript_setting = env.get("include_transcripts", os.environ.get("MEMEM_ACTIVE_SLICE_TRANSCRIPTS", "0"))
+    transcript_flag = str(transcript_setting).lower()
     transcript_candidates = (
         _transcript_candidates(query)
         if transcript_flag in {"1", "true", "yes", "on"}
         else []
     )
 
-    artifact_candidates: list[Candidate] = []
-
-    environment_candidates = [
-        normalize_environment_candidate(key, value, score=0.5)
-        for key, value in sorted(env.items())[:10]
-        if key != "session_id"
-    ]
+    artifact_candidates = artifact_candidates_from_environment(env, normalized_scope)
+    environment_candidates = environment_candidates_from_environment(env, normalized_scope)
 
     return {
         "current_goal_candidates": current,
@@ -164,7 +169,7 @@ def generate_active_memory_slice(
     use_llm: bool = True,
 ) -> ActiveMemorySlice:
     """Main Active Memory Slice Engine entrypoint."""
-    env = dict(environment or {})
+    env = normalize_runtime_environment(environment)
     normalized_scope = _normalize_scope_id(scope_id)
     candidate_bundle = generate_candidates(query, normalized_scope, env)
     all_candidates = flatten_candidate_bundle(candidate_bundle)
@@ -174,11 +179,16 @@ def generate_active_memory_slice(
     filtered_candidates = pre["candidates"]
     filtered_bundle = _bundle_from_candidates(filtered_candidates, candidate_bundle)
 
-    activation = (
-        judge_activation_with_llm(query, normalized_scope, env, filtered_bundle)
-        if use_llm else
-        judge_activation_heuristically(query, normalized_scope, env, filtered_bundle)
-    )
+    if use_llm:
+        try:
+            activation = judge_activation_with_llm(query, normalized_scope, env, filtered_bundle)
+        except Exception as exc:
+            activation = judge_activation_heuristically(query, normalized_scope, env, filtered_bundle)
+            activation["warnings"] = list(activation.get("warnings", [])) + [
+                f"LLM activation raised {type(exc).__name__}; used heuristic activation.",
+            ]
+    else:
+        activation = judge_activation_heuristically(query, normalized_scope, env, filtered_bundle)
     if not use_llm:
         activation["warnings"] = list(activation.get("warnings", [])) + ["LLM activation disabled; used heuristic activation."]
 
@@ -189,6 +199,7 @@ def generate_active_memory_slice(
     )
     slice_obj = build_active_memory_slice(query, normalized_scope, env, filtered_bundle, activation)
     slice_obj["candidate_deltas"] = propose_deltas_from_slice(slice_obj)
+    log.info("active_memory_slice_generated %s", json.dumps(summarize_slice_metrics(slice_obj), sort_keys=True))
     return slice_obj
 
 
@@ -228,4 +239,49 @@ def active_slice_response(
     slice_obj = generate_active_memory_slice(query, scope_id=scope_id, environment=environment, use_llm=use_llm)
     if raw_json:
         return json.dumps(slice_obj, indent=2, sort_keys=True)
-    return render_slice_as_prompt_context(slice_obj)
+    return generate_prompt_context(
+        query,
+        scope_id=scope_id,
+        environment=environment,
+        use_llm=use_llm,
+        mode="slice",
+        slice_obj=slice_obj,
+    )
+
+
+def generate_prompt_context(
+    query: str,
+    scope_id: str = "default",
+    environment: dict[str, Any] | None = None,
+    use_llm: bool = True,
+    mode: PromptContextMode = "slice",
+    slice_obj: ActiveMemorySlice | None = None,
+) -> str:
+    """Generate runtime prompt context using slice-first projection."""
+    current_slice = slice_obj or generate_active_memory_slice(
+        query,
+        scope_id=scope_id,
+        environment=environment,
+        use_llm=use_llm,
+    )
+    if not current_slice.get("should_emit_context", True):
+        return ""
+
+    if mode == "slice":
+        compact_budget = environment.get("prompt_budget_chars") if isinstance(environment, dict) else None
+        if isinstance(compact_budget, int) and compact_budget > 0:
+            return render_slice_as_compact_context(current_slice, max_chars=compact_budget)
+        return render_slice_as_prompt_context(current_slice)
+
+    if mode != "assembly":
+        raise ValueError(f"Unknown prompt context mode: {mode}")
+
+    try:
+        from memem.assembly import context_assemble
+
+        assembled = context_assemble(query, project=scope_id)
+    except Exception as exc:
+        log.warning("assembly projection failed; falling back to slice projection: %s", exc)
+        return render_slice_as_prompt_context(current_slice)
+
+    return assembled or render_slice_as_prompt_context(current_slice)

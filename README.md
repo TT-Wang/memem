@@ -26,7 +26,7 @@ DO NOT "fix" this URL — `glama.ai/mcp/servers/TT-Wang/memem` returns 404.
 
 ## What is memem?
 
-memem is a Claude Code plugin that gives Claude persistent memory across sessions. A background miner extracts durable lessons (decisions, conventions, bug fixes, preferences) from your completed sessions, stores them as markdown in an Obsidian vault, and automatically surfaces relevant ones at the start of each new session via a query-tailored briefing.
+memem is a Claude Code plugin that gives Claude persistent memory across sessions. A background miner extracts durable lessons (decisions, conventions, bug fixes, preferences) from your completed sessions, stores them as markdown in an Obsidian vault, and automatically surfaces relevant ones as an Active Memory Slice working state. An explicit narrative assembly path still exists, but the default runtime context is slice-first.
 
 It's **local-first**: no cloud services, no API keys required, no vendor lock-in. Everything lives in `~/obsidian-brain/memem/memories/` as human-readable markdown.
 
@@ -49,32 +49,42 @@ Use memem if:
 - **Security scanning** — every write is scanned for prompt injection and credential exfiltration
 - **Browsable** — Obsidian vault with graph view and backlinks for free
 
-## Architecture — layered recall
+## Architecture — slice-first runtime
 
-memem uses a 3-tier recall workflow inspired by [claude-mem](https://github.com/thedotmack/claude-mem) and [mem0](https://mem0.ai). Instead of dumping full memory content on every recall, it lets Claude progressively drill into relevant memories:
+memem uses layered recall plus a slice-first runtime kernel inspired by [claude-mem](https://github.com/thedotmack/claude-mem) and [mem0](https://mem0.ai). Instead of treating memory as one big briefing, it first turns recall results into an explicit working state:
 
 ```
-   Session start
+   Session start / user prompt
    ┌─────────────────────────────┐
-   │ SessionStart hook injects:  │
-   │   • L0 full content (~20)   │
-   │   • Compact index of rest   │
+   │ Candidate generation        │
+   │   • memories / graph        │
+   │   • playbooks               │
+   │   • runtime environment     │
+   │   • current artifacts       │
    └──────────┬──────────────────┘
               │
               ▼
-   During session
    ┌─────────────────────────────┐
-   │ 1. memory_search(query)     │ → compact index (50 tok/result)
-   │ 2. memory_get(ids=[...])    │ → full content (500 tok/result)
-   │ 3. memory_timeline(id)      │ → chronological thread
+   │ Activation judgement        │
+   │   • goals                   │
+   │   • constraints             │
+   │   • decisions / failures    │
+   │   • artifacts / tensions    │
    └─────────────────────────────┘
               │
               ▼
    ┌─────────────────────────────┐
-   │ UserPromptSubmit hook       │ → always runs active slice
-   │ (active_slice engine)       │    and refreshes working state
+   │ Active Memory Slice         │ → rendered markdown working state
+   │ generate_prompt_context()   │    used by hooks, MCP, and CLI
    └─────────────────────────────┘
 ```
+
+The lower-level recall tools still exist for explicit drilling:
+
+1. `memory_search(query)` -> compact index
+2. `memory_get(ids=[...])` -> full content
+3. `memory_timeline(id)` -> chronological thread
+4. `context_assemble(query, project)` -> optional secondary narrative briefing
 
 **Memory layers (auto-classified at mining time):**
 
@@ -89,9 +99,10 @@ Token efficiency: session start injects ~50 tokens per L1-L3 memory (ID + title 
 
 **Active Memory Slice runtime kernel:**
 
-For ongoing work, `active_memory_slice(query, scope_id)` sits above recall. It
-uses `memory_search`/FTS/graph/playbooks/transcripts as candidate generation,
-then activates a structured working state:
+For ongoing work, `active_memory_slice(query, scope_id)` is the default runtime
+path. It uses `memory_search`/FTS/graph/playbooks/transcripts plus runtime
+environment and current artifacts as candidate generation, then activates a
+structured working state:
 
 ```text
 Memory Vault
@@ -156,11 +167,11 @@ If you are unsure, start with **`/memem-mine`**. It is the safer and cheaper def
 
 ## What happens on my first Claude Code session?
 
-You type your first message. The UserPromptSubmit hook fires and sees zero memories (you just installed it), so it injects a welcome banner into Claude's context. Claude reads the banner, tells you memem is active, and — if you have pre-existing Claude Code sessions — offers to mine them via `/memem-mine-history`.
+At session start, the SessionStart hook tries to prime a slice-first working state for the current project scope. On each user prompt, the UserPromptSubmit hook regenerates the slice for the current query. If you just installed memem and have no relevant context yet, the hooks stay quiet and Claude proceeds normally.
 
 You work normally. The miner daemon runs silently in the background. When your session ends and settles for 5 minutes, the miner extracts memories from the transcript using Claude Haiku and writes them to your vault.
 
-**During the session:** every user prompt goes through `active_memory_slice`, which builds a structured working-state briefing from the relevant memories, playbooks, transcripts, and graph neighbors. You see an active slice prompt with goals, constraints, background, decisions, failure patterns, open tensions, and artifacts. Claude starts with the current working state instead of a generic briefing.
+**During the session:** every user prompt goes through `active_memory_slice`, which builds a structured working-state briefing from the relevant memories, playbooks, transcripts, graph neighbors, environment facts, and current artifacts. You see an active slice prompt with goals, constraints, background, decisions, failure patterns, open tensions, and artifacts. Claude starts with the current working state instead of a generic briefing.
 
 ## 30-Second Setup
 
