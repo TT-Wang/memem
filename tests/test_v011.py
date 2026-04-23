@@ -164,7 +164,7 @@ def test_auto_recall_consumes_primed_flag(tmp_path):
         "timestamp": "2026-04-14T00:00:00Z",
         "primed": True,
     }))
-    vault = _seed_vault(tmp_path, 1, project="memem-plugin", body="auth bug fix constraint")
+    vault = _seed_vault(tmp_path, 1, project=REPO.name, body="auth bug fix constraint")
 
     env = os.environ.copy()
     env["MEMEM_DIR"] = str(memem_dir)
@@ -210,7 +210,7 @@ def test_auto_recall_topic_shift_uses_active_slice(tmp_path):
         "timestamp": "2026-04-14T00:00:00Z",
     }))
 
-    vault = _seed_vault(tmp_path, 1, project="memem-plugin", body="brief project forge workflow")
+    vault = _seed_vault(tmp_path, 1, project=REPO.name, body="brief project forge workflow")
 
     env = os.environ.copy()
     env["MEMEM_DIR"] = str(memem_dir)
@@ -249,7 +249,7 @@ def test_auto_recall_same_topic_still_uses_active_slice(tmp_path):
         "timestamp": "2026-04-14T00:00:00Z",
     }))
 
-    vault = _seed_vault(tmp_path, 1, project="memem-plugin", body="brief project forge workflow")
+    vault = _seed_vault(tmp_path, 1, project=REPO.name, body="brief project forge workflow")
 
     env = os.environ.copy()
     env["MEMEM_DIR"] = str(memem_dir)
