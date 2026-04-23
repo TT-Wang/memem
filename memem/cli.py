@@ -2,6 +2,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 from memem.miner_protocol import FATAL_EXIT_CODE, TRANSIENT_EXIT_CODE
 from memem.mining import FatalMiningError, MiningError, mine_all, mine_session
@@ -15,19 +16,30 @@ from memem.session_state import MINED_SESSIONS_FILE
 from memem.storage import _register_server_pid
 
 
-def _parse_slice_command(argv: list[str]) -> tuple[str, str, bool, bool]:
+def _append_env_list(environment: dict[str, Any], key: str, value: str) -> None:
+    values = environment.setdefault(key, [])
+    if not isinstance(values, list):
+        values = []
+        environment[key] = values
+    values.append(value)
+
+
+def _parse_slice_command(argv: list[str]) -> tuple[str, str, bool, bool, dict[str, Any], bool, bool]:
     raw_json = "--json" in argv
     use_llm = "--no-llm" not in argv
     scope = "default"
     query_file = ""
     query_parts: list[str] = []
+    environment: dict[str, Any] = {}
+    writeback_preview = "--writeback-preview" in argv
+    auto_commit_safe = "--auto-commit-safe" in argv
     skip_next = False
 
     for idx, arg in enumerate(argv[2:], start=2):
         if skip_next:
             skip_next = False
             continue
-        if arg in {"--json", "--no-llm"}:
+        if arg in {"--json", "--no-llm", "--writeback-preview", "--auto-commit-safe"}:
             continue
         if arg == "--query-file":
             try:
@@ -43,6 +55,91 @@ def _parse_slice_command(argv: list[str]) -> tuple[str, str, bool, bool]:
             except IndexError:
                 pass
             continue
+        if arg == "--session-id":
+            try:
+                environment["session_id"] = argv[idx + 1]
+                skip_next = True
+            except IndexError:
+                pass
+            continue
+        if arg in {"--repo-path", "--cwd"}:
+            try:
+                value = argv[idx + 1]
+                environment["repo_path"] = value
+                environment["cwd"] = value
+                skip_next = True
+            except IndexError:
+                pass
+            continue
+        if arg == "--task-mode":
+            try:
+                environment["task_mode"] = argv[idx + 1]
+                skip_next = True
+            except IndexError:
+                pass
+            continue
+        if arg == "--current-file":
+            try:
+                environment["current_file"] = argv[idx + 1]
+                skip_next = True
+            except IndexError:
+                pass
+            continue
+        if arg == "--open-file":
+            try:
+                _append_env_list(environment, "open_files", argv[idx + 1])
+                skip_next = True
+            except IndexError:
+                pass
+            continue
+        if arg == "--modified-file":
+            try:
+                _append_env_list(environment, "modified_files", argv[idx + 1])
+                skip_next = True
+            except IndexError:
+                pass
+            continue
+        if arg == "--artifact-path":
+            try:
+                environment["artifact_path"] = argv[idx + 1]
+                skip_next = True
+            except IndexError:
+                pass
+            continue
+        if arg == "--branch":
+            try:
+                environment["branch"] = argv[idx + 1]
+                skip_next = True
+            except IndexError:
+                pass
+            continue
+        if arg == "--task-name":
+            try:
+                environment["task_name"] = argv[idx + 1]
+                skip_next = True
+            except IndexError:
+                pass
+            continue
+        if arg == "--stakeholder":
+            try:
+                environment["stakeholder"] = argv[idx + 1]
+                skip_next = True
+            except IndexError:
+                pass
+            continue
+        if arg == "--deadline":
+            try:
+                environment["deadline"] = argv[idx + 1]
+                skip_next = True
+            except IndexError:
+                pass
+            continue
+        if arg == "--include-history":
+            environment["include_history"] = True
+            continue
+        if arg == "--include-transcripts":
+            environment["include_transcripts"] = True
+            continue
         query_parts.append(arg)
 
     if query_file:
@@ -56,7 +153,7 @@ def _parse_slice_command(argv: list[str]) -> tuple[str, str, bool, bool]:
     else:
         query = " ".join(query_parts).strip()
 
-    return query, scope, use_llm, raw_json
+    return query, scope, use_llm, raw_json, environment, writeback_preview, auto_commit_safe
 
 
 def dispatch_cli(argv: list[str], mcp) -> None:
@@ -161,12 +258,46 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         return
 
     if cmd in ("slice", "active-slice", "--active-slice"):
-        query, scope, use_llm, raw_json = _parse_slice_command(argv)
+        query, scope, use_llm, raw_json, environment, writeback_preview, auto_commit_safe = _parse_slice_command(argv)
         if not query:
             print("No query provided.")
             return
-        from memem.active_slice_engine import active_slice_response
-        print(active_slice_response(query, scope_id=scope, use_llm=use_llm, raw_json=raw_json))
+        from memem.active_slice_engine import (
+            active_slice_response,
+            generate_active_memory_slice_with_writeback,
+            generate_prompt_context,
+        )
+
+        runtime_environment = environment or None
+        if writeback_preview or auto_commit_safe:
+            writeback_result = generate_active_memory_slice_with_writeback(
+                query,
+                scope_id=scope,
+                environment=runtime_environment,
+                use_llm=use_llm,
+                auto_commit_safe=auto_commit_safe,
+                dry_run=not auto_commit_safe,
+            )
+            if raw_json:
+                print(json.dumps(writeback_result, indent=2, sort_keys=True))
+            else:
+                print(generate_prompt_context(
+                    query,
+                    scope_id=scope,
+                    environment=runtime_environment,
+                    use_llm=use_llm,
+                    mode="slice",
+                    slice_obj=writeback_result["slice"],
+                ))
+            return
+
+        print(active_slice_response(
+            query,
+            scope_id=scope,
+            environment=runtime_environment,
+            use_llm=use_llm,
+            raw_json=raw_json,
+        ))
         return
 
     if cmd == "--mine-session" and len(argv) >= 3:
@@ -217,8 +348,8 @@ def dispatch_cli(argv: list[str], mcp) -> None:
     if cmd == "--install-cron":
         cron_script = str(Path(__file__).resolve().parent / "mine-cron.sh")
         cron_entry = f"0 * * * * bash {cron_script}"
-        result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
-        existing = result.stdout if result.returncode == 0 else ""
+        crontab_result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
+        existing = crontab_result.stdout if crontab_result.returncode == 0 else ""
         if "mine-cron.sh" in existing:
             print("Cron already installed.")
         else:
@@ -383,8 +514,8 @@ def dispatch_cli(argv: list[str], mcp) -> None:
 
         # Miner status
         wrapper = str(Path(__file__).resolve().parent / "miner-wrapper.sh")
-        result = subprocess.run(["bash", wrapper, "status"], capture_output=True, text=True, timeout=5)
-        print(f"  Miner:     {result.stdout.strip()}")
+        miner_status = subprocess.run(["bash", wrapper, "status"], capture_output=True, text=True, timeout=5)
+        print(f"  Miner:     {miner_status.stdout.strip()}")
         print("=" * 40)
         return
 

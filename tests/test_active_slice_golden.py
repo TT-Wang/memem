@@ -118,3 +118,46 @@ def test_golden_debugging_task_surfaces_tensions_without_losing_artifacts(tmp_va
     assert slice_obj["failure_patterns"]
     assert slice_obj["artifacts"]
     assert slice_obj["open_tensions"]
+
+
+def test_golden_proposal_continuity_carries_forward_prior_slice(tmp_vault, tmp_cortex_dir):
+    from memem import obsidian_store
+
+    importlib.reload(obsidian_store)
+    obsidian_store._save_memory(obsidian_store._make_memory(
+        content="The proposal must keep privacy review constraints visible.",
+        title="Proposal privacy review",
+        project="memem",
+        source_type="user",
+        importance=5,
+    ))
+    proposal_path = tmp_vault / "proposal.md"
+    proposal_path.write_text("# Proposal draft\n\nOpen approval questions.\n")
+
+    from memem.active_slice_engine import generate_active_memory_slice
+
+    environment = {
+        "task_mode": "proposal",
+        "session_id": "proposal-session",
+        "artifact_path": str(proposal_path),
+        "stakeholder": "management",
+        "branch": "proposal/continuity",
+    }
+    first = generate_active_memory_slice(
+        "Refine the proposal draft for management review.",
+        scope_id="memem",
+        environment=environment,
+        use_llm=False,
+    )
+    proposal_path.write_text("# Proposal draft\n\nUpdated approval path and rollout notes.\n")
+    second = generate_active_memory_slice(
+        "Finalize the proposal draft for management review while keeping prior constraints visible.",
+        scope_id="memem",
+        environment=environment,
+        use_llm=False,
+    )
+
+    assert second["previous_slice_id"] == first["slice_id"]
+    assert second["carry_forward_summary"]
+    assert second["artifact_progression"]["stage"] in {"drafting", "revising", "review_ready"}
+    assert second["artifacts"]

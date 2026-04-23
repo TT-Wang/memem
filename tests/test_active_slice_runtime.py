@@ -111,3 +111,43 @@ def test_slice_metrics_summary():
     assert metrics["artifacts_count"] == 1
     assert metrics["warnings_count"] == 1
     assert metrics["should_emit_context"] is True
+
+
+def test_generate_active_memory_slice_with_writeback_defaults_to_dry_run(tmp_vault, tmp_cortex_dir):
+    from memem import active_slice_engine, obsidian_store
+
+    importlib.reload(obsidian_store)
+    first = obsidian_store._make_memory(
+        content="Constraint: keep rollout safety checks visible.",
+        title="Rollout safety constraint",
+        project="memem",
+        source_type="user",
+        importance=5,
+    )
+    second = obsidian_store._make_memory(
+        content="Failure pattern: avoid the prior rollout regression.",
+        title="Rollout regression failure",
+        project="memem",
+        source_type="user",
+        importance=5,
+    )
+    obsidian_store._save_memory(first)
+    obsidian_store._save_memory(second)
+
+    before_first = list(obsidian_store._find_memory(first["id"]).get("related", []))
+    before_second = list(obsidian_store._find_memory(second["id"]).get("related", []))
+
+    result = active_slice_engine.generate_active_memory_slice_with_writeback(
+        "Continue the rollout work, keep the safety constraint, and avoid the previous regression.",
+        scope_id="memem",
+        environment={"task_mode": "coding"},
+        use_llm=False,
+    )
+
+    after_first = list(obsidian_store._find_memory(first["id"]).get("related", []))
+    after_second = list(obsidian_store._find_memory(second["id"]).get("related", []))
+
+    assert result["slice"]["writeback_summary"]["dry_run"] is True
+    assert result["delta_results"]
+    assert after_first == before_first
+    assert after_second == before_second

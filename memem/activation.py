@@ -129,28 +129,89 @@ def score_candidate_for_role(candidate: Candidate, role: str, query: str, enviro
     modified_files = {str(path) for path in environment.get("modified_files", [])}
     source_ref = str(candidate.get("source_ref", ""))
     artifact_match = 0.12 if source_ref and source_ref in modified_files | ({current_file} if current_file else set()) else 0.0
+    task_mode = str(environment.get("task_mode", "") or "")
+    continuity_focus = {str(item) for item in environment.get("continuity_focus", []) if str(item)}
+    previous_constraint_ids = {str(item) for item in environment.get("previous_constraint_ids", []) if str(item)}
+    previous_artifact_ids = {str(item) for item in environment.get("previous_artifact_ids", []) if str(item)}
+    previous_artifact_paths = {str(item) for item in environment.get("previous_artifact_paths", []) if str(item)}
+    previous_tension_terms = _token_set(" ".join(str(item) for item in environment.get("previous_open_tension_descriptions", [])))
+
+    focus_aliases = {
+        "constraints": {"constraints"},
+        "decisions": {"decisions"},
+        "preferences": {"preferences"},
+        "failure_patterns": {"failure_patterns"},
+        "artifact_context": {"artifact_context", "artifacts"},
+        "background": {"background"},
+        "goals": {"goals"},
+    }
+    focus_bonus = 0.04 if continuity_focus and focus_aliases.get(role, {role}) & continuity_focus else 0.0
+    continuity_bonus = 0.0
+    if role == "constraints" and candidate.get("memory_id", "") in previous_constraint_ids:
+        continuity_bonus += 0.08
+    if role == "artifact_context" and (
+        candidate.get("artifact_id", "") in previous_artifact_ids
+        or (source_ref and source_ref in previous_artifact_paths)
+    ):
+        continuity_bonus += 0.1
+    if previous_tension_terms and _token_set(text) & previous_tension_terms and role in {"constraints", "failure_patterns", "artifact_context"}:
+        continuity_bonus += 0.04
+
+    task_mode_bonus = 0.0
+    if task_mode == "coding":
+        task_mode_bonus = {
+            "constraints": 0.08,
+            "failure_patterns": 0.1,
+            "artifact_context": 0.12,
+            "background": -0.03,
+        }.get(role, 0.0)
+    elif task_mode == "proposal":
+        task_mode_bonus = {
+            "goals": 0.08,
+            "constraints": 0.08,
+            "decisions": 0.08,
+            "artifact_context": 0.05,
+        }.get(role, 0.0)
+    elif task_mode == "debug":
+        task_mode_bonus = {
+            "constraints": 0.08,
+            "failure_patterns": 0.12,
+            "artifact_context": 0.08,
+        }.get(role, 0.0)
+    elif task_mode == "research":
+        task_mode_bonus = {
+            "goals": 0.06,
+            "background": 0.09,
+            "artifact_context": 0.05,
+        }.get(role, 0.0)
+    elif task_mode == "maintenance":
+        task_mode_bonus = {
+            "constraints": 0.08,
+            "artifact_context": 0.06,
+            "failure_patterns": 0.05,
+        }.get(role, 0.0)
 
     if role == "goals":
         if ctype == "current_query":
             return 1.0
-        return min(1.0, base + importance + (overlap * 0.3) + project_bonus)
+        return min(1.0, base + importance + (overlap * 0.3) + project_bonus + focus_bonus + task_mode_bonus)
     if role == "constraints":
         cue_bonus = 0.34 if _contains(text, _CONSTRAINT_CUES) else -0.1
-        return min(1.0, max(0.0, base + importance + cue_bonus + (overlap * 0.12) + project_bonus))
+        return min(1.0, max(0.0, base + importance + cue_bonus + (overlap * 0.12) + project_bonus + focus_bonus + continuity_bonus + task_mode_bonus))
     if role == "decisions":
         cue_bonus = 0.3 if _contains(text, _DECISION_CUES) else -0.08
-        return min(1.0, max(0.0, base + importance + cue_bonus + artifact_match + (overlap * 0.14) + project_bonus))
+        return min(1.0, max(0.0, base + importance + cue_bonus + artifact_match + (overlap * 0.14) + project_bonus + focus_bonus + task_mode_bonus))
     if role == "preferences":
         cue_bonus = 0.28 if _contains(text, _PREFERENCE_CUES) else -0.08
-        return min(1.0, max(0.0, base + cue_bonus + (overlap * 0.12) + project_bonus))
+        return min(1.0, max(0.0, base + cue_bonus + (overlap * 0.12) + project_bonus + focus_bonus + task_mode_bonus))
     if role == "failure_patterns":
         cue_bonus = 0.34 if _contains(text, _FAILURE_CUES) else -0.08
-        return min(1.0, max(0.0, base + importance + cue_bonus + artifact_match + (overlap * 0.14) + project_bonus))
+        return min(1.0, max(0.0, base + importance + cue_bonus + artifact_match + (overlap * 0.14) + project_bonus + focus_bonus + continuity_bonus + task_mode_bonus))
     if role == "artifact_context":
         cue_bonus = 0.35 if ctype in {"playbook", "artifact", "transcript"} else -0.08
-        return min(1.0, max(0.0, base + cue_bonus + artifact_match + (overlap * 0.12) + project_bonus))
+        return min(1.0, max(0.0, base + cue_bonus + artifact_match + (overlap * 0.12) + project_bonus + focus_bonus + continuity_bonus + task_mode_bonus))
     if role == "background":
-        return min(1.0, base + (overlap * 0.18) + (importance * 0.5))
+        return min(1.0, max(0.0, base + (overlap * 0.18) + (importance * 0.5) + focus_bonus + task_mode_bonus))
     return base
 
 

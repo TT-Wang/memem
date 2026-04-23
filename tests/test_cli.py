@@ -6,6 +6,7 @@ state/vault dirs, and captured stdout. No subprocess spawning.
 
 import importlib
 import io
+import json
 import sys
 from types import SimpleNamespace
 
@@ -158,3 +159,165 @@ def test_active_slice_legacy_alias_still_works(tmp_vault, tmp_cortex_dir, capsys
     out = _dispatch(["active-slice", "Prepare review", "--scope", "memem", "--json", "--no-llm"], capsys)
 
     assert '"goals"' in out.out
+
+
+def test_active_slice_cli_forwards_runtime_environment(monkeypatch, capsys):
+    from memem import active_slice_engine, cli
+
+    importlib.reload(cli)
+
+    captured = {}
+
+    def fake_response(query, scope_id="default", environment=None, use_llm=True, raw_json=False):
+        captured.update({
+            "query": query,
+            "scope_id": scope_id,
+            "environment": dict(environment or {}),
+            "use_llm": use_llm,
+            "raw_json": raw_json,
+        })
+        return "ok"
+
+    monkeypatch.setattr(active_slice_engine, "active_slice_response", fake_response)
+
+    cli.dispatch_cli(
+        [
+            "memem",
+            "slice",
+            "continue auth fix",
+            "--scope",
+            "memem",
+            "--session-id",
+            "session-77",
+            "--cwd",
+            "/tmp/repo",
+            "--task-mode",
+            "coding",
+            "--current-file",
+            "src/auth.py",
+            "--open-file",
+            "README.md",
+            "--modified-file",
+            "src/auth.py",
+            "--branch",
+            "feature/auth",
+            "--include-history",
+            "--include-transcripts",
+            "--no-llm",
+        ],
+        SimpleNamespace(run=lambda **_: None),
+    )
+    out = capsys.readouterr()
+
+    assert out.out.strip() == "ok"
+    assert captured["scope_id"] == "memem"
+    assert captured["use_llm"] is False
+    assert captured["environment"]["session_id"] == "session-77"
+    assert captured["environment"]["repo_path"] == "/tmp/repo"
+    assert captured["environment"]["cwd"] == "/tmp/repo"
+    assert captured["environment"]["task_mode"] == "coding"
+    assert captured["environment"]["current_file"] == "src/auth.py"
+    assert captured["environment"]["open_files"] == ["README.md"]
+    assert captured["environment"]["modified_files"] == ["src/auth.py"]
+    assert captured["environment"]["branch"] == "feature/auth"
+    assert captured["environment"]["include_history"] is True
+    assert captured["environment"]["include_transcripts"] is True
+
+
+def test_active_slice_cli_auto_commit_safe_uses_writeback_engine(monkeypatch, capsys):
+    from memem import active_slice_engine, cli
+
+    importlib.reload(cli)
+
+    captured = {}
+    slice_obj = {
+        "slice_id": "slice_123",
+        "scope_id": "memem",
+        "query": "continue auth fix",
+        "activation_mode": "heuristic",
+        "confidence": 0.8,
+        "goals": [{"title": "Continue auth fix"}],
+        "constraints": [],
+        "active_background": [],
+        "decisions": [],
+        "preferences": [],
+        "failure_patterns": [],
+        "artifacts": [],
+        "open_tensions": [],
+        "resolved_tensions": [],
+        "candidate_deltas": [],
+        "delta_results": [],
+        "writeback_summary": {"status": "committed", "dry_run": False},
+        "warnings": [],
+        "should_emit_context": True,
+    }
+
+    def fake_with_writeback(query, scope_id="default", environment=None, use_llm=True, auto_commit_safe=False, dry_run=True):
+        captured.update({
+            "query": query,
+            "scope_id": scope_id,
+            "environment": dict(environment or {}),
+            "use_llm": use_llm,
+            "auto_commit_safe": auto_commit_safe,
+            "dry_run": dry_run,
+        })
+        return {"slice": slice_obj, "delta_results": []}
+
+    monkeypatch.setattr(active_slice_engine, "generate_active_memory_slice_with_writeback", fake_with_writeback)
+    monkeypatch.setattr(
+        active_slice_engine,
+        "generate_prompt_context",
+        lambda *args, **kwargs: "rendered slice",
+    )
+
+    cli.dispatch_cli(
+        [
+            "memem",
+            "slice",
+            "continue auth fix",
+            "--scope",
+            "memem",
+            "--session-id",
+            "session-88",
+            "--task-mode",
+            "debug",
+            "--cwd",
+            "/tmp/repo",
+            "--auto-commit-safe",
+            "--no-llm",
+        ],
+        SimpleNamespace(run=lambda **_: None),
+    )
+    out = capsys.readouterr()
+
+    assert out.out.strip() == "rendered slice"
+    assert captured["scope_id"] == "memem"
+    assert captured["environment"]["session_id"] == "session-88"
+    assert captured["environment"]["task_mode"] == "debug"
+    assert captured["auto_commit_safe"] is True
+    assert captured["dry_run"] is False
+
+
+def test_active_slice_cli_writeback_preview_json_returns_full_result(monkeypatch, capsys):
+    from memem import active_slice_engine, cli
+
+    importlib.reload(cli)
+
+    monkeypatch.setattr(
+        active_slice_engine,
+        "generate_active_memory_slice_with_writeback",
+        lambda *args, **kwargs: {
+            "slice": {"slice_id": "slice_456", "writeback_summary": {"status": "dry_run"}},
+            "delta_results": [{"delta_type": "add_related_link", "status": "not_run"}],
+        },
+    )
+
+    cli.dispatch_cli(
+        ["memem", "slice", "continue auth fix", "--writeback-preview", "--json", "--no-llm"],
+        SimpleNamespace(run=lambda **_: None),
+    )
+    out = capsys.readouterr()
+    payload = json.loads(out.out)
+
+    assert payload["slice"]["slice_id"] == "slice_456"
+    assert payload["delta_results"][0]["delta_type"] == "add_related_link"

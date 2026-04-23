@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +41,31 @@ _TEXT_SUFFIXES = {
 }
 _MAX_FILE_BYTES = 256_000
 _MAX_CONTENT_CHARS = 1_200
+
+
+def _stable_artifact_id(source_type: str, source_ref: str, title: str, scope_id: str) -> str:
+    payload = {
+        "project": _normalize_scope_id(scope_id),
+        "source_ref": source_ref,
+        "source_type": source_type,
+        "title": title,
+    }
+    encoded = json.dumps(payload, sort_keys=True)
+    return f"artifact_{hashlib.sha1(encoded.encode('utf-8')).hexdigest()[:12]}"
+
+
+def _apply_stable_identity(candidate: Candidate, scope_id: str, source_ref: str) -> Candidate:
+    stable_id = _stable_artifact_id(
+        candidate.get("source_type", "artifact"),
+        source_ref=source_ref,
+        title=candidate.get("title", ""),
+        scope_id=scope_id,
+    )
+    candidate["candidate_id"] = stable_id
+    candidate["artifact_id"] = stable_id
+    if source_ref:
+        candidate["source_ref"] = source_ref
+    return candidate
 
 
 def _is_probably_text(path: Path) -> bool:
@@ -81,19 +108,76 @@ def repo_file_candidate(path: str, scope_id: str, score: float = 0.6, reason: st
         project=_normalize_scope_id(scope_id),
     )
     candidate["source_reason"] = reason
-    return candidate
+    return _apply_stable_identity(candidate, scope_id=scope_id, source_ref=str(file_path))
 
 
-def _synthetic_artifact(title: str, content: str, scope_id: str, score: float, reason: str) -> Candidate:
+def _synthetic_artifact(
+    title: str,
+    content: str,
+    scope_id: str,
+    score: float,
+    reason: str,
+    source_ref: str,
+) -> Candidate:
     candidate = normalize_artifact_candidate(
         "draft",
         title,
         content,
+        path=source_ref,
         score=score,
         project=_normalize_scope_id(scope_id),
     )
     candidate["source_reason"] = reason
-    return candidate
+    return _apply_stable_identity(candidate, scope_id=scope_id, source_ref=source_ref)
+
+
+def _task_context_candidate(environment: dict[str, Any], scope_id: str) -> Candidate | None:
+    task_mode = str(environment.get("task_mode", "") or "")
+    branch = str(environment.get("branch", "") or "")
+    task_name = str(environment.get("task_name", "") or "")
+    repo_path = str(environment.get("repo_path", "") or "")
+    stakeholder = str(environment.get("stakeholder", "") or "")
+    artifact_path = str(environment.get("artifact_path", "") or "")
+    current_file = str(environment.get("current_file", "") or "")
+    open_files = [str(path) for path in environment.get("open_files", []) if str(path)]
+
+    lines: list[str] = []
+    if task_mode:
+        lines.append(f"Mode: {task_mode}")
+    if task_name:
+        lines.append(f"Task: {task_name}")
+    if branch:
+        lines.append(f"Branch: {branch}")
+    if repo_path:
+        lines.append(f"Repo: {repo_path}")
+    if stakeholder:
+        lines.append(f"Stakeholder: {stakeholder}")
+    if artifact_path:
+        lines.append(f"Artifact: {artifact_path}")
+    if current_file:
+        lines.append(f"Current file: {current_file}")
+    if open_files:
+        preview = ", ".join(open_files[:3])
+        if len(open_files) > 3:
+            preview += f", +{len(open_files) - 3} more"
+        lines.append(f"Open files: {preview}")
+    has_explicit_artifact_anchor = bool(branch or task_name or artifact_path or current_file or open_files)
+    if not lines or not has_explicit_artifact_anchor:
+        return None
+
+    titles = {
+        "coding": "Coding context",
+        "proposal": "Proposal context",
+        "debug": "Debug context",
+        "research": "Research context",
+        "session_start": "Session context",
+        "maintenance": "Maintenance context",
+    }
+    title = titles.get(task_mode, "Task context")
+    anchor = artifact_path or current_file or branch or task_name or repo_path or _normalize_scope_id(scope_id)
+    source_ref = f"context://{task_mode or 'task'}/{anchor}"
+    reason = f"{task_mode or 'task'} continuity context"
+    return _synthetic_artifact(title, ". ".join(lines), scope_id, 0.58, reason, source_ref)
 
 
 def artifact_candidates_from_environment(environment: dict[str, Any], scope_id: str) -> list[Candidate]:
@@ -124,20 +208,8 @@ def artifact_candidates_from_environment(environment: dict[str, Any], scope_id: 
     if isinstance(artifact_path, str) and artifact_path:
         add_file(artifact_path, 0.78, "draft artifact context")
 
-    branch = environment.get("branch")
-    if isinstance(branch, str) and branch:
-        content = f"Current branch: {branch}"
-        task_name = environment.get("task_name")
-        if isinstance(task_name, str) and task_name:
-            content += f". Task: {task_name}"
-        candidates.append(_synthetic_artifact("Branch context", content, scope_id, 0.58, "branch/task artifact proxy"))
-    elif isinstance(environment.get("task_name"), str) and environment["task_name"]:
-        candidates.append(_synthetic_artifact(
-            "Task context",
-            f"Current task: {environment['task_name']}",
-            scope_id,
-            0.55,
-            "task artifact proxy",
-        ))
+    context_candidate = _task_context_candidate(environment, scope_id)
+    if context_candidate:
+        candidates.append(context_candidate)
 
     return candidates

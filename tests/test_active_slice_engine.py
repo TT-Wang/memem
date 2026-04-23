@@ -217,3 +217,273 @@ def test_generate_candidates_uses_normalized_environment_fields(tmp_path):
     assert "task_mode" in environment_titles
     assert "branch" in environment_titles
     assert str(current_file) in artifact_refs
+
+
+def test_generate_active_memory_slice_resolves_stale_candidate_ids_via_memory_and_artifact_ids(monkeypatch):
+    from memem import active_slice_engine
+    from memem.active_slice import normalize_artifact_candidate, normalize_memory_candidate
+
+    memory = normalize_memory_candidate({
+        "id": "abcdef1234567890",
+        "title": "Auth constraint",
+        "essence": "Preserve session refresh ordering during auth fixes.",
+        "project": "memem",
+        "importance": 5,
+        "layer": 1,
+    }, score=0.91)
+    artifact = normalize_artifact_candidate(
+        "repo_file",
+        "auth.py",
+        "Current auth file.",
+        path="/tmp/auth.py",
+        project="memem",
+    )
+
+    monkeypatch.setattr(active_slice_engine, "generate_candidates", lambda *args, **kwargs: {
+        "current_goal_candidates": [],
+        "memory_candidates": [memory],
+        "playbook_candidate": None,
+        "transcript_candidates": [],
+        "artifact_candidates": [artifact],
+        "environment_candidates": [],
+    })
+    monkeypatch.setattr(active_slice_engine, "judge_activation_heuristically", lambda *args, **kwargs: {
+        "constraints": [{
+            "candidate_id": "stale-memory-candidate",
+            "memory_id": memory["memory_id"],
+            "why": "fallback through memory id",
+            "score": 0.92,
+        }],
+        "artifact_context": [{
+            "candidate_id": "stale-artifact-candidate",
+            "artifact_id": artifact["artifact_id"],
+            "why": "fallback through artifact id",
+            "score": 0.83,
+        }],
+        "activation_mode": "heuristic",
+        "confidence": 0.77,
+    })
+    monkeypatch.setattr(active_slice_engine, "propose_deltas_from_slice", lambda slice_obj: [])
+
+    slice_obj = active_slice_engine.generate_active_memory_slice(
+        "Continue auth fix",
+        scope_id="memem",
+        use_llm=False,
+    )
+
+    assert slice_obj["constraints"]
+    assert slice_obj["constraints"][0]["memory_id"] == memory["memory_id"]
+    assert slice_obj["artifacts"]
+    assert slice_obj["artifacts"][0]["artifact_id"] == artifact["artifact_id"]
+
+
+def test_generate_active_memory_slice_keeps_writeback_proposed_count_consistent(monkeypatch):
+    from memem import active_slice_engine
+    from memem.active_slice import normalize_memory_candidate
+
+    memory = normalize_memory_candidate({
+        "id": "feedface12345678",
+        "title": "Proposal constraint",
+        "essence": "Keep rollout constraints visible.",
+        "project": "memem",
+        "importance": 4,
+        "layer": 2,
+    }, score=0.82)
+
+    monkeypatch.setattr(active_slice_engine, "generate_candidates", lambda *args, **kwargs: {
+        "current_goal_candidates": [],
+        "memory_candidates": [memory],
+        "playbook_candidate": None,
+        "transcript_candidates": [],
+        "artifact_candidates": [],
+        "environment_candidates": [],
+    })
+    monkeypatch.setattr(active_slice_engine, "judge_activation_heuristically", lambda *args, **kwargs: {
+        "constraints": [{"memory_id": memory["memory_id"], "why": "constraint memory", "score": 0.88}],
+        "activation_mode": "heuristic",
+        "confidence": 0.72,
+    })
+    monkeypatch.setattr(active_slice_engine, "propose_deltas_from_slice", lambda slice_obj: [
+        {"delta_id": "delta_1", "delta_type": "add_related_link", "reason": "linked memories"},
+        {"delta_id": "delta_2", "delta_type": "save_new_memory", "reason": "durable lesson"},
+    ])
+
+    slice_obj = active_slice_engine.generate_active_memory_slice(
+        "Continue rollout proposal",
+        scope_id="memem",
+        use_llm=False,
+    )
+
+    assert len(slice_obj["candidate_deltas"]) == 2
+    assert slice_obj["writeback_summary"]["proposed_count"] == 2
+
+
+def test_generate_active_memory_slice_persists_continuity_history(tmp_vault, tmp_cortex_dir):
+    from memem import active_slice_engine, obsidian_store, slice_history
+
+    importlib.reload(obsidian_store)
+    importlib.reload(slice_history)
+
+    obsidian_store._save_memory(obsidian_store._make_memory(
+        content="Auth fixes must preserve session refresh ordering.",
+        title="Auth continuity constraint",
+        project="memem",
+        source_type="user",
+        importance=5,
+    ))
+    current_file = tmp_vault / "auth.py"
+    current_file.write_text("def login():\n    return 'ok'\n")
+
+    environment = {
+        "task_mode": "coding",
+        "session_id": "session-42",
+        "current_file": str(current_file),
+        "modified_files": [str(current_file)],
+        "branch": "fix/auth-continuity",
+    }
+    first = active_slice_engine.generate_active_memory_slice(
+        "Continue the auth fix and keep the refresh ordering intact.",
+        scope_id="memem",
+        environment=environment,
+        use_llm=False,
+    )
+    current_file.write_text("def login(user):\n    return user\n")
+    second = active_slice_engine.generate_active_memory_slice(
+        "Finish the auth fix and keep the refresh ordering intact.",
+        scope_id="memem",
+        environment=environment,
+        use_llm=False,
+    )
+
+    history = slice_history.load_slice_history(scope_id="memem", session_id="session-42", limit=10)
+
+    assert len(history) == 2
+    assert second["previous_slice_id"] == first["slice_id"]
+    assert second["artifact_progression"]["stage"] in {"drafting", "revising", "review_ready"}
+    assert any("Artifact in progress" in line for line in second["carry_forward_summary"])
+
+
+def test_generate_active_memory_slice_with_writeback_auto_commit_safe_links_memories(tmp_vault, tmp_cortex_dir):
+    from memem import active_slice_engine, obsidian_store
+
+    importlib.reload(obsidian_store)
+
+    constraint = obsidian_store._make_memory(
+        content="Constraint: keep rollout safety checks visible during auth changes.",
+        title="Rollout safety constraint",
+        project="memem",
+        source_type="user",
+        importance=5,
+    )
+    failure = obsidian_store._make_memory(
+        content="Failure pattern: avoid the previous auth regression during rollout.",
+        title="Auth regression failure",
+        project="memem",
+        source_type="user",
+        importance=5,
+    )
+    obsidian_store._save_memory(constraint)
+    obsidian_store._save_memory(failure)
+
+    result = active_slice_engine.generate_active_memory_slice_with_writeback(
+        "Continue the auth rollout, keep the safety constraint, and avoid the prior regression.",
+        scope_id="memem",
+        environment={"task_mode": "coding"},
+        use_llm=False,
+        auto_commit_safe=True,
+        dry_run=False,
+    )
+
+    refreshed_constraint = obsidian_store._find_memory(constraint["id"])
+    refreshed_failure = obsidian_store._find_memory(failure["id"])
+
+    assert result["delta_results"]
+    assert any(item.get("delta_type") == "add_related_link" for item in result["delta_results"])
+    assert result["slice"]["writeback_summary"]["status"] in {"committed", "partial"}
+    assert failure["id"][:8] in refreshed_constraint.get("related", [])
+    assert constraint["id"][:8] in refreshed_failure.get("related", [])
+
+
+def test_generate_active_memory_slice_does_not_leak_previous_slice_without_continuity_mode(tmp_vault, tmp_cortex_dir):
+    from memem import active_slice_engine, obsidian_store
+
+    importlib.reload(obsidian_store)
+    obsidian_store._save_memory(obsidian_store._make_memory(
+        content="Constraint: keep auth rollback safe.",
+        title="Auth rollback constraint",
+        project="memem",
+        source_type="user",
+        importance=5,
+    ))
+
+    first = active_slice_engine.generate_active_memory_slice(
+        "Continue the auth rollback task.",
+        scope_id="memem",
+        environment={"task_mode": "coding", "session_id": "session-a"},
+        use_llm=False,
+    )
+    second = active_slice_engine.generate_active_memory_slice(
+        "Start a different auth task.",
+        scope_id="memem",
+        environment={"task_mode": "coding"},
+        use_llm=False,
+    )
+
+    assert first["slice_id"]
+    assert second["previous_slice_id"] == ""
+
+
+def test_continuity_context_excludes_writeback_preview_sections(monkeypatch):
+    from memem import active_slice_engine
+    from memem.active_slice import normalize_memory_candidate
+
+    seen_environments: list[dict] = []
+    memory = normalize_memory_candidate({
+        "id": "abc1234512345678",
+        "title": "Auth constraint",
+        "essence": "Keep auth rollback safe.",
+        "project": "memem",
+        "importance": 5,
+        "layer": 1,
+    }, score=0.91)
+
+    monkeypatch.setattr(active_slice_engine, "generate_candidates", lambda *args, **kwargs: {
+        "current_goal_candidates": [],
+        "memory_candidates": [memory],
+        "playbook_candidate": None,
+        "transcript_candidates": [],
+        "artifact_candidates": [],
+        "environment_candidates": [],
+    })
+
+    def _judge(query, scope_id, environment, candidate_bundle):
+        seen_environments.append(dict(environment))
+        return {
+            "constraints": [{"memory_id": memory["memory_id"], "why": "constraint memory", "score": 0.9}],
+            "activation_mode": "heuristic",
+            "confidence": 0.75,
+        }
+
+    monkeypatch.setattr(active_slice_engine, "judge_activation_heuristically", _judge)
+    monkeypatch.setattr(active_slice_engine, "propose_deltas_from_slice", lambda slice_obj: [
+        {"delta_id": "delta_1", "delta_type": "add_related_link", "reason": "link"},
+    ])
+
+    active_slice_engine.generate_active_memory_slice_with_writeback(
+        "Continue auth work.",
+        scope_id="memem",
+        environment={"task_mode": "coding", "session_id": "session-c"},
+        use_llm=False,
+        dry_run=True,
+    )
+    active_slice_engine.generate_active_memory_slice(
+        "Continue auth work again.",
+        scope_id="memem",
+        environment={"task_mode": "coding", "session_id": "session-c"},
+        use_llm=False,
+    )
+
+    continuity_context = seen_environments[-1].get("continuity_context", "")
+    assert continuity_context
+    assert "Candidate Deltas" not in continuity_context
+    assert "Writeback" not in continuity_context

@@ -99,10 +99,10 @@ Token efficiency: session start injects ~50 tokens per L1-L3 memory (ID + title 
 
 **Active Memory Slice runtime kernel:**
 
-For ongoing work, `active_memory_slice(query, scope_id)` is the default runtime
-path. It uses `memory_search`/FTS/graph/playbooks/transcripts plus runtime
-environment and current artifacts as candidate generation, then activates a
-structured working state:
+For ongoing work, `active_memory_slice(query, scope_id, ...)` is the default
+runtime path. It uses `memory_search`/FTS/graph/playbooks/transcripts plus
+runtime environment and current artifacts as candidate generation, then
+activates a structured working state:
 
 ```text
 Memory Vault
@@ -115,7 +115,13 @@ Memory Vault
 
 The slice explicitly separates goals, constraints, background, decisions,
 preferences, failure patterns, artifacts, open tensions, and candidate deltas.
-Delta proposals are advisory in v1 and are not auto-committed to the vault.
+If you pass `session_id` together with runtime context such as `task_mode` and
+`repo_path`, memem also carries forward continuity across slices and records
+slice history under `~/.memem/`.
+
+Default runtime behavior is still non-mutating. Delta proposals are validated
+and surfaced in the slice, but safe writeback only runs when you opt in via
+`writeback_preview=True` or `auto_commit_safe=True`.
 
 Opt-in features:
 - **`MEMEM_SHOW_BANNER=1`** — show a one-line status banner at session start (off by default)
@@ -171,7 +177,7 @@ At session start, the SessionStart hook tries to prime a slice-first working sta
 
 You work normally. The miner daemon runs silently in the background. When your session ends and settles for 5 minutes, the miner extracts memories from the transcript using Claude Haiku and writes them to your vault.
 
-**During the session:** every user prompt goes through `active_memory_slice`, which builds a structured working-state briefing from the relevant memories, playbooks, transcripts, graph neighbors, environment facts, and current artifacts. You see an active slice prompt with goals, constraints, background, decisions, failure patterns, open tensions, and artifacts. Claude starts with the current working state instead of a generic briefing.
+**During the session:** every user prompt goes through `active_memory_slice`, which builds a structured working-state briefing from the relevant memories, playbooks, transcripts, graph neighbors, environment facts, and current artifacts. The hooks automatically pass session id and working directory, and the prompt hook infers a task mode when the host does not provide one, so ongoing work can carry constraints, artifacts, and tensions forward across slices. You see an active slice prompt with goals, constraints, background, decisions, failure patterns, open tensions, and artifacts. Claude starts with the current working state instead of a generic briefing.
 
 ## 30-Second Setup
 
@@ -243,11 +249,27 @@ You can point memem elsewhere via `MEMEM_DIR` and `MEMEM_OBSIDIAN_VAULT` env var
 | `memory_list(scope_id)` | List all memories with stats, grouped by project. |
 | `memory_import(source_path)` | Bulk import from files, directories, or chat exports. |
 | `transcript_search(query)` | Search raw Claude Code session JSONL logs (not the mined memories). |
-| `context_assemble(query, project)` | On-demand query-tailored briefing from playbooks + memories + transcripts. |
+| `context_assemble(query, project)` | On-demand query-tailored briefing from playbooks + memories + transcripts. Explicit secondary projection only. |
 | `memory_graph(memory_id)` | Inspect typed/scored graph neighbors for one memory. |
 | `memory_graph_audit()` | Report graph quality issues: orphans, dead links, hubs, stale edges. |
 | `memory_graph_rebuild(scope_id)` | Rebuild the graph side index from the Obsidian vault. |
-| `active_memory_slice(query, scope_id)` | Build a structured runtime working state for current work. |
+| `active_memory_slice(query, scope_id, session_id?, task_mode?, repo_path?, writeback_preview?, auto_commit_safe?)` | Build a structured runtime working state for current work, with optional continuity and controlled writeback. |
+
+## How do I inspect slices or writeback manually?
+
+Use the CLI when you want raw slice JSON, continuity debugging, or explicit
+writeback preview:
+
+```bash
+python3 -m memem.server slice "continue auth rollout" --scope memem --session-id sess-42 --cwd "$PWD" --task-mode coding --json --no-llm
+python3 -m memem.server slice "continue auth rollout" --scope memem --session-id sess-42 --cwd "$PWD" --task-mode coding --writeback-preview --json --no-llm
+python3 -m memem.server slice "continue auth rollout" --scope memem --session-id sess-42 --cwd "$PWD" --task-mode coding --auto-commit-safe --json --no-llm
+```
+
+Semantics:
+- default `slice` is read-side and non-mutating
+- `--writeback-preview` runs the delta pipeline in dry-run mode
+- `--auto-commit-safe` commits only deltas classified as auto-safe
 
 ## What slash commands does memem add?
 

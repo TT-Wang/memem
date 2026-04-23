@@ -24,7 +24,10 @@ class DeltaProposal(TypedDict, total=False):
     confidence: float
     proposed_content: str
     proposed_title: str
+    proposed_tags: list[str]
+    proposed_importance: int
     source_slice_id: str
+    scope_id: str
     requires_user_confirmation: bool
 
 
@@ -33,10 +36,23 @@ def _delta_id(delta_type: str, payload: dict) -> str:
     return f"delta_{hashlib.sha1(encoded.encode('utf-8')).hexdigest()[:12]}"
 
 
+def _unique_ids(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        normalized = str(value or "").strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        ordered.append(normalized)
+    return ordered
+
+
 def propose_deltas_from_slice(slice_obj: ActiveMemorySlice) -> list[DeltaProposal]:
     """Propose safe memory changes without mutating the vault."""
     deltas: list[DeltaProposal] = []
     slice_id = slice_obj.get("slice_id", "")
+    scope_id = str(slice_obj.get("scope_id", "") or "general")
 
     for tension in slice_obj.get("open_tensions", [])[:3]:
         description = tension.get("description", "")
@@ -46,14 +62,36 @@ def propose_deltas_from_slice(slice_obj: ActiveMemorySlice) -> list[DeltaProposa
         deltas.append({
             "delta_id": _delta_id("add_open_tension_memory", payload),
             "delta_type": "add_open_tension_memory",
-            "target_memory_ids": tension.get("linked_memory_ids", []),
+            "target_memory_ids": _unique_ids(tension.get("linked_memory_ids", [])),
             "reason": "Open tension surfaced in active slice.",
-            "evidence": {"tension": tension},
+            "evidence": {"tension": tension, "scope_id": scope_id},
             "confidence": 0.55,
             "proposed_title": f"Open tension — {description[:80]}",
             "proposed_content": description,
             "source_slice_id": slice_id,
+            "scope_id": scope_id,
+            "proposed_tags": ["open-tension"],
             "requires_user_confirmation": True,
+        })
+
+    for tension in slice_obj.get("resolved_tensions", [])[:2]:
+        description = tension.get("description", "")
+        if not description:
+            continue
+        payload = {"description": description, "slice_id": slice_id, "scope_id": scope_id}
+        deltas.append({
+            "delta_id": _delta_id("save_new_memory", payload),
+            "delta_type": "save_new_memory",
+            "target_memory_ids": _unique_ids(tension.get("linked_memory_ids", [])),
+            "reason": "Resolved tension may be worth preserving as a durable memory.",
+            "evidence": {"resolved_tension": tension, "scope_id": scope_id},
+            "confidence": 0.7,
+            "proposed_title": f"Resolved tension — {description[:80]}",
+            "proposed_content": description,
+            "source_slice_id": slice_id,
+            "scope_id": scope_id,
+            "proposed_tags": ["resolved-tension"],
+            "requires_user_confirmation": False,
         })
 
     # Relation deltas stay conservative: propose links between the strongest
@@ -70,17 +108,19 @@ def propose_deltas_from_slice(slice_obj: ActiveMemorySlice) -> list[DeltaProposa
             mid = item.get("memory_id", "")
             if mid:
                 selected.append(mid)
-    if len(selected) >= 2:
-        payload = {"ids": selected[:2], "slice_id": slice_id}
+    unique_selected = _unique_ids(selected)
+    if len(unique_selected) >= 2:
+        payload = {"ids": unique_selected[:2], "slice_id": slice_id, "scope_id": scope_id}
         deltas.append({
             "delta_id": _delta_id("add_related_link", payload),
             "delta_type": "add_related_link",
-            "target_memory_ids": selected[:2],
+            "target_memory_ids": unique_selected[:2],
             "reason": "Selected memories co-activated in the same active slice.",
-            "evidence": {"slice_id": slice_id},
-            "confidence": 0.5,
+            "evidence": {"slice_id": slice_id, "scope_id": scope_id},
+            "confidence": 0.78,
             "source_slice_id": slice_id,
-            "requires_user_confirmation": True,
+            "scope_id": scope_id,
+            "requires_user_confirmation": False,
         })
 
     return deltas

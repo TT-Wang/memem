@@ -3,7 +3,8 @@
 #
 # Flow:
 #   1. Load .last-brief.json for telemetry and session bookkeeping
-#   2. Run slice-first prompt generation for every user prompt
+#   2. Infer or forward runtime task mode and continuity context
+#   3. Run slice-first prompt generation for every user prompt
 #   3. Update .last-brief.json only after successful slice generation
 #
 # The hook no longer gates activation on keyword overlap. The active slice
@@ -79,12 +80,65 @@ def detect_scope(hook: dict) -> str:
         return "default"
     return os.path.basename(cwd) or "default"
 
-def run_active_slice(query: str, scope: str) -> str:
+def infer_task_mode(hook: dict, message: str) -> str:
+    explicit = str(
+        hook.get("task_mode")
+        or hook.get("taskMode")
+        or os.environ.get("MEMEM_HOOK_TASK_MODE", "")
+    ).strip().lower().replace("-", "_")
+    aliases = {
+        "code": "coding",
+        "coding": "coding",
+        "implement": "coding",
+        "implementation": "coding",
+        "debug": "debug",
+        "debugging": "debug",
+        "bugfix": "debug",
+        "proposal": "proposal",
+        "plan": "proposal",
+        "planning": "proposal",
+        "spec": "proposal",
+        "research": "research",
+        "investigate": "research",
+        "investigation": "research",
+        "maintenance": "maintenance",
+        "cleanup": "maintenance",
+    }
+    if explicit:
+        mapped = aliases.get(explicit, explicit)
+        if mapped in {"coding", "proposal", "debug", "research", "maintenance", "session_start"}:
+            return mapped
+
+    lower = message.lower()
+    debug_terms = ("error", "failing", "failure", "bug", "regression", "traceback", "stack trace", "broken", "fix")
+    proposal_terms = ("proposal", "spec", "design", "plan", "roadmap", "review")
+    research_terms = ("research", "compare", "evaluate", "investigate", "tradeoff", "alternatives")
+    maintenance_terms = ("cleanup", "upgrade", "bump", "chore", "refactor", "maintenance")
+
+    if any(term in lower for term in debug_terms):
+        return "debug"
+    if any(term in lower for term in proposal_terms):
+        return "proposal"
+    if any(term in lower for term in research_terms):
+        return "research"
+    if any(term in lower for term in maintenance_terms):
+        return "maintenance"
+    return "coding"
+
+
+def run_active_slice(query: str, scope: str, session_id: str, cwd: str, task_mode: str) -> str:
     try:
         env = os.environ.copy()
         env["PYTHONPATH"] = plugin_root + os.pathsep + env.get("PYTHONPATH", "")
+        cmd = [sys.executable, "-m", "memem.server", "slice", "--query-file", "-", "--scope", scope, "--no-llm"]
+        if session_id:
+            cmd.extend(["--session-id", session_id])
+        if cwd:
+            cmd.extend(["--cwd", cwd])
+        if task_mode:
+            cmd.extend(["--task-mode", task_mode])
         result = subprocess.run(
-            [sys.executable, "-m", "memem.server", "slice", "--query-file", "-", "--scope", scope, "--no-llm"],
+            cmd,
             input=query,
             capture_output=True,
             text=True,
@@ -106,6 +160,8 @@ except Exception:
 session_id = hook.get("session_id", "") or ""
 message = hook.get("message", hook.get("query", "")) or ""
 scope = detect_scope(hook)
+cwd = str(hook.get("cwd") or os.environ.get("PWD") or os.getcwd())
+task_mode = infer_task_mode(hook, message)
 
 # If no plugin root, we cannot generate slice-first runtime context — emit empty
 if not plugin_root or plugin_root == '${CLAUDE_PLUGIN_ROOT}':
@@ -129,7 +185,7 @@ last_session  = last_data.get("session_id", "")
 last_primed   = last_data.get("primed", False)
 
 # Run active slice generation
-assembled = run_active_slice(message, scope)
+assembled = run_active_slice(message, scope, session_id, cwd, task_mode)
 
 # If slice generation failed or returned empty, leave last-brief UNTOUCHED so the
 # next prompt with similar keywords will retry. Silent starvation was the

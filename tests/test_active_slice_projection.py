@@ -70,3 +70,37 @@ def test_render_slice_respects_should_emit_context_false():
     })
 
     assert rendered == ""
+
+
+def test_render_slice_surfaces_continuity_and_writeback_when_present():
+    from memem.active_slice import render_slice_as_prompt_context
+
+    rendered = render_slice_as_prompt_context({
+        "scope_id": "memem",
+        "query": "Continue proposal revision",
+        "activation_mode": "heuristic",
+        "confidence": 0.81,
+        "should_emit_context": True,
+        "task_mode": "proposal",
+        "previous_slice_id": "slice_prev",
+        "goals": [{"title": "Continue proposal", "summary": "Carry forward the draft revision."}],
+        "constraints": [],
+        "decisions": [],
+        "failure_patterns": [],
+        "open_tensions": [{"severity": "medium", "description": "Review ownership is still open.", "why_open": "waiting on stakeholder"}],
+        "resolved_tensions": [{"severity": "low", "description": "Naming issue resolved.", "why_open": "closed in prior draft"}],
+        "carry_forward_summary": ["Keep the rollout constraint visible.", "Preserve the approval path."],
+        "artifacts": [{"title": "proposal.md", "summary": "Current proposal draft."}],
+        "preferences": [],
+        "active_background": [],
+        "candidate_deltas": [],
+        "delta_results": [{"delta_type": "add_related_link", "status": "dry_run", "commit_policy": "auto_safe", "result_message": "validated only"}],
+        "writeback_summary": {"status": "dry_run", "proposed_count": 1, "auto_committed_count": 0, "manual_review_count": 1, "blocked_count": 0, "rejected_count": 0, "dry_run": True},
+        "warnings": [],
+    })
+
+    assert "- task mode: proposal" in rendered
+    assert "- previous slice: slice_prev" in rendered
+    assert "## Resolved Tensions" in rendered
+    assert "## Carry Forward" in rendered
+    assert "## Writeback" in rendered

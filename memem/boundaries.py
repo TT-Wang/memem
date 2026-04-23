@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from memem.active_slice import Candidate
+from memem.active_slice import Candidate, candidate_reference_keys
 from memem.models import _normalize_scope_id
 from memem.obsidian_store import _word_set
 
@@ -108,6 +108,15 @@ def _cap_entries(entries: list[dict[str, Any]], cap: int, ignored: list[dict[str
     return kept
 
 
+def _resolve_candidate_entry(entry: dict[str, Any], by_id: dict[str, Candidate]) -> tuple[Candidate | None, str]:
+    refs = candidate_reference_keys(entry)
+    for ref in refs:
+        candidate = by_id.get(ref)
+        if candidate:
+            return candidate, ref
+    return None, (refs[0] if refs else "")
+
+
 def apply_post_boundaries(
     activation_result: dict[str, Any],
     candidates: list[Candidate],
@@ -142,11 +151,11 @@ def apply_post_boundaries(
 
         entries = []
         for entry in activation_result.get(role, []):
-            key = entry.get("candidate_id") or entry.get("memory_id") or entry.get("artifact_id", "")
-            candidate = by_id.get(key, {})
-            if not candidate:
+            resolved_candidate, key = _resolve_candidate_entry(entry, by_id)
+            if resolved_candidate is None:
                 ignored.append({"candidate_id": key, "reason": "unknown_candidate", "role": role})
                 continue
+            candidate = resolved_candidate
             if _is_deprecated(candidate) and not include_history:
                 ignored.append({"candidate_id": key, "reason": "deprecated", "role": role})
                 continue

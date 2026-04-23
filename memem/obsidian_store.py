@@ -342,6 +342,16 @@ def _parse_obsidian_tags(raw: str) -> list[str]:
     return [tag.strip() for tag in raw.split(",") if tag.strip()]
 
 
+_GENERATED_RELATED_SECTION_RE = re.compile(
+    r"(?:\n\n## Related\n(?:- \[\[[^\]\n]+\]\]\n?)+)+\s*$",
+    re.MULTILINE,
+)
+
+
+def _strip_generated_related_section(body: str) -> str:
+    return _GENERATED_RELATED_SECTION_RE.sub("", body).rstrip()
+
+
 # ---------------------------------------------------------------------------
 # Memory factory
 # ---------------------------------------------------------------------------
@@ -438,8 +448,12 @@ def _write_obsidian_memory(mem: dict):
         f"tags: [{', '.join(safe_tags)}]\n"
     )
     related = mem.get("related", [])
-    if related:
-        safe_related = [_safe_tag(r) for r in related if _safe_tag(r)]
+    safe_related: list[str] = []
+    for related_id in related:
+        normalized = _safe_tag(str(related_id or "")[:8])
+        if normalized and normalized not in safe_related:
+            safe_related.append(normalized)
+    if safe_related:
         frontmatter += f"related: [{', '.join(safe_related)}]\n"
     frontmatter += (
         f"created: {mem.get('created_at', '')[:10]}\n"
@@ -456,15 +470,16 @@ def _write_obsidian_memory(mem: dict):
         frontmatter += f"contradicts: [{', '.join(contradicts)}]\n"
     frontmatter += "---"
 
-    body = f"\n\n{mem.get('essence', '')}"
+    essence = _strip_generated_related_section(str(mem.get("essence", "") or ""))
+    body = f"\n\n{essence}"
 
     # Append Obsidian [[wiki-links]] for related memories so the graph
     # view shows connections. The `related` frontmatter field stores bare
     # 8-char IDs which Obsidian doesn't recognize as links — wiki-links
     # in the body are what make the graph light up.
-    if related:
+    if safe_related:
         link_lines = []
-        for rid in related:
+        for rid in safe_related:
             rid = rid.strip()[:8]
             if not rid:
                 continue
@@ -567,8 +582,9 @@ def _parse_obsidian_memory_file(md_file: Path) -> dict | None:
                     except (ValueError, TypeError):
                         mem["layer"] = DEFAULT_LAYER
 
-    mem["essence"] = body
-    mem["full_record"] = body  # read-time alias for essence — not stored in markdown
+    clean_body = _strip_generated_related_section(body).strip()
+    mem["essence"] = clean_body
+    mem["full_record"] = clean_body  # read-time alias for essence — not stored in markdown
     if not mem["updated_at"]:
         mem["updated_at"] = mem.get("created_at", "")
     if not mem["title"] or mem["title"] == md_file.stem:
@@ -1012,6 +1028,57 @@ def _update_memory(memory_id: str, new_content: str, new_title: str = "") -> Non
             _refresh_edges_for_memory(refreshed_mem)
     except Exception as exc:
         log.debug("graph refresh failed for updated memory %s: %s", memory_id[:8], exc)
+
+
+def _add_related_link(memory_id: str, related_memory_id: str) -> str:
+    """Add a symmetric related-memory link between two existing memories.
+
+    Persists through the normal markdown note serializer so frontmatter,
+    body wiki-links, cache refresh, index updates, and graph edges stay in
+    sync with the rest of the vault mutation path.
+    """
+    first = _find_memory(memory_id)
+    second = _find_memory(related_memory_id)
+    if not first or not second:
+        return "invalid_target"
+    first_id = first.get("id", "")
+    second_id = second.get("id", "")
+    if not first_id or not second_id or first_id == second_id:
+        return "invalid_target"
+    if first.get("status") == "deprecated" or second.get("status") == "deprecated":
+        return "invalid_target"
+
+    _require_obsidian_writable()
+    changed = False
+    for current, other in ((first, second), (second, first)):
+        related = []
+        for value in current.get("related", []):
+            normalized = str(value or "").strip()[:8]
+            if normalized and normalized not in related:
+                related.append(normalized)
+        other_short = other.get("id", "")[:8]
+        if other_short in related:
+            continue
+        current["related"] = related + [other_short]
+        current["updated_at"] = _now()
+        _write_obsidian_memory(current)
+        _cache_refresh_from_disk(current.get("id", ""))
+        if INDEX_PATH.exists():
+            _append_or_update_index_line(current)
+        _index_memory(current)
+        try:
+            from memem.graph_index import _refresh_edges_for_memory
+            refreshed = _find_memory(current.get("id", ""))
+            if refreshed:
+                _refresh_edges_for_memory(refreshed)
+        except Exception as exc:
+            log.debug("graph refresh failed for related-link update %s: %s", current.get("id", "")[:8], exc)
+        changed = True
+
+    if changed:
+        _log_event("link_related", first_id, related_id=second_id[:8])
+        return "linked"
+    return "already_linked"
 
 
 def _delete_memory(memory_id: str) -> bool:

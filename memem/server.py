@@ -12,6 +12,7 @@ minimal diagnostic environment). ``mcp`` remains a required dependency
 declared in ``pyproject.toml`` — this is purely an import-time deferral.
 """
 
+import json
 import sys
 
 from memem.cli import dispatch_cli
@@ -29,7 +30,15 @@ def _build_mcp():
     from mcp.server.fastmcp import FastMCP
     from pydantic import Field
 
-    from memem.active_slice_engine import active_slice_response as _active_slice_response
+    from memem.active_slice_engine import (
+        active_slice_response as _active_slice_response,
+    )
+    from memem.active_slice_engine import (
+        generate_active_memory_slice_with_writeback as _generate_active_memory_slice_with_writeback,
+    )
+    from memem.active_slice_engine import (
+        generate_prompt_context as _generate_prompt_context,
+    )
     from memem.graph_index import (
         _rebuild_graph as _memory_graph_rebuild,
     )
@@ -375,6 +384,83 @@ def _build_mcp():
             bool,
             Field(description="Use bounded Haiku activation when available; fallback is deterministic heuristic mode."),
         ] = True,
+        session_id: Annotated[
+            str,
+            Field(
+                description=(
+                    "Optional runtime session identifier. When supplied with a task mode, "
+                    "memem can carry continuity across multiple slices in the same session."
+                ),
+                max_length=200,
+            ),
+        ] = "",
+        task_mode: Annotated[
+            str,
+            Field(
+                description=(
+                    "Optional runtime task preset. Supported values include coding, proposal, "
+                    "debug, research, maintenance, and session_start."
+                ),
+                max_length=40,
+            ),
+        ] = "",
+        repo_path: Annotated[
+            str,
+            Field(
+                description=(
+                    "Optional current working directory or repository root. Used for artifact "
+                    "resolution and scope-aware continuity."
+                ),
+                max_length=4000,
+            ),
+        ] = "",
+        current_file: Annotated[
+            str,
+            Field(
+                description="Optional current file path for artifact-aware activation.",
+                max_length=4000,
+            ),
+        ] = "",
+        open_files: Annotated[
+            list[str] | None,
+            Field(description="Optional list of currently open files for artifact-aware activation."),
+        ] = None,
+        modified_files: Annotated[
+            list[str] | None,
+            Field(description="Optional list of modified files for artifact-aware activation."),
+        ] = None,
+        artifact_path: Annotated[
+            str,
+            Field(
+                description="Optional draft/proposal/artifact path associated with the current work.",
+                max_length=4000,
+            ),
+        ] = "",
+        branch: Annotated[
+            str,
+            Field(
+                description="Optional current git branch name.",
+                max_length=200,
+            ),
+        ] = "",
+        writeback_preview: Annotated[
+            bool,
+            Field(
+                description=(
+                    "Run the delta validation/commit pipeline in dry-run mode and include "
+                    "preview writeback results. Still non-mutating."
+                ),
+            ),
+        ] = False,
+        auto_commit_safe: Annotated[
+            bool,
+            Field(
+                description=(
+                    "Opt in to committing only auto-safe deltas. Default is false, so the "
+                    "runtime remains read-side unless explicitly elevated."
+                ),
+            ),
+        ] = False,
     ) -> str:
         """Generate an Active Memory Slice runtime working state for ongoing work.
 
@@ -386,9 +472,56 @@ def _build_mcp():
 
         `context_assemble` remains available as an explicit secondary projection
         when you specifically want a narrative briefing instead of the working
-        state slice. This tool never auto-commits delta proposals to the vault.
+        state slice. Safe writeback is available only through the explicit
+        `writeback_preview` / `auto_commit_safe` opt-in flags.
         """
-        return _active_slice_response(query, scope_id=scope_id, raw_json=raw_json, use_llm=use_llm)
+        environment: dict[str, object] = {}
+        if session_id:
+            environment["session_id"] = session_id
+        if task_mode:
+            environment["task_mode"] = task_mode
+        if repo_path:
+            environment["repo_path"] = repo_path
+            environment["cwd"] = repo_path
+        if current_file:
+            environment["current_file"] = current_file
+        if open_files:
+            environment["open_files"] = open_files
+        if modified_files:
+            environment["modified_files"] = modified_files
+        if artifact_path:
+            environment["artifact_path"] = artifact_path
+        if branch:
+            environment["branch"] = branch
+
+        runtime_environment = environment or None
+        if writeback_preview or auto_commit_safe:
+            result = _generate_active_memory_slice_with_writeback(
+                query,
+                scope_id=scope_id,
+                environment=runtime_environment,
+                use_llm=use_llm,
+                auto_commit_safe=auto_commit_safe,
+                dry_run=not auto_commit_safe,
+            )
+            if raw_json:
+                return json.dumps(result, indent=2, sort_keys=True)
+            return _generate_prompt_context(
+                query,
+                scope_id=scope_id,
+                environment=runtime_environment,
+                use_llm=use_llm,
+                mode="slice",
+                slice_obj=result["slice"],
+            )
+
+        return _active_slice_response(
+            query,
+            scope_id=scope_id,
+            environment=runtime_environment,
+            raw_json=raw_json,
+            use_llm=use_llm,
+        )
 
     @mcp.tool()
     def memory_save(

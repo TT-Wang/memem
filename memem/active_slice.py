@@ -79,6 +79,53 @@ class ActiveTension(TypedDict, total=False):
     why_open: str
 
 
+class SliceDiff(TypedDict, total=False):
+    new_goals: list[str]
+    dropped_goals: list[str]
+    new_constraints: list[str]
+    resolved_constraints: list[str]
+    new_tensions: list[str]
+    resolved_tensions: list[str]
+    new_artifacts: list[str]
+    dropped_artifacts: list[str]
+    activation_mode_changed: bool
+    confidence_delta: float
+
+
+class ArtifactProgression(TypedDict, total=False):
+    stage: Literal["none", "discovered", "drafting", "revising", "review_ready", "stalled"]
+    summary: str
+    current_artifact_ids: list[str]
+    previous_artifact_ids: list[str]
+    changed: bool
+    signals: list[str]
+
+
+class DeltaWritebackResult(TypedDict, total=False):
+    delta_id: str
+    delta_type: str
+    status: Literal["not_run", "dry_run", "committed", "rejected", "blocked", "skipped"]
+    commit_policy: Literal["auto_safe", "manual_review", "blocked"]
+    confidence: float
+    dry_run: bool
+    requires_user_confirmation: bool
+    source_slice_id: str
+    affected_memory_ids: list[str]
+    validation_errors: list[str]
+    warnings: list[str]
+    result_message: str
+
+
+class WritebackSummary(TypedDict, total=False):
+    status: Literal["not_run", "dry_run", "committed", "partial", "blocked"]
+    dry_run: bool
+    proposed_count: int
+    auto_committed_count: int
+    manual_review_count: int
+    blocked_count: int
+    rejected_count: int
+
+
 class ExcludedCandidate(TypedDict, total=False):
     candidate_id: str
     reason: str
@@ -151,9 +198,17 @@ class ActiveMemorySlice(TypedDict, total=False):
     failure_patterns: list[ActiveMemoryItem]
     artifacts: list[ActiveArtifact]
     open_tensions: list[ActiveTension]
+    resolved_tensions: list[ActiveTension]
     excluded_candidates: list[ExcludedCandidate]
     candidate_deltas: list[DeltaProposal]
+    delta_results: list[DeltaWritebackResult]
     projection_hint: dict
+    previous_slice_id: str
+    slice_diff: SliceDiff
+    carry_forward_summary: list[str]
+    artifact_progression: ArtifactProgression
+    task_mode: str
+    writeback_summary: WritebackSummary
     candidate_count: int
     recall_candidate_count: int
     should_emit_context: bool
@@ -319,6 +374,27 @@ def _candidate_lookup(candidate_bundle: CandidateBundle) -> dict[str, Candidate]
     return lookup
 
 
+def candidate_reference_keys(entry: Mapping[str, Any]) -> list[str]:
+    refs: list[str] = []
+    for key in ("candidate_id", "memory_id", "artifact_id"):
+        value = entry.get(key, "")
+        if not isinstance(value, str) or not value:
+            continue
+        refs.append(value)
+        if key == "memory_id" and len(value) > 8:
+            refs.append(value[:8])
+    return refs
+
+
+def resolve_candidate_reference(entry: Mapping[str, Any], lookup: Mapping[str, Candidate]) -> Candidate | None:
+    refs = candidate_reference_keys(entry)
+    for ref in refs:
+        candidate = lookup.get(ref)
+        if candidate:
+            return candidate
+    return None
+
+
 def _item_from_candidate(cand: Candidate, role: ActiveRole, why: str = "", score: float | None = None) -> ActiveMemoryItem:
     return {
         "memory_id": cand.get("memory_id", ""),
@@ -366,10 +442,7 @@ def build_active_memory_slice(
         items: list[ActiveMemoryItem] = []
         entries = cast(list[ActivationEntry], activation_result.get(role_key, []))
         for entry in entries:
-            cid = entry.get("candidate_id") or entry.get("memory_id")
-            if not cid:
-                continue
-            cand = lookup.get(cid)
+            cand = resolve_candidate_reference(entry, lookup)
             if cand:
                 items.append(_item_from_candidate(cand, role, entry.get("why", ""), entry.get("score")))
         return items
@@ -385,10 +458,7 @@ def build_active_memory_slice(
 
     artifacts: list[ActiveArtifact] = []
     for entry in activation_result.get("artifact_context", []):
-        cid = entry.get("candidate_id") or entry.get("artifact_id")
-        if not cid:
-            continue
-        cand = lookup.get(cid)
+        cand = resolve_candidate_reference(entry, lookup)
         if cand:
             artifacts.append(_artifact_from_candidate(cand, entry.get("why", ""), entry.get("score")))
 
@@ -431,7 +501,13 @@ def build_active_memory_slice(
     )
     confidence = float(activation_result.get("confidence", 0.6))
     has_recall_candidates = recall_candidate_count > 0
-    should_emit_context = bool(selected_memory_items or artifacts or tensions or (has_recall_candidates and confidence >= 0.45))
+    has_grounding_context = bool(selected_memory_items or artifacts or has_recall_candidates)
+    should_emit_context = bool(
+        selected_memory_items
+        or artifacts
+        or (tensions and has_grounding_context)
+        or (has_recall_candidates and confidence >= 0.45)
+    )
 
     slice_obj: ActiveMemorySlice = {
         "slice_id": _stable_id("slice", {"query": query, "scope": scope_id, "generated_at": now_iso()}),
@@ -449,12 +525,28 @@ def build_active_memory_slice(
         "failure_patterns": failure_patterns,
         "artifacts": artifacts,
         "open_tensions": tensions,
+        "resolved_tensions": [],
         "excluded_candidates": activation_result.get("ignored", []) + activation_result.get("excluded_candidates", []),
         "candidate_deltas": activation_result.get("candidate_deltas", []),
+        "delta_results": [],
         "projection_hint": {
             "preferred_output_mode": "slice",
             "must_include_constraints_first": True,
             "should_surface_open_tensions": True,
+        },
+        "previous_slice_id": "",
+        "slice_diff": {},
+        "carry_forward_summary": [],
+        "artifact_progression": {"stage": "none", "signals": []},
+        "task_mode": str(environment.get("task_mode", "") or ""),
+        "writeback_summary": {
+            "status": "not_run",
+            "dry_run": True,
+            "proposed_count": len(activation_result.get("candidate_deltas", [])),
+            "auto_committed_count": 0,
+            "manual_review_count": 0,
+            "blocked_count": 0,
+            "rejected_count": 0,
         },
         "candidate_count": len(flatten_candidate_bundle(candidate_bundle)),
         "recall_candidate_count": recall_candidate_count,
@@ -518,6 +610,60 @@ def _render_deltas(deltas: Sequence[Mapping[str, Any]]) -> list[str]:
     return lines
 
 
+def _render_string_list(items: Sequence[Any], limit: int = 220) -> list[str]:
+    lines: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        text = _compact(str(item or ""), limit)
+        if not text:
+            continue
+        line = f"- {text}"
+        normalized = line.casefold()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        lines.append(line)
+    return lines
+
+
+def _render_writeback(
+    summary: Mapping[str, Any] | None,
+    results: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    lines: list[str] = []
+    if summary:
+        status = str(summary.get("status", "") or "")
+        proposed = int(summary.get("proposed_count", 0) or 0)
+        interesting = status and status != "not_run"
+        interesting = interesting or proposed > 0
+        interesting = interesting or any(int(summary.get(key, 0) or 0) for key in ("auto_committed_count", "manual_review_count", "blocked_count", "rejected_count"))
+        if interesting:
+            bits = [f"status={status}"] if status else []
+            bits.append(f"proposed={proposed}")
+            bits.append(f"auto={int(summary.get('auto_committed_count', 0) or 0)}")
+            bits.append(f"manual={int(summary.get('manual_review_count', 0) or 0)}")
+            bits.append(f"blocked={int(summary.get('blocked_count', 0) or 0)}")
+            bits.append(f"rejected={int(summary.get('rejected_count', 0) or 0)}")
+            if "dry_run" in summary:
+                bits.append(f"dry_run={bool(summary.get('dry_run', False))}")
+            lines.append(f"- {'; '.join(bits)}")
+    for result in results:
+        delta_type = _compact(str(result.get("delta_type", "delta") or "delta"), 40)
+        status = _compact(str(result.get("status", "unknown") or "unknown"), 24)
+        policy = _compact(str(result.get("commit_policy", "") or ""), 24)
+        message = _compact(str(result.get("result_message", "") or ""), 120)
+        errors = [str(error) for error in result.get("validation_errors", []) if error]
+        line = f"- {status} {delta_type}"
+        if policy:
+            line += f" ({policy})"
+        if message:
+            line += f": {message}"
+        elif errors:
+            line += f": {_compact('; '.join(errors), 120)}"
+        lines.append(line)
+    return lines
+
+
 def _render_section(title: str, lines: Sequence[str]) -> str:
     if not lines:
         return ""
@@ -526,7 +672,7 @@ def _render_section(title: str, lines: Sequence[str]) -> str:
 
 def _slice_header(slice_obj: ActiveMemorySlice) -> str:
     confidence_value = slice_obj.get("confidence", 0.0)
-    confidence = float(confidence_value) if isinstance(confidence_value, (int, float)) else 0.0
+    confidence = float(confidence_value) if isinstance(confidence_value, int | float) else 0.0
     header_lines = [
         "# Active Memory Slice",
         "",
@@ -535,6 +681,12 @@ def _slice_header(slice_obj: ActiveMemorySlice) -> str:
         f"- activation: {slice_obj.get('activation_mode', 'heuristic')}",
         f"- confidence: {confidence:.2f}",
     ]
+    task_mode = _compact(str(slice_obj.get("task_mode", "") or ""), 40)
+    if task_mode:
+        header_lines.append(f"- task mode: {task_mode}")
+    previous_slice_id = _compact(str(slice_obj.get("previous_slice_id", "") or ""), 80)
+    if previous_slice_id:
+        header_lines.append(f"- previous slice: {previous_slice_id}")
     return "\n".join(header_lines)
 
 
@@ -549,10 +701,19 @@ def _render_slice(slice_obj: ActiveMemorySlice, max_chars: int | None = None) ->
         _render_section("Decisions", _render_items(slice_obj.get("decisions", []))),
         _render_section("Failure Patterns", _render_items(slice_obj.get("failure_patterns", []))),
         _render_section("Open Tensions", _render_tensions(slice_obj.get("open_tensions", []))),
+        _render_section("Resolved Tensions", _render_tensions(slice_obj.get("resolved_tensions", []))),
+        _render_section("Carry Forward", _render_string_list(slice_obj.get("carry_forward_summary", []))),
         _render_section("Artifacts", _render_items(slice_obj.get("artifacts", []))),
         _render_section("Preferences", _render_items(slice_obj.get("preferences", []))),
         _render_section("Active Background", _render_items(slice_obj.get("active_background", []))),
         _render_section("Candidate Deltas", _render_deltas(slice_obj.get("candidate_deltas", []))),
+        _render_section(
+            "Writeback",
+            _render_writeback(
+                cast(Mapping[str, Any] | None, slice_obj.get("writeback_summary")),
+                cast(Sequence[Mapping[str, Any]], slice_obj.get("delta_results", [])),
+            ),
+        ),
         _render_section("Warnings", [f"- {_compact(str(warning), 220)}" for warning in slice_obj.get("warnings", [])]),
     ]
     blocks = [section for section in sections if section]

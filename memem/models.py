@@ -47,6 +47,9 @@ GRAPH_DB = MEMEM_DIR / "graph.db"
 LAST_BRIEF_PATH = MEMEM_DIR / ".last-brief.json"
 TOPIC_SHIFTS_LOG = MEMEM_DIR / "topic-shifts.log"
 RELEVANCE_SCORES_FILE = MEMEM_DIR / "relevance_scores.json"
+ACTIVE_SLICE_HISTORY_FILE = MEMEM_DIR / "active-slices.jsonl"
+DELTA_AUDIT_LOG = MEMEM_DIR / "delta-audit.jsonl"
+DELTA_STATE_DIR = MEMEM_DIR / "delta-state"
 
 # Layer constants for memory stratification (v0.10)
 LAYER_L0 = 0  # Always-loaded: cross-project, importance==5
