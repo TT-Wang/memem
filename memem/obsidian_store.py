@@ -8,6 +8,7 @@ This module owns all interactions with the Obsidian vault:
 - Save/update/delete/deprecate operations
 """
 
+import datetime as _dt
 import fcntl
 import functools
 import logging
@@ -55,6 +56,64 @@ from memem.security import scan_memory_content
 from memem.telemetry import _log_event
 
 log = logging.getLogger("memem-obsidian")
+
+
+# ---------------------------------------------------------------------------
+# python-frontmatter — lazy import so the module loads even when the library
+# is not on sys.path (e.g. in test environments where HOME is overridden and
+# user-site-packages is unavailable).  Actual parsing/writing will fail with a
+# clear ImportError if the library is missing at call time.
+# ---------------------------------------------------------------------------
+
+_fm: Any = None          # frontmatter module, loaded on first use
+_yaml: Any = None        # yaml module, loaded on first use
+_MEM_HANDLER: Any = None # _MemHandler singleton, created on first use
+
+
+def _ensure_frontmatter() -> None:
+    """Import python-frontmatter lazily and create the singleton handler."""
+    global _fm, _yaml, _MEM_HANDLER
+    if _fm is not None:
+        return
+    try:
+        import frontmatter as _fm_mod
+        import yaml as _yaml_mod
+        from frontmatter.default_handlers import YAMLHandler as _YAMLHandler
+    except ImportError as exc:
+        raise ImportError(
+            "python-frontmatter is required for vault I/O. "
+            "Install it with: pip install python-frontmatter"
+        ) from exc
+
+    _fm = _fm_mod
+    _yaml = _yaml_mod
+
+    class _MemHandler(_YAMLHandler):
+        """YAML handler that writes keys in insertion order (sort_keys=False)."""
+
+        def export(self, metadata: dict, **kwargs: Any) -> str:  # type: ignore[override]
+            kwargs.setdefault("default_flow_style", False)
+            kwargs.setdefault("allow_unicode", True)
+            kwargs.setdefault("sort_keys", False)
+            return _yaml_mod.dump(metadata, Dumper=_yaml_mod.SafeDumper, **kwargs)
+
+    _MEM_HANDLER = _MemHandler()
+
+
+def _fm_val_to_str(v: Any) -> str:
+    """Normalize a frontmatter scalar value to a plain string.
+
+    python-frontmatter / PyYAML auto-casts YAML dates and datetimes to Python
+    objects.  The rest of the codebase treats all frontmatter scalars as
+    strings, so we convert them back here.
+    """
+    if v is None:
+        return ""
+    if isinstance(v, _dt.datetime):
+        return v.isoformat()
+    if isinstance(v, _dt.date):
+        return str(v)
+    return str(v)
 
 # Alias for backward compat
 _now = now_iso
@@ -303,7 +362,7 @@ def _cache_evict(mem_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Slugify / YAML helpers
+# Slugify helper
 # ---------------------------------------------------------------------------
 
 def _slugify(text: str, max_len: int = 60) -> str:
@@ -311,35 +370,9 @@ def _slugify(text: str, max_len: int = 60) -> str:
     return slug[:max_len]
 
 
-def _yaml_escape(value: str) -> str:
-    """Quote YAML values that contain special characters.
-
-    Newlines and carriage returns are collapsed to spaces — a raw newline
-    inside a frontmatter value would otherwise let a malicious title inject
-    fake frontmatter fields (`value\\n---\\ncreated: 1970-01-01`).
-    """
-    if not value:
-        return '""'
-    # Strip control characters that could break YAML framing
-    value = value.replace("\r\n", " ").replace("\n", " ").replace("\r", " ").replace("\t", " ")
-    if any(ch in value for ch in (':', '#', '{', '}', '[', ']', ',', '&', '*', '?', '|', '-', '<', '>', '=', '!', '%', '@', '`', '"', "'")):
-        escaped = value.replace('\\', '\\\\').replace('"', '\\"')
-        return f'"{escaped}"'
-    if value.startswith((' ', '\t')) or value.endswith((' ', '\t')):
-        return f'"{value}"'
-    return value
-
-
 def _stable_mined_memory_id(session_id: str, title: str, content: str) -> str:
     seed = f"{session_id}\n{title.strip()}\n{content.strip()}"
     return str(uuid.uuid5(uuid.NAMESPACE_URL, seed))
-
-
-def _parse_obsidian_tags(raw: str) -> list[str]:
-    raw = raw.strip()
-    if raw.startswith("[") and raw.endswith("]"):
-        raw = raw[1:-1]
-    return [tag.strip() for tag in raw.split(",") if tag.strip()]
 
 
 _GENERATED_RELATED_SECTION_RE = re.compile(
@@ -403,6 +436,7 @@ def _require_obsidian_writable() -> None:
 
 
 def _write_obsidian_memory(mem: dict):
+    _ensure_frontmatter()
     _require_obsidian_writable()
 
     title = mem.get("title", "Untitled")
@@ -439,44 +473,43 @@ def _write_obsidian_memory(mem: dict):
         )
 
     safe_tags = [_safe_tag(t) for t in tags if _safe_tag(t)]
-    frontmatter = (
-        f"---\n"
-        f"id: {mem['id']}\n"
-        f"schema_version: {mem.get('schema_version', 1)}\n"
-        f"title: {_yaml_escape(clean_title)}\n"
-        f"project: {_safe_tag(project)}\n"
-        f"tags: [{', '.join(safe_tags)}]\n"
-    )
+
     related = mem.get("related", [])
     safe_related: list[str] = []
     for related_id in related:
         normalized = _safe_tag(str(related_id or "")[:8])
         if normalized and normalized not in safe_related:
             safe_related.append(normalized)
+
+    # Build metadata dict in canonical field order (sort_keys=False preserves it)
+    meta: dict[str, Any] = {
+        "id": mem["id"],
+        "schema_version": mem.get("schema_version", 1),
+        "title": clean_title,
+        "project": _safe_tag(project),
+        "tags": safe_tags,
+    }
     if safe_related:
-        frontmatter += f"related: [{', '.join(safe_related)}]\n"
-    frontmatter += (
-        f"created: {mem.get('created_at', '')[:10]}\n"
-        f"updated: {mem.get('updated_at', '')[:10]}\n"
-        f"source_type: {mem.get('source_type', 'user')}\n"
-        f"source_session: {mem.get('source_session', '')}\n"
-        f"importance: {mem.get('importance', 3)}\n"
-        f"status: {mem.get('status', 'active')}\n"
-        f"valid_to: {mem.get('valid_to', '')}\n"
-        f"layer: {int(mem.get('layer', DEFAULT_LAYER))}\n"
-    )
+        meta["related"] = safe_related
+    meta["created"] = mem.get("created_at", "")[:10]
+    meta["updated"] = mem.get("updated_at", "")[:10]
+    meta["source_type"] = mem.get("source_type", "user")
+    meta["source_session"] = mem.get("source_session", "") or ""
+    meta["importance"] = mem.get("importance", 3)
+    meta["status"] = mem.get("status", "active")
+    meta["valid_to"] = mem.get("valid_to", "") or ""
+    meta["layer"] = int(mem.get("layer", DEFAULT_LAYER))
     contradicts = mem.get("contradicts", [])
     if contradicts:
-        frontmatter += f"contradicts: [{', '.join(contradicts)}]\n"
-    frontmatter += "---"
+        meta["contradicts"] = [_safe_tag(str(c)) for c in contradicts if _safe_tag(str(c))]
 
     essence = _strip_generated_related_section(str(mem.get("essence", "") or ""))
-    body = f"\n\n{essence}"
 
     # Append Obsidian [[wiki-links]] for related memories so the graph
     # view shows connections. The `related` frontmatter field stores bare
     # 8-char IDs which Obsidian doesn't recognize as links — wiki-links
     # in the body are what make the graph light up.
+    body_parts = [essence]
     if safe_related:
         link_lines = []
         for rid in safe_related:
@@ -490,21 +523,25 @@ def _write_obsidian_memory(mem: dict):
             if matches:
                 link_lines.append(f"- [[{matches[0].stem}]]")
         if link_lines:
-            body += "\n\n## Related\n" + "\n".join(link_lines) + "\n"
+            body_parts.append("\n\n## Related\n" + "\n".join(link_lines) + "\n")
+
+    body = "".join(body_parts)
+    post = _fm.Post(body, handler=_MEM_HANDLER, **meta)
+    file_content = _fm.dumps(post, handler=_MEM_HANDLER)
 
     filepath = OBSIDIAN_MEMORIES_DIR / filename
-    _atomic_write(filepath, frontmatter + body)
+    _atomic_write(filepath, file_content)
     mem["obsidian_file"] = filename
 
 
 def _parse_obsidian_memory_file(md_file: Path) -> dict | None:
+    _ensure_frontmatter()
     try:
         content = md_file.read_text(errors="ignore")
     except OSError as exc:
         log.warning("Failed to read memory file %s: %s", md_file, exc)
         return None
 
-    body = content.strip()
     mem: dict[str, Any] = {
         "id": _extract_memory_id_from_filename(md_file),
         "title": md_file.stem,
@@ -524,63 +561,62 @@ def _parse_obsidian_memory_file(md_file: Path) -> dict | None:
         "layer": DEFAULT_LAYER,
     }
 
-    if content.startswith("---"):
-        parts = content.split("---", 2)
-        if len(parts) >= 3:
-            frontmatter = parts[1]
-            body = parts[2].strip()
-            for line in frontmatter.splitlines():
-                if ":" not in line:
-                    continue
-                key, value = line.split(":", 1)
-                key = key.strip()
-                value = value.strip().strip('"')
-                if key == "id" and value:
-                    mem["id"] = value
-                elif key == "title" and value:
-                    mem["title"] = value
-                elif key == "project" and value:
-                    mem["project"] = value
-                elif key == "tags":
-                    mem["domain_tags"] = _parse_obsidian_tags(value)
-                elif key == "related":
-                    mem["related"] = _parse_obsidian_tags(value)
-                elif key == "created":
-                    mem["created_at"] = value
-                elif key == "updated":
-                    mem["updated_at"] = value
-                elif key == "source_type":
-                    mem["source_type"] = value
-                elif key == "source_session":
-                    mem["source_session"] = value
-                elif key == "access_count":
-                    try:
-                        mem["access_count"] = int(value)
-                    except (ValueError, TypeError):
-                        mem["access_count"] = 0
-                elif key == "last_accessed":
-                    mem["last_accessed"] = value
-                elif key == "status":
-                    mem["status"] = value
-                elif key == "valid_to":
-                    mem["valid_to"] = value
-                elif key == "contradicts":
-                    mem["contradicts"] = _parse_obsidian_tags(value)  # reuse existing tag parser
-                elif key == "importance":
-                    try:
-                        mem["importance"] = int(value)
-                    except (ValueError, TypeError):
-                        mem["importance"] = 3
-                elif key == "schema_version":
-                    try:
-                        mem["schema_version"] = int(value)
-                    except (ValueError, TypeError):
-                        mem["schema_version"] = 0
-                elif key == "layer":
-                    try:
-                        mem["layer"] = int(value)
-                    except (ValueError, TypeError):
-                        mem["layer"] = DEFAULT_LAYER
+    # Use python-frontmatter to parse the file. Falls back gracefully if the
+    # file has no frontmatter (post.metadata will be empty, post.content = full text).
+    try:
+        post = _fm.loads(content, handler=_MEM_HANDLER)
+    except Exception as exc:  # noqa: BLE001 — malformed YAML should not crash the reader
+        log.warning("Failed to parse frontmatter in %s: %s", md_file, exc)
+        post = _fm.Post(content)
+
+    fm_meta = post.metadata
+    body = post.content.strip()
+
+    if fm_meta.get("id"):
+        mem["id"] = str(fm_meta["id"])
+    if fm_meta.get("title"):
+        mem["title"] = str(fm_meta["title"])
+    if fm_meta.get("project"):
+        mem["project"] = str(fm_meta["project"])
+
+    # tags / related — library parses inline and block YAML lists to Python lists
+    raw_tags = fm_meta.get("tags", [])
+    mem["domain_tags"] = [str(t) for t in raw_tags] if isinstance(raw_tags, list) else []
+
+    raw_related = fm_meta.get("related", [])
+    if isinstance(raw_related, list) and raw_related:
+        mem["related"] = [str(r) for r in raw_related]
+
+    # Date/datetime fields — PyYAML auto-casts to date/datetime objects; normalise to str
+    mem["created_at"] = _fm_val_to_str(fm_meta.get("created", ""))
+    mem["updated_at"] = _fm_val_to_str(fm_meta.get("updated", ""))
+    mem["valid_to"] = _fm_val_to_str(fm_meta.get("valid_to", ""))
+    mem["last_accessed"] = _fm_val_to_str(fm_meta.get("last_accessed", ""))
+
+    # Plain string fields
+    mem["source_type"] = str(fm_meta.get("source_type", "user") or "user")
+    mem["source_session"] = str(fm_meta.get("source_session", "") or "")
+    mem["status"] = str(fm_meta.get("status", "active") or "active")
+
+    # Integer fields — use explicit None check so that a stored value of 0
+    # is not silently promoted to the default (0 is falsy in Python).
+    def _int_field(key: str, default: int) -> int:
+        raw = fm_meta.get(key)
+        if raw is None:
+            return default
+        try:
+            return int(raw)
+        except (ValueError, TypeError):
+            return default
+
+    mem["access_count"] = _int_field("access_count", 0)
+    mem["importance"] = _int_field("importance", 3)
+    mem["schema_version"] = _int_field("schema_version", 0)
+    mem["layer"] = _int_field("layer", DEFAULT_LAYER)
+
+    raw_contradicts = fm_meta.get("contradicts", [])
+    if isinstance(raw_contradicts, list) and raw_contradicts:
+        mem["contradicts"] = [str(c) for c in raw_contradicts]
 
     clean_body = _strip_generated_related_section(body).strip()
     mem["essence"] = clean_body
