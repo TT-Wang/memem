@@ -72,7 +72,9 @@ def _migrate_fts_schema(conn: sqlite3.Connection) -> None:
 
 def _insert_memory_row(conn: sqlite3.Connection, mem: dict) -> None:
     """Insert one memory into the FTS5 table. Used by both _index_memory
-    and the migration path."""
+    and the migration path. Project is normalized (via _normalize_scope_id)
+    before indexing so that aliased project names (e.g. 'memem' →
+    'cortex-plugin') match queries that go through the same normalizer."""
     conn.execute(
         "INSERT INTO memories_fts "
         "(memory_id, title, essence, project, tags, related_ids) "
@@ -81,7 +83,7 @@ def _insert_memory_row(conn: sqlite3.Connection, mem: dict) -> None:
             mem.get("id", ""),
             mem.get("title", ""),
             mem.get("essence", ""),
-            mem.get("project", "general"),
+            _normalize_scope_id(str(mem.get("project", "general") or "general")),
             " ".join(mem.get("domain_tags", [])),
             json.dumps(mem.get("related", [])),
         ),

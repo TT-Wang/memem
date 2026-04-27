@@ -279,6 +279,136 @@ def test_no_penalty_without_scope_strict():
     )
 
 
+def test_scope_strict_evict_drops_weak_cross_project_candidates():
+    """FU1: scope_strict_evict drops cross-project candidates below threshold."""
+    from memem.activation import judge_activation_heuristically
+    from memem.active_slice import current_query_candidate
+
+    bundle = {
+        "current_goal_candidates": [current_query_candidate("Fix auth bug", "memem")],
+        "memory_candidates": [
+            {
+                "candidate_id": "same-strong",
+                "candidate_type": "memory",
+                "memory_id": "same-strong",
+                "title": "Login constraint must be preserved",
+                "summary": "Critical auth constraint that must hold across all flows.",
+                "project": "memem",
+                "importance": 5,
+                "score": 0.85,
+            },
+            {
+                "candidate_id": "cross-weak",
+                "candidate_type": "memory",
+                "memory_id": "cross-weak",
+                "title": "Some unrelated note",
+                "summary": "An unrelated note with weak query overlap.",
+                "project": "other-project",
+                "importance": 1,
+                "score": 0.4,
+            },
+        ],
+        "playbook_candidate": None,
+        "transcript_candidates": [],
+        "artifact_candidates": [],
+        "environment_candidates": [],
+    }
+
+    result = judge_activation_heuristically(
+        "Fix auth bug",
+        "memem",
+        {"scope_id": "memem", "scope_strict": True, "scope_strict_evict": True},
+        bundle,
+    )
+
+    all_entries = (
+        result.get("goals", [])
+        + result.get("constraints", [])
+        + result.get("decisions", [])
+        + result.get("preferences", [])
+        + result.get("failure_patterns", [])
+        + result.get("artifact_context", [])
+        + result.get("background", [])
+    )
+    all_ids = {entry["candidate_id"] for entry in all_entries}
+    assert "same-strong" in all_ids, "Same-project strong candidate should be retained"
+    assert "cross-weak" not in all_ids, "Weak cross-project candidate should be evicted"
+
+
+def test_scope_strict_evict_keeps_strong_cross_project_candidates():
+    """FU1: even in evict mode, strong cross-project candidates above threshold survive."""
+    from memem.active_slice import current_query_candidate
+
+    # A cross-project candidate with very high raw score should survive eviction
+    # because best_score (post-penalty) still clears the threshold.
+    bundle = {
+        "current_goal_candidates": [current_query_candidate("Migration constraint", "memem")],
+        "memory_candidates": [
+            {
+                "candidate_id": "cross-strong",
+                "candidate_type": "memory",
+                "memory_id": "cross-strong",
+                "title": "Migration constraint blocker for must-preserve auth",
+                "summary": "A must-preserve auth migration constraint blocker.",
+                "project": "other-project",
+                "importance": 5,
+                "score": 0.95,
+            },
+        ],
+        "playbook_candidate": None,
+        "transcript_candidates": [],
+        "artifact_candidates": [],
+        "environment_candidates": [],
+    }
+
+    # Lower the eviction threshold for this test so strong cross-project items
+    # can demonstrably survive (default 0.5 with 0.3 penalty would evict almost
+    # everything cross-project). This proves the threshold knob works.
+    import os
+    original = os.environ.get("MEMEM_CROSS_PROJECT_EVICT_THRESHOLD", "")
+    os.environ["MEMEM_CROSS_PROJECT_EVICT_THRESHOLD"] = "0.1"
+    try:
+        # Reload activation to pick up the env var
+        import importlib
+
+        import memem.activation
+        importlib.reload(memem.activation)
+        from memem.activation import judge_activation_heuristically as jh
+
+        result = jh(
+            "Migration constraint",
+            "memem",
+            {"scope_id": "memem", "scope_strict": True, "scope_strict_evict": True},
+            bundle,
+        )
+        all_entries = (
+            result.get("constraints", [])
+            + result.get("decisions", [])
+            + result.get("failure_patterns", [])
+            + result.get("background", [])
+        )
+        all_ids = {entry["candidate_id"] for entry in all_entries}
+        assert "cross-strong" in all_ids, "Strong cross-project candidate should survive low threshold"
+    finally:
+        if original:
+            os.environ["MEMEM_CROSS_PROJECT_EVICT_THRESHOLD"] = original
+        else:
+            os.environ.pop("MEMEM_CROSS_PROJECT_EVICT_THRESHOLD", None)
+        import importlib
+
+        import memem.activation
+        importlib.reload(memem.activation)
+
+
+def test_scope_strict_evict_survives_environment_normalization():
+    """FU1 regression: scope_strict_evict must propagate through normalize_runtime_environment."""
+    from memem.environment_context import normalize_runtime_environment
+
+    raw = {"scope_id": "memem", "scope_strict_evict": True}
+    normalized = normalize_runtime_environment(raw)
+    assert normalized.get("scope_strict_evict") is True
+
+
 def test_scope_strict_survives_environment_normalization():
     """Regression guard for C1: scope_strict must propagate through
     normalize_runtime_environment to reach the activation scorer.

@@ -5,8 +5,12 @@ from __future__ import annotations
 
 def test_playbook_artifact_candidate_present(tmp_vault, tmp_cortex_dir):
     from memem.active_slice_engine import generate_candidates
+    from memem.models import _normalize_scope_id
 
-    playbook = tmp_vault / "memem" / "playbooks" / "memem.md"
+    # Use the normalized scope name for the playbook filename so the
+    # lookup in _playbook_candidate (which normalizes scope_id) matches.
+    normalized = _normalize_scope_id("memem")
+    playbook = tmp_vault / "memem" / "playbooks" / f"{normalized}.md"
     playbook.parent.mkdir(parents=True, exist_ok=True)
     playbook.write_text("# Playbook\n\nKeep rollout constraints visible.\n")
 

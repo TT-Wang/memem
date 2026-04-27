@@ -120,7 +120,7 @@ def test_policy_rejects_cross_scope_target_memory(tmp_vault, tmp_cortex_dir):
 
     assert decision["decision"] == "reject"
     assert decision["commit_policy"] == "blocked"
-    assert any("outside writeback scope memem" in error for error in decision["validation_errors"])
+    assert any("outside writeback scope cortex-plugin" in error for error in decision["validation_errors"])
 
 
 def test_policy_rejects_save_new_memory_with_injected_tag(tmp_vault, tmp_cortex_dir):

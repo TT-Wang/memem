@@ -127,6 +127,7 @@ _PROJECT_ALIASES = {
     "tailor-reader": "techfeed",
     "tailor-real/techfeed": "techfeed",
     "cortex": "cortex-plugin",
+    "memem": "cortex-plugin",  # memem package == cortex-plugin project (renamed)
     "notes-api": "express-api",
 }
 

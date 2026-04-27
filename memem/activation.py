@@ -21,6 +21,7 @@ from memem.capabilities import assembly_available
 log = logging.getLogger("memem-activation")
 
 CROSS_PROJECT_SCORE_PENALTY: float = float(os.environ.get("MEMEM_CROSS_PROJECT_PENALTY", "0.3"))
+CROSS_PROJECT_EVICT_THRESHOLD: float = float(os.environ.get("MEMEM_CROSS_PROJECT_EVICT_THRESHOLD", "0.5"))
 
 _CONSTRAINT_CUES = {"must", "never", "requires", "require", "constraint", "blocked", "cannot", "do not", "should not"}
 _FAILURE_CUES = {"bug", "failure", "regression", "failed", "issue", "risk", "loophole", "avoid"}
@@ -219,13 +220,18 @@ def score_candidate_for_role(candidate: Candidate, role: str, query: str, enviro
     else:
         role_score = base
 
-    # Apply cross-project penalty when scope_strict mode is active
+    # Apply cross-project penalty when scope_strict mode is active.
+    # Normalize both sides so renamed/aliased projects (memem ↔ cortex-plugin)
+    # are treated as same-project, not cross-project.
     if (
         environment.get("scope_strict") is True
-        and candidate.get("project") != environment.get("scope_id")
         and ctype != "current_query"
     ):
-        role_score = role_score * CROSS_PROJECT_SCORE_PENALTY
+        from memem.models import _normalize_scope_id
+        candidate_project = _normalize_scope_id(str(candidate.get("project", "") or ""))
+        scope_project = _normalize_scope_id(str(environment.get("scope_id", "") or ""))
+        if candidate_project != scope_project:
+            role_score = role_score * CROSS_PROJECT_SCORE_PENALTY
 
     return role_score
 
@@ -336,7 +342,11 @@ def judge_activation_heuristically(
     """Deterministic fallback activation judgement."""
     result = _empty_activation_result("heuristic")
     env = dict(environment or {})
-    env.setdefault("scope_id", scope_id)
+    # Force-set scope_id from the explicit positional arg. setdefault is wrong
+    # here because normalize_runtime_environment injects a 'general' default
+    # when the caller doesn't pass scope_id in the environment dict, which
+    # would silently mask the real scope and break cross-project comparisons.
+    env["scope_id"] = scope_id
     candidates = flatten_candidate_bundle(candidate_bundle)
     role_map = {
         "constraints": "constraint cue matched",
@@ -390,6 +400,22 @@ def judge_activation_heuristically(
         else:
             best_role = max(role_scores, key=lambda role: role_scores[role])
         best_score = role_scores[best_role]
+
+        # Cross-project eviction (FU1): when scope_strict_evict is opt-in,
+        # drop cross-project candidates whose best post-penalty role score is
+        # below the eviction threshold. Normalize both sides so renamed
+        # projects (memem ↔ cortex-plugin) are treated as same-project.
+        if (
+            env.get("scope_strict_evict") is True
+            and ctype != "current_query"
+            and best_score < CROSS_PROJECT_EVICT_THRESHOLD
+        ):
+            from memem.models import _normalize_scope_id
+            candidate_project = _normalize_scope_id(str(candidate.get("project", "") or ""))
+            scope_project = _normalize_scope_id(str(env.get("scope_id", "") or ""))
+            if candidate_project != scope_project:
+                continue
+
         bucket = role_buckets[best_role]
         bucket.append(_entry(
             candidate,

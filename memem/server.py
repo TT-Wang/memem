@@ -471,6 +471,16 @@ def _build_mcp():
                 ),
             ),
         ] = False,
+        scope_strict_evict: Annotated[
+            bool,
+            Field(
+                description=(
+                    "More aggressive than scope_strict: drops cross-project candidates whose "
+                    "best role score falls below MEMEM_CROSS_PROJECT_EVICT_THRESHOLD (default "
+                    "0.5). Reduces cross-project PRESENCE in the slice, not just rank. Default false."
+                ),
+            ),
+        ] = False,
     ) -> str:
         """Generate an Active Memory Slice runtime working state for ongoing work.
 
@@ -505,6 +515,9 @@ def _build_mcp():
             environment["branch"] = branch
         if scope_strict:
             environment["scope_strict"] = True
+        if scope_strict_evict:
+            environment["scope_strict_evict"] = True
+            environment["scope_strict"] = True  # eviction implies the score penalty
 
         runtime_environment = environment or None
         if writeback_preview or auto_commit_safe:

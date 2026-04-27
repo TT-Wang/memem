@@ -234,7 +234,7 @@ def test_execute_delta_writeback_rejects_cross_scope_targets(tmp_vault, tmp_cort
 
     assert batch["results"][0]["status"] == "rejected"
     assert batch["writeback_summary"]["status"] == "blocked"
-    assert any("outside writeback scope memem" in error for error in batch["results"][0]["validation_errors"])
+    assert any("outside writeback scope cortex-plugin" in error for error in batch["results"][0]["validation_errors"])
 
     refreshed = obsidian_store._find_memory(in_scope["id"])
     assert refreshed is not None

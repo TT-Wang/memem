@@ -617,8 +617,12 @@ def _obsidian_memories(scope_id: str | None = None, include_deprecated: bool = F
     for mem in cached:
         if not include_deprecated and mem.get("status") == "deprecated":
             continue
-        if normalized != "general" and mem.get("project", "general") != normalized:
-            continue
+        # Normalize the memory's project too so that aliased project names
+        # (e.g. memem ↔ cortex-plugin) are treated as equivalent.
+        if normalized != "general":
+            mem_project = _normalize_scope_id(str(mem.get("project", "general") or "general"))
+            if mem_project != normalized:
+                continue
         memories.append(mem)
     # Preserve previous sort-by-filename ordering so downstream code that
     # relied on it (e.g. deterministic iteration) keeps working.

@@ -98,15 +98,18 @@ def _compute_query_metrics(query: str, slice_obj: dict[str, Any], dedup_rejectio
     for section in memory_sections:
         activated_memory_items.extend(slice_obj.get(section, []))
 
-    # (a) cross_project_hit_pct — count items where project != 'memem'
-    # Only count items that actually came from memories (have a memory_id)
+    # (a) cross_project_hit_pct — count items where normalized project != normalized scope.
+    # Normalize both sides so renamed/aliased projects (memem ↔ cortex-plugin) are
+    # treated as same-project. Only count items from memories (have a memory_id).
+    from memem.models import _normalize_scope_id
+    normalized_scope = _normalize_scope_id(SCOPE_ID)
     memory_items_with_project = [
         item for item in activated_memory_items
         if item.get("memory_id")  # skip current_query synthetic entries
     ]
     cross_project_count = sum(
         1 for item in memory_items_with_project
-        if item.get("project", "") != SCOPE_ID
+        if _normalize_scope_id(str(item.get("project", "") or "")) != normalized_scope
     )
     total_memory_items = len(memory_items_with_project)
     cross_project_pct = (cross_project_count / total_memory_items * 100.0) if total_memory_items > 0 else 0.0

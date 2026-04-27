@@ -330,6 +330,9 @@ def normalize_runtime_environment(environment: dict[str, Any] | None) -> dict[st
     if "scope_strict" in raw:
         normalized["scope_strict"] = _normalize_bool(raw.get("scope_strict"))
 
+    if "scope_strict_evict" in raw:
+        normalized["scope_strict_evict"] = _normalize_bool(raw.get("scope_strict_evict"))
+
     return normalized
 
 
