@@ -327,6 +327,9 @@ def normalize_runtime_environment(environment: dict[str, Any] | None) -> dict[st
     if "include_transcripts" in raw:
         normalized["include_transcripts"] = _normalize_bool(raw.get("include_transcripts"))
 
+    if "scope_strict" in raw:
+        normalized["scope_strict"] = _normalize_bool(raw.get("scope_strict"))
+
     return normalized
 
 

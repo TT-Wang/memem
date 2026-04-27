@@ -16,8 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 COSMETIC_TENSION_DESC = "Multiple strong candidate clusters suggest an unresolved tradeoff."
@@ -50,11 +49,10 @@ SCOPE_ID = "memem"
 
 def _count_dedup_rejections(query: str) -> int:
     """Count candidates rejected by _dedupe_candidates during generate_candidates."""
-    from memem.active_slice_engine import _MAX_GRAPH_CANDIDATES, _MAX_MEMORY_CANDIDATES
+    from memem.active_slice import normalize_memory_candidate
+    from memem.active_slice_engine import _MAX_GRAPH_CANDIDATES, _MAX_MEMORY_CANDIDATES, _graph_candidates
     from memem.models import _normalize_scope_id
     from memem.recall import _search_memories
-    from memem.active_slice import normalize_memory_candidate
-    from memem.active_slice_engine import _graph_candidates
 
     normalized_scope = _normalize_scope_id(SCOPE_ID)
 
@@ -198,7 +196,7 @@ def run_probe(output_path: str) -> None:
         "avg_activation_count": round(avg_activation_count, 2),
     }
 
-    timestamp = datetime.now(timezone.utc).isoformat()
+    timestamp = datetime.now(UTC).isoformat()
 
     output = {
         "queries": query_results,

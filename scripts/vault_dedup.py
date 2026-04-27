@@ -205,7 +205,6 @@ def main(dry_run: bool = False) -> None:
                 row_map = {mid: i for i, mid in enumerate(ordered_ids)}
                 reorder = [row_map[mid] for mid in all_ids]
                 vectors = full_matrix[reorder, :]  # (n, 384)
-                {mid: i for i, mid in enumerate(all_ids)}
                 use_embeddings = True
                 log.info("Embedding matrix ready: shape %s", vectors.shape)
 

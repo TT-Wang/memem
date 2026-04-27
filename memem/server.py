@@ -461,6 +461,16 @@ def _build_mcp():
                 ),
             ),
         ] = False,
+        scope_strict: Annotated[
+            bool,
+            Field(
+                description=(
+                    "Penalize cross-project candidates whose project differs from scope_id. "
+                    "Lowers their score so same-project memories rank higher; cross-project "
+                    "memories still appear (visible-but-secondary). Default false."
+                ),
+            ),
+        ] = False,
     ) -> str:
         """Generate an Active Memory Slice runtime working state for ongoing work.
 
@@ -493,6 +503,8 @@ def _build_mcp():
             environment["artifact_path"] = artifact_path
         if branch:
             environment["branch"] = branch
+        if scope_strict:
+            environment["scope_strict"] = True
 
         runtime_environment = environment or None
         if writeback_preview or auto_commit_safe:

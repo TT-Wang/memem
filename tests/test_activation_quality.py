@@ -277,3 +277,25 @@ def test_no_penalty_without_scope_strict():
         f"Without scope_strict, cross-project score ({score_no_strict:.4f}) should exceed "
         f"scope_strict score ({score_strict:.4f})"
     )
+
+
+def test_scope_strict_survives_environment_normalization():
+    """Regression guard for C1: scope_strict must propagate through
+    normalize_runtime_environment to reach the activation scorer.
+
+    The previous implementation whitelisted recognized keys and silently
+    dropped scope_strict, making the entire feature dead in production.
+    """
+    from memem.environment_context import normalize_runtime_environment
+
+    raw = {"scope_id": "memem", "scope_strict": True}
+    normalized = normalize_runtime_environment(raw)
+    assert normalized.get("scope_strict") is True, (
+        f"scope_strict was dropped during environment normalization: {normalized}"
+    )
+
+    raw_default = {"scope_id": "memem"}
+    normalized_default = normalize_runtime_environment(raw_default)
+    assert "scope_strict" not in normalized_default, (
+        "scope_strict should not appear when not provided"
+    )

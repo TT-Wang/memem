@@ -12,33 +12,21 @@ Audit log: .forge/state/memem-vault-cleanup-purge-audit.jsonl
 
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Allow running from project root or scripts/ directory
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-import memem.obsidian_store as _obs_mod
-
 # Monkey-patch _remove_index_line to handle PermissionError on _index.md.
 # The _index.md file may be owned by root (from a previous miner run) and
 # unwritable by claude-user. Since we're doing SOFT deprecation only (no file
 # deletion), losing the index line update is acceptable — the index will be
 # rebuilt correctly the next time memem regenerates it.
-_orig_remove_index_line = _obs_mod._remove_index_line.__wrapped__ if hasattr(_obs_mod._remove_index_line, '__wrapped__') else None
-
-def _safe_remove_index_line(memory_id: str) -> None:
-    try:
-        # Call the real implementation via the module's lock-wrapped version
-        _obs_mod._remove_index_line.__wrapped__(memory_id)
-    except PermissionError:
-        pass  # _index.md owned by root — skip; will be fixed on next index rebuild
-    except AttributeError:
-        pass
-
-# Replace with a wrapped version that tolerates PermissionError
 import functools as _functools
+
+import memem.obsidian_store as _obs_mod
 
 _real_remove = _obs_mod._remove_index_line
 
@@ -59,7 +47,7 @@ DEPRECATION_REASON = "low_quality_pre_m1"
 
 
 def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _load_existing_audit() -> dict[str, dict]:
@@ -158,7 +146,7 @@ def main() -> None:
 
     audit_lines_written = sum(1 for mid in ids if mid in audit_entries)
 
-    print(f"\nDone.", flush=True)
+    print("\nDone.", flush=True)
     print(f"  Deprecated:        {deprecated_count}", flush=True)
     print(f"  Already deprecated:{already_deprecated}", flush=True)
     print(f"  Not found:         {not_found}", flush=True)
