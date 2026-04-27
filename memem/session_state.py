@@ -4,7 +4,7 @@ import os
 import time
 from pathlib import Path
 
-from memem.miner_protocol import MINER_STATE_VERSION, STATUS_COMPLETE
+from memem.miner_protocol import MINER_STATE_VERSION, STATUS_COMPLETE, STATUS_FAILED
 from memem.models import (
     MEMEM_DIR,
     _env,
@@ -136,6 +136,31 @@ def update_session_state(path: Path, status: str, message: str = "") -> dict:
 
 def session_is_complete(path: Path, state: dict | None) -> bool:
     if not state or state.get("status") != STATUS_COMPLETE:
+        return False
+    if str(state.get("version", "")) != MINER_STATE_VERSION:
+        return False
+
+    try:
+        fingerprint = session_fingerprint(path)
+    except OSError:
+        return False
+
+    return (
+        state.get("mtime_ns") == fingerprint["mtime_ns"]
+        and state.get("size") == fingerprint["size"]
+    )
+
+
+def session_is_terminal(path: Path, state: dict | None) -> bool:
+    """True if a session is COMPLETE or FAILED for the current file fingerprint.
+
+    Terminal sessions are skipped by the miner. If the JSONL changes (mtime/size
+    differs from the recorded fingerprint), the session re-enters the queue —
+    so a previously-failed session that gets new content will be retried.
+    """
+    if not state:
+        return False
+    if state.get("status") not in {STATUS_COMPLETE, STATUS_FAILED}:
         return False
     if str(state.get("version", "")) != MINER_STATE_VERSION:
         return False
@@ -315,7 +340,7 @@ def find_settled_sessions(
                 continue
             if (now - stat.st_mtime) <= SETTLE_SECONDS:
                 continue
-            if session_is_complete(jsonl_path, states.get(jsonl_path.stem)):
+            if session_is_terminal(jsonl_path, states.get(jsonl_path.stem)):
                 continue
             # Content-signature filter: skip memem's own subprocess fossils
             # (mining / merge / assemble / smart_recall / consolidation calls

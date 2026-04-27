@@ -21,7 +21,7 @@ import sys
 import time
 from pathlib import Path
 
-from memem.miner_protocol import FATAL_EXIT_CODE, TRANSIENT_EXIT_CODE
+from memem.miner_protocol import FATAL_EXIT_CODE, STATUS_FAILED, TRANSIENT_EXIT_CODE
 from memem.models import MEMEM_DIR
 from memem.session_state import (
     MINED_SESSIONS_FILE,
@@ -29,11 +29,19 @@ from memem.session_state import (
     _ensure_installed_at,
     find_settled_sessions,
     load_mined_session_state,
+    update_session_state,
 )
 
 PID_FILE = MEMEM_DIR / "miner.pid"
 LOG_FILE = MEMEM_DIR / "miner.log"
 POLL_INTERVAL = 60
+# After this many consecutive failures on the same session, persist STATUS_FAILED
+# so it stops being re-attempted every poll. The fingerprint check in
+# find_settled_sessions will let it back in if the JSONL file changes.
+MAX_SESSION_FAILURES = 3
+# When every session in a poll fails, ramp the next sleep up to this cap to
+# prevent a logged-out claude CLI from spawning subprocesses every 60 seconds.
+BACKOFF_MAX_SECONDS = 1800
 GLOBAL_LOCK_FILE = Path.home() / ".memem" / "miner.global.lock"
 _GLOBAL_LOCK_FH = None
 
@@ -134,9 +142,25 @@ def _ensure_single_miner() -> bool:
     return False
 
 
-def _is_quota_limit_error(exc: BaseException) -> bool:
+def _is_fatal_api_error(exc: BaseException) -> bool:
+    """Errors that won't recover by retrying — stop the miner instead of looping.
+
+    Auth/login failures used to be classified as retryable, which produced
+    thousands of subprocess spawns per hour when the `claude` CLI was logged
+    out. Now we surface them as fatal so the daemon exits cleanly and waits
+    for the user to re-authenticate.
+    """
     text = str(exc).lower()
-    return "hit your limit" in text or "rate limit" in text or "quota" in text
+    fatal_patterns = (
+        "hit your limit",
+        "rate limit",
+        "quota",
+        "authentication_error",
+        "invalid authentication",
+        "not logged in",
+        "please run /login",
+    )
+    return any(pattern in text for pattern in fatal_patterns)
 
 
 def _write_pid():
@@ -277,8 +301,8 @@ def _mine_session(jsonl_path: Path) -> tuple[int, bool]:
             log.info("  -> no new memories found")
         return saved, True
     except RetryableMinerError as exc:
-        if _is_quota_limit_error(exc):
-            raise FatalMinerError(f"Claude quota/rate limit reached: {exc}") from exc
+        if _is_fatal_api_error(exc):
+            raise FatalMinerError(f"Claude API/auth error, miner stopping: {exc}") from exc
         log.error("  -> retryable mining failure: %s", exc)
         return 0, False
 
@@ -296,30 +320,68 @@ def _run_loop():
     # explicitly here instead of relying on lazy-creation.
     _ensure_installed_at()
 
+    # Per-session consecutive-failure counter, in-memory only. Persisted
+    # STATUS_FAILED is the durable equivalent and survives daemon restarts.
+    failure_counts: dict[str, int] = {}
+    sleep_seconds = POLL_INTERVAL
+
     while True:
         try:
             states = load_mined_session_state()
             sessions = find_settled_sessions(states)
             total_saved = 0
             processed = 0
+            attempted = 0
+            failed = 0
             for jsonl_path in sessions:
+                attempted += 1
                 saved, completed = _mine_session(jsonl_path)
                 total_saved += saved
                 if completed:
                     processed += 1
+                    failure_counts.pop(jsonl_path.stem, None)
+                else:
+                    count = failure_counts.get(jsonl_path.stem, 0) + 1
+                    failure_counts[jsonl_path.stem] = count
+                    failed += 1
+                    if count >= MAX_SESSION_FAILURES:
+                        log.warning(
+                            "Marking session %s as failed after %d retries",
+                            jsonl_path.stem[:12], count,
+                        )
+                        try:
+                            update_session_state(
+                                jsonl_path,
+                                STATUS_FAILED,
+                                message=f"miner gave up after {count} consecutive failures",
+                            )
+                        except OSError as exc:
+                            log.error("Could not persist failure state: %s", exc)
+                        failure_counts.pop(jsonl_path.stem, None)
             if processed > 0:
                 log.info("Rebuilding index after %d completed sessions", processed)
                 try:
                     _run_server_command(["--rebuild-index"], expect_json=False)
                 except RetryableMinerError as exc:
                     log.error("Index rebuild failed: %s", exc)
+
+            # Backoff: if every attempt failed, double the sleep up to the cap.
+            # On any progress, snap back to the normal poll interval.
+            if attempted > 0 and failed == attempted:
+                sleep_seconds = min(sleep_seconds * 2, BACKOFF_MAX_SECONDS)
+                log.info(
+                    "All %d sessions failed this cycle — backing off to %ds",
+                    attempted, sleep_seconds,
+                )
+            else:
+                sleep_seconds = POLL_INTERVAL
         except FatalMinerError as exc:
-            log.error("Stopping miner after fatal storage error: %s", exc)
+            log.error("Stopping miner after fatal error: %s", exc)
             raise SystemExit(FATAL_EXIT_CODE)
         except Exception as exc:
             log.error("Loop error: %s", exc)
 
-        time.sleep(POLL_INTERVAL)
+        time.sleep(sleep_seconds)
 
 
 if __name__ == "__main__":

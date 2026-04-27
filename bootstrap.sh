@@ -53,6 +53,20 @@ EXIT_UV=11
 EXIT_SYNC=12
 EXIT_WRITE=13
 
+BOOTSTRAP_LOG_MAX_BYTES=2097152  # 2MB
+
+# One-shot rotation per bootstrap invocation. Keeps a single .1 backup; older
+# data is dropped on rotation. The log was previously unbounded, which let it
+# grow to 35MB+ on hosts where hooks fire frequently.
+rotate_bootstrap_log() {
+    [ -f "$BOOTSTRAP_LOG" ] || return 0
+    local size
+    size=$(stat -c%s "$BOOTSTRAP_LOG" 2>/dev/null || echo 0)
+    if [ "$size" -gt "$BOOTSTRAP_LOG_MAX_BYTES" ]; then
+        mv "$BOOTSTRAP_LOG" "$BOOTSTRAP_LOG.1" 2>/dev/null || true
+    fi
+}
+
 log() {
     mkdir -p "$MEMEM_DIR" 2>/dev/null || true
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$BOOTSTRAP_LOG" 2>/dev/null || true
@@ -110,6 +124,8 @@ EOF
     exit 0
 fi
 
+mkdir -p "$MEMEM_DIR" 2>/dev/null || true
+rotate_bootstrap_log
 log "bootstrap start — PLUGIN_ROOT=$PLUGIN_ROOT  args=$*"
 
 # ---- 1. Python version check (self-heals via uv if too old) ----------------
