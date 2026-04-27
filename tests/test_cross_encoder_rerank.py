@@ -92,7 +92,10 @@ def test_cross_encoder_ranks_auth_above_weather():
     for mid, score in result:
         assert isinstance(mid, str), f"expected str id, got {type(mid)}"
         assert isinstance(score, float), f"expected float score, got {type(score)}"
-        assert -10 <= score <= 10, f"score out of typical [-10, 10] range: {score}"
+        # Cross-encoders return raw logits; ms-marco-MiniLM-L-12-v2 can produce
+        # scores in roughly [-15, 15]. We don't normalize because rerank only
+        # needs relative ordering.
+        assert -20 <= score <= 20, f"score out of expected [-20, 20] range: {score}"
 
     # Top results should include at least one auth-related memory
     top_ids = [mid for mid, _ in result[:3]]
