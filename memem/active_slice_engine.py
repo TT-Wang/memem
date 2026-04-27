@@ -131,12 +131,14 @@ def generate_candidates(
     memory_candidates: list[Candidate] = []
     try:
         from memem.recall import _search_memories
+        rerank_model: str | None = env.get("rerank_model") or None  # type: ignore[assignment]
         memories = _search_memories(
             query,
             scope_id=normalized_scope,
             limit=min(limit, _MAX_MEMORY_CANDIDATES),
             record_access=False,
             expand_links=False,
+            rerank_model=rerank_model,
         )
         memory_candidates = [
             normalize_memory_candidate(mem, source_reason="recall", score=0.75 - (idx * 0.02))

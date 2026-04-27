@@ -333,6 +333,13 @@ def normalize_runtime_environment(environment: dict[str, Any] | None) -> dict[st
     if "scope_strict_evict" in raw:
         normalized["scope_strict_evict"] = _normalize_bool(raw.get("scope_strict_evict"))
 
+    # Cross-encoder rerank model name. Pass-through as a plain string.
+    # Empty string is normalized to absent (falsy) so callers can use
+    # env.get("rerank_model") safely without distinguishing "" from None.
+    rerank_model = _normalize_string(raw.get("rerank_model"))
+    if rerank_model:
+        normalized["rerank_model"] = rerank_model
+
     return normalized
 
 

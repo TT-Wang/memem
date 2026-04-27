@@ -106,6 +106,21 @@ def _build_mcp():
                 le=50,
             ),
         ] = 10,
+        rerank_model: Annotated[
+            str,
+            Field(
+                description=(
+                    "Optional cross-encoder reranker model to apply on top of the "
+                    "heuristic 6-signal ranking. When non-empty, the top-50 heuristic "
+                    "candidates are scored by the named model and reordered before "
+                    "truncation to `limit`. Default empty string means heuristic-only. "
+                    "Fast default: 'cross-encoder/ms-marco-MiniLM-L-12-v2' (~33M, ~50ms "
+                    "CPU). High-quality option: 'BAAI/bge-reranker-v2-m3' (~568M, "
+                    "multilingual). Model is downloaded on first use."
+                ),
+                max_length=200,
+            ),
+        ] = "",
     ) -> str:
         """Search memem memories for durable knowledge relevant to a query.
 
@@ -150,7 +165,7 @@ def _build_mcp():
             → returns the top 5 memories mentioning JWT auth, such as a memory
               documenting the decision to use RS256 in production.
         """
-        return _memory_recall(query, scope_id=scope_id, limit=limit)
+        return _memory_recall(query, scope_id=scope_id, limit=limit, rerank_model=rerank_model or None)
 
     @mcp.tool()
     def memory_search(
@@ -481,6 +496,18 @@ def _build_mcp():
                 ),
             ),
         ] = False,
+        rerank_model: Annotated[
+            str,
+            Field(
+                description=(
+                    "Optional cross-encoder reranker model applied to the recall candidates "
+                    "before activation. When non-empty, the top-50 heuristic candidates are "
+                    "scored by the named cross-encoder and reordered. Default empty string "
+                    "means heuristic-only. Example: 'cross-encoder/ms-marco-MiniLM-L-12-v2'."
+                ),
+                max_length=200,
+            ),
+        ] = "",
     ) -> str:
         """Generate an Active Memory Slice runtime working state for ongoing work.
 
@@ -518,6 +545,8 @@ def _build_mcp():
         if scope_strict_evict:
             environment["scope_strict_evict"] = True
             environment["scope_strict"] = True  # eviction implies the score penalty
+        if rerank_model:
+            environment["rerank_model"] = rerank_model
 
         runtime_environment = environment or None
         if writeback_preview or auto_commit_safe:

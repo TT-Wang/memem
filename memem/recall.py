@@ -38,7 +38,7 @@ def _parse_ts(ts: str) -> float:
         return 0.0
 
 
-def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 10) -> list[dict]:
+def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 10, rerank_model: str | None = None) -> list[dict]:
     """Candidate-union search: parallel FTS + ngram → dedupe → re-rank → top-N.
 
     Runs two candidate generators in parallel:
@@ -172,6 +172,27 @@ def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 1
             scored.append((score, mem))
 
         scored.sort(key=lambda x: x[0], reverse=True)
+
+        # Optional cross-encoder rerank: take top-50, score with cross-encoder,
+        # then reorder. Final truncation to `limit` happens after this step.
+        if rerank_model:
+            top50 = [mem for _, mem in scored[:50]]
+            try:
+                from memem.cross_encoder_rerank import rerank_pairs
+
+                ce_pairs = rerank_pairs(query, top50, model_name=rerank_model)
+                id_to_mem = {mem.get("id", ""): mem for mem in top50}
+                reranked = [id_to_mem[mid] for mid, _score in ce_pairs if mid in id_to_mem]
+                # Append any top50 members that didn't make it into the reranked list
+                # (shouldn't happen but guard against it)
+                seen = {mem.get("id", "") for mem in reranked}
+                for mem in top50:
+                    if mem.get("id", "") not in seen:
+                        reranked.append(mem)
+                return reranked[:limit]
+            except Exception as exc:  # noqa: BLE001
+                log.warning("cross-encoder rerank failed, using heuristic order: %s", exc)
+
         return [mem for _, mem in scored[:limit]]
     except Exception as exc:
         log.debug("Union search failed, falling back to file scan: %s", exc)
@@ -277,9 +298,10 @@ def _search_memories(
     limit: int = 10,
     record_access: bool = True,
     expand_links: bool = True,
+    rerank_model: str | None = None,
 ) -> list[dict]:
     # Try FTS-first path
-    fts_results = _search_memories_fts(query, scope_id, limit)
+    fts_results = _search_memories_fts(query, scope_id, limit, rerank_model=rerank_model)
     if fts_results:
         results = (
             _expand_graph(fts_results, max_total=limit * 2, hops=2)
@@ -597,8 +619,8 @@ def _format_memory_as_bullet(mem: dict) -> str:
     return line
 
 
-def memory_recall(query: str, scope_id: str = "default", limit: int = 10) -> str:
-    memories = _search_memories(query, scope_id=scope_id, limit=limit)
+def memory_recall(query: str, scope_id: str = "default", limit: int = 10, rerank_model: str | None = None) -> str:
+    memories = _search_memories(query, scope_id=scope_id, limit=limit, rerank_model=rerank_model)
     transcript_results = transcript_search(query, limit=3)
 
     if not memories and ("No matching" in transcript_results or not transcript_results):
