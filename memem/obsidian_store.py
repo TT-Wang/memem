@@ -776,43 +776,45 @@ def _containment(a: set, b: set) -> float:
 def _find_best_match(content: str, scope_id: str = "default") -> tuple[dict | None, float]:
     """Return (best_mem, best_score) for the closest existing memory to content.
 
-    Uses CONTENT-ONLY scoring (containment) for dedup/merge decisions.
-    No temporal or access weighting — those belong in the recall path only.
+    Uses rapidfuzz.fuzz.token_set_ratio for dedup/merge decisions.
+    Score is normalised to 0-1 (rapidfuzz returns 0-100) so existing
+    delta_policy thresholds (_DUPLICATE_REJECT_THRESHOLD=0.7, etc.) are unchanged.
     Score thresholds: <0.3 = new, 0.3-0.6 = merge candidate, >0.6 = duplicate.
     """
-    content_words = _word_set(content)
-    if not content_words:
-        return None, 0.0
+    from rapidfuzz import fuzz
+    from rapidfuzz import process as rf_process
 
-    content_bigrams = _ngram_set(content, 2)
-    content_trigrams = _ngram_set(content, 3)
+    if not content.strip():
+        return None, 0.0
 
     normalized = _normalize_scope_id(scope_id)
     project = None if normalized == "general" else normalized
-    best_score = 0.0
-    best_mem = None
 
+    choices: dict[str, str] = {}
+    mem_by_id: dict[str, dict] = {}
     for mem in _obsidian_memories(project):
-        mem_text = mem.get("essence", "") + " " + mem.get("title", "")
-        mem_words = _word_set(mem_text)
-        if not mem_words:
+        mid = mem.get("id", "")
+        if not mid:
             continue
-        word_c = _containment(content_words, mem_words)
-        bigram_c = _containment(content_bigrams, _ngram_set(mem_text, 2))
-        trigram_c = _containment(content_trigrams, _ngram_set(mem_text, 3))
-        score = 0.5 * word_c + 0.3 * bigram_c + 0.2 * trigram_c
-        if score > best_score:
-            best_score = score
-            best_mem = mem
+        mem_by_id[mid] = mem
+        choices[mid] = mem.get("essence", "") + " " + mem.get("title", "")
 
-    return best_mem, best_score
+    if not choices:
+        return None, 0.0
+
+    result = rf_process.extractOne(content, choices, scorer=fuzz.token_set_ratio)
+    if result is None:
+        return None, 0.0
+
+    # When choices is a dict, extractOne returns (matched_value, score, key).
+    _matched_value, raw_score, best_id = result
+    return mem_by_id[best_id], raw_score / 100.0
 
 
 def _is_duplicate(content: str, scope_id: str = "default", threshold: float = 0.7,
                   return_match: bool = False) -> dict | bool | None:
-    """Check for duplicate via blended word/bigram/trigram overlap against Obsidian memories."""
-    content_words = _word_set(content)
-    if not content_words:
+    """Check for duplicate via rapidfuzz token_set_ratio against Obsidian memories."""
+    if not content.strip():
         return None if return_match else False
 
     best_mem, best_score = _find_best_match(content, scope_id)
@@ -827,43 +829,43 @@ _SAME_PROJECT_BONUS = 0.05
 
 
 def _ngram_search_candidates(query: str, scope_id: str = "default", limit: int = 20) -> list[str]:
-    """Return memory IDs ranked by ngram containment against `query`.
+    """Return memory IDs ranked by fuzzy similarity against ``query``.
 
     Second candidate generator alongside FTS5, used by the union-rank path
-    in recall.py. Catches semantic/paraphrase matches that FTS surface-form
-    matching misses (e.g. query "postgres async" matching memory content
-    "asyncpg driver"). Operates on the in-memory vault cache so post-m1
-    cost is O(N) dict iteration with no disk I/O.
+    in recall.py. Uses rapidfuzz.process.extract with token_set_ratio so it
+    catches semantic/paraphrase matches that FTS surface-form matching misses
+    (e.g. query "postgres async" matching memory "asyncpg driver").
 
-    Uses the same scoring as `_find_related` (0.5 word + 0.3 bigram +
-    0.2 trigram containment) with threshold 0.2 — higher than _find_related's
-    0.15 because search candidates need broader recall than link suggestions
-    don't (re-ranker filters noise downstream).
+    score_cutoff=20 (out of 100) mirrors the old 0.2 containment threshold.
     """
-    query_words = _word_set(query)
-    if not query_words:
+    from rapidfuzz import fuzz
+    from rapidfuzz import process as rf_process
+
+    if not query.strip():
         return []
-    query_bigrams = _ngram_set(query, 2)
-    query_trigrams = _ngram_set(query, 3)
+
     normalized = _normalize_scope_id(scope_id) if scope_id else "general"
     scope_arg = None if normalized == "general" else normalized
 
-    scored: list[tuple[float, str]] = []
+    choices: dict[str, str] = {}
     for mem in _obsidian_memories(scope_arg):
-        mem_text = mem.get("essence", "") + " " + mem.get("title", "")
-        mem_words = _word_set(mem_text)
-        if not mem_words:
+        mid = mem.get("id", "")
+        if not mid:
             continue
-        word_c = _containment(query_words, mem_words)
-        bigram_c = _containment(query_bigrams, _ngram_set(mem_text, 2))
-        trigram_c = _containment(query_trigrams, _ngram_set(mem_text, 3))
-        score = 0.5 * word_c + 0.3 * bigram_c + 0.2 * trigram_c
-        if score < 0.2:
-            continue
-        scored.append((score, mem.get("id", "")))
+        choices[mid] = mem.get("essence", "") + " " + mem.get("title", "")
 
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [mid for _, mid in scored[:limit]]
+    if not choices:
+        return []
+
+    results = rf_process.extract(
+        query,
+        choices,
+        scorer=fuzz.token_set_ratio,
+        score_cutoff=20,
+        limit=limit,
+    )
+    # When choices is a dict, extract returns (matched_value, score, key) per entry.
+    return [mid for _val, _score, mid in results]
 
 
 def _find_related(content: str, exclude_id: str, scope_id: str = "default", limit: int = 3) -> list[str]:
