@@ -294,26 +294,6 @@ def extract_open_tensions(
                 why_open="task appears artifact-driven but no artifact candidates were available",
             )
 
-    strong_candidates = sorted(
-        [candidate for candidate in candidate_bundle.get("memory_candidates", []) if float(candidate.get("score", 0.0) or 0.0) >= 0.7],
-        key=lambda candidate: float(candidate.get("score", 0.0) or 0.0),
-        reverse=True,
-    )
-    if len(strong_candidates) >= 2:
-        first = strong_candidates[0]
-        second = strong_candidates[1]
-        first_terms = _token_set(f"{first.get('title', '')} {first.get('summary', '')}")
-        second_terms = _token_set(f"{second.get('title', '')} {second.get('summary', '')}")
-        overlap = len(first_terms & second_terms) / max(len(first_terms | second_terms), 1)
-        if overlap <= 0.15:
-            linked_ids = [candidate.get("memory_id", "") for candidate in (first, second) if candidate.get("memory_id")]
-            add_tension(
-                "Multiple strong candidate clusters suggest an unresolved tradeoff.",
-                severity="medium",
-                linked_memory_ids=linked_ids,
-                why_open="top candidates are strong but semantically divergent",
-            )
-
     for candidate in flatten_candidate_bundle(candidate_bundle):
         if candidate.get("candidate_type") == "current_query":
             continue
