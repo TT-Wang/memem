@@ -61,14 +61,14 @@ def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 1
     candidate_limit = limit * 4  # generous — re-ranker filters noise
 
     try:
-        from memem.embedding_index import _search_embedding
+        from memem.embedding_index import _search_embedding_with_scores
         from memem.obsidian_store import _ngram_search_candidates
         from memem.search_index import _search_fts
 
         with ThreadPoolExecutor(max_workers=3) as pool:
             fts_future = pool.submit(_search_fts, query, scope, candidate_limit)
             ngram_future = pool.submit(_ngram_search_candidates, query, scope, candidate_limit)
-            emb_future = pool.submit(_search_embedding, query, candidate_limit)
+            emb_future = pool.submit(_search_embedding_with_scores, query, candidate_limit)
             try:
                 fts_ids = fts_future.result(timeout=10) or []
             except Exception as exc:
@@ -81,10 +81,18 @@ def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 1
                 ngram_ids = []
             try:
                 # Embedding has a longer budget — model encode dominates.
-                emb_ids = emb_future.result(timeout=30) or []
+                emb_results = emb_future.result(timeout=30) or []
             except Exception as exc:
                 log.debug("embedding candidate generation failed: %s", exc)
-                emb_ids = []
+                emb_results = []
+
+        # Build embedding-score lookup AND id list for the union step.
+        # Cosine values are in [-1, 1] but for natural-language sentence
+        # embeddings they typically land in [0, 1]; clamp negatives to 0.
+        emb_score_by_id: dict[str, float] = {
+            mid: max(0.0, score) for mid, score in emb_results
+        }
+        emb_ids = [mid for mid, _score in emb_results]
 
         if not fts_ids and not ngram_ids and not emb_ids:
             return []
@@ -110,7 +118,12 @@ def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 1
         if not mems:
             return []
 
-        # 5-signal re-rank across the FULL union (not after any truncation)
+        # 6-signal re-rank across the FULL union (not after any truncation).
+        # Weights: FTS 0.30 + embedding 0.20 + recency 0.15 + access 0.10 +
+        # importance 0.15 + feedback 0.10 = 1.00. Reduced FTS weight from
+        # 0.45 → 0.30 to make room for embedding cosine (which was previously
+        # computed but discarded). Embedding gets 0.20 — meaningful but not
+        # dominant; FTS still leads on direct keyword matches.
         from memem.feedback import get_relevance_score
 
         scored: list[tuple[float, dict]] = []
@@ -135,17 +148,24 @@ def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 1
                 rank_pos = fts_rank_by_id[mem_id]
                 fts_rank = 1.0 - (rank_pos / total_fts)
             else:
-                # ngram-only hit — give a neutral FTS score so ngram signal
-                # isn't forced to beat a "0 FTS rank" penalty.
+                # ngram-only / embedding-only hit — give a neutral FTS score
+                # so non-FTS signals aren't forced to beat a "0 FTS rank"
+                # penalty.
                 fts_rank = 0.5
+
+            # Embedding cosine in [0, 1]. Candidates outside the embedding
+            # top-K (FTS-only / ngram-only hits) get 0 — "no semantic signal
+            # detected" is itself information, not a neutral 0.5 guess.
+            embedding_score = emb_score_by_id.get(mem_id, 0.0)
 
             feedback_raw = get_relevance_score(mem_id)
             feedback_norm = (feedback_raw + 1.0) / 2.0
 
             score = (
-                0.45 * fts_rank
+                0.30 * fts_rank
+                + 0.20 * embedding_score
                 + 0.15 * recency
-                + 0.15 * access_boost
+                + 0.10 * access_boost
                 + 0.15 * importance
                 + 0.10 * feedback_norm
             )

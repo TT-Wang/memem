@@ -350,7 +350,7 @@ def test_union_search_survives_embedding_timeout(tmp_vault, tmp_cortex_dir, monk
 
     def raise_embedding(*args, **kwargs):
         raise RuntimeError("embedding model broke")
-    monkeypatch.setattr("memem.embedding_index._search_embedding", raise_embedding)
+    monkeypatch.setattr("memem.embedding_index._search_embedding_with_scores", raise_embedding)
 
     results = recall._search_memories_fts("anything", "default", limit=10)
     ids = {m.get("id") for m in results}
@@ -381,8 +381,8 @@ def test_union_search_includes_embedding_only_candidate(tmp_vault, tmp_cortex_di
         "memem.obsidian_store._ngram_search_candidates", lambda q, scope, limit: [],
     )
     monkeypatch.setattr(
-        "memem.embedding_index._search_embedding",
-        lambda q, limit: [mem["id"]],
+        "memem.embedding_index._search_embedding_with_scores",
+        lambda q, limit: [(mem["id"], 0.85)],
     )
 
     results = recall._search_memories_fts("anything", "default", limit=10)

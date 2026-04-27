@@ -108,3 +108,69 @@ def test_fts_special_query_chars(tmp_cortex_dir):
         results = _search_fts(q, limit=10)
         assert isinstance(results, list), f"query {q!r} should return a list, got {type(results)}"
     assert "tok-query-test" in _search_fts("JWT auth", limit=10)
+
+
+def test_search_embedding_with_scores_returns_tuples(monkeypatch):
+    """_search_embedding_with_scores must return (id, cosine) pairs.
+
+    Regression guard: the rerank now uses the cosine score as the 6th
+    signal. If this function silently regresses to returning IDs only,
+    the rerank's embedding_score lookup falls back to 0.0 for every
+    candidate, which kills the semantic signal in the union path.
+    """
+    from memem import embedding_index
+
+    fake_ids = ["mem-a", "mem-b", "mem-c"]
+
+    class FakeArr:
+        def __init__(self, vals):
+            self._vals = list(vals)
+            self.shape = (len(vals),)
+
+        def __matmul__(self, _other):
+            return self
+
+        def __getitem__(self, i):
+            return self._vals[i]
+
+        def __neg__(self):
+            return FakeArr([-v for v in self._vals])
+
+        def reshape(self, *_args, **_kwargs):
+            return self
+
+    class FakeNp:
+        float32 = "f32"
+
+        @staticmethod
+        def asarray(_x, dtype=None):  # noqa: ARG004
+            return FakeArr([0.0])
+
+        @staticmethod
+        def argsort(_arr):
+            return [0, 1, 2]
+
+    class FakeMatrix:
+        shape = (3, 384)
+
+        def __matmul__(self, _q):
+            return FakeArr([0.91, 0.62, 0.34])
+
+    class FakeModel:
+        def encode(self, _xs, **_kwargs):
+            return [[0.0]]
+
+    monkeypatch.setattr(embedding_index, "_get_model", lambda: FakeModel())
+    monkeypatch.setattr(embedding_index, "_load_index", lambda: True)
+    monkeypatch.setattr(embedding_index, "_try_import", lambda: ("st", FakeNp))
+    monkeypatch.setattr(embedding_index, "_index_matrix", FakeMatrix())
+    monkeypatch.setattr(embedding_index, "_index_ids", fake_ids)
+
+    results = embedding_index._search_embedding_with_scores("any query", limit=5)
+    assert results == [("mem-a", 0.91), ("mem-b", 0.62), ("mem-c", 0.34)], (
+        f"expected (id, cosine) tuples in descending order; got {results!r}"
+    )
+
+    # Backwards-compat: bare ID API still works.
+    bare = embedding_index._search_embedding("any query", limit=5)
+    assert bare == ["mem-a", "mem-b", "mem-c"]

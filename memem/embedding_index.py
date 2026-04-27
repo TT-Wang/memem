@@ -180,6 +180,19 @@ def _search_embedding(query: str, limit: int = 20) -> list[str]:
     Returns [] if the optional dependency isn't installed or the index
     hasn't been built yet. Strict additive signal: never raises, never
     blocks the parent union-rank path.
+
+    Backwards-compat wrapper around :func:`_search_embedding_with_scores`
+    for callers that only want IDs.
+    """
+    return [mid for mid, _score in _search_embedding_with_scores(query, limit)]
+
+
+def _search_embedding_with_scores(query: str, limit: int = 20) -> list[tuple[str, float]]:
+    """Like :func:`_search_embedding` but returns ``(memory_id, cosine)`` pairs.
+
+    Cosine values are in [-1, 1] but for normalized embeddings of natural
+    language they typically land in [0, 1]; the rerank consumer should
+    treat them as a non-negative semantic-strength signal.
     """
     if not query:
         return []
@@ -196,7 +209,11 @@ def _search_embedding(query: str, limit: int = 20) -> list[str]:
         q = np.asarray(q_vec, dtype=np.float32).reshape(-1)
         sims = _index_matrix @ q  # (N,) — rows are L2-normalized so this is cosine
         top = np.argsort(-sims)[:limit]
-        return [_index_ids[i] for i in top if 0 <= i < len(_index_ids)]
+        results: list[tuple[str, float]] = []
+        for i in top:
+            if 0 <= i < len(_index_ids):
+                results.append((_index_ids[i], float(sims[i])))
+        return results
     except Exception as exc:  # noqa: BLE001
         log.warning("embedding search failed: %s", exc)
         return []
