@@ -450,3 +450,74 @@ def test_commit_deltas_public_wrapper_respects_auto_only(tmp_vault, tmp_cortex_d
     memories = obsidian_store._obsidian_memories()
     titles = {memory["title"] for memory in memories}
     assert "Skipped by auto_only wrapper" not in titles
+
+
+def test_commit_deltas_auto_only_preserves_position_with_duplicate_delta_ids(tmp_vault, tmp_cortex_dir):
+    """Two deltas with the same delta_id (or empty) must not silently
+    overwrite each other in the auto_only path. Regression guard for H1."""
+    _delta, delta_commit, _delta_policy, _models, obsidian_store = _load_modules()
+
+    a = obsidian_store._make_memory(
+        content="First memory in the duplicate-id auto_only regression test scenario.",
+        title="Dup-id A",
+        project="memem",
+    )
+    b = obsidian_store._make_memory(
+        content="Second memory in the duplicate-id auto_only regression test scenario.",
+        title="Dup-id B",
+        project="memem",
+    )
+    c = obsidian_store._make_memory(
+        content="Third memory in the duplicate-id auto_only regression test scenario.",
+        title="Dup-id C",
+        project="memem",
+    )
+    obsidian_store._save_memory(a)
+    obsidian_store._save_memory(b)
+    obsidian_store._save_memory(c)
+
+    # Both deltas share the same delta_id. Pre-fix this would clobber the
+    # first result with the second in the deferred dict; post-fix the
+    # returned list preserves both by position.
+    results = delta_commit.commit_deltas([
+        {
+            "delta_id": "shared_id",
+            "delta_type": "save_new_memory",
+            "target_memory_ids": [a["id"]],
+            "proposed_title": "Manual-review note one",
+            "proposed_content": "First manual-review note proposal that requires gating before it lands.",
+            "confidence": 0.55,
+            "source_slice_id": "slice_dup_id",
+        },
+        {
+            "delta_id": "shared_id",
+            "delta_type": "save_new_memory",
+            "target_memory_ids": [b["id"]],
+            "proposed_title": "Manual-review note two",
+            "proposed_content": "Second manual-review note proposal that also requires gating before it lands.",
+            "confidence": 0.55,
+            "source_slice_id": "slice_dup_id",
+        },
+    ], scope_id="memem", dry_run=False, auto_only=True)
+
+    assert len(results) == 2
+    # Both proposals were skipped (manual_review under auto_only) but the
+    # order matches the input. With the pre-fix dict-keyed bookkeeping
+    # both entries would point at the same dict value.
+    assert results[0]["status"] == "skipped"
+    assert results[1]["status"] == "skipped"
+    titles_in_results = [r.get("preview", {}).get("title", "") for r in results]
+    # The previews carry per-position content, proving both deltas survived.
+    assert titles_in_results[0] != titles_in_results[1]
+
+
+def test_writeback_status_returns_dry_run_when_persistence_fails(tmp_vault, tmp_cortex_dir):
+    """A dry-run batch whose persistence fails must report status=dry_run,
+    not partial. Regression guard for H3."""
+    _delta, delta_commit, _delta_policy, _models, _obsidian_store = _load_modules()
+    summary = delta_commit._summarize_results(
+        [{"status": "dry_run"}, {"status": "dry_run"}],
+        dry_run=True,
+        persistence_failed=True,
+    )
+    assert summary["status"] == "dry_run"

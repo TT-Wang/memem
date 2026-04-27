@@ -175,6 +175,22 @@ def _validate_new_memory(delta: DeltaProposal, explanation: list[str], warnings:
         if content_threat:
             validation_errors.append(content_threat)
 
+    # Tags eventually land in vault frontmatter and the index file; reason
+    # is persisted in the delta state file and re-read on slice history
+    # load. Both surfaces should be scanned for prompt-injection patterns.
+    proposed_tags = delta.get("proposed_tags", [])
+    if isinstance(proposed_tags, list) and proposed_tags:
+        joined_tags = " ".join(str(tag) for tag in proposed_tags if str(tag).strip())
+        if joined_tags:
+            tag_threat = scan_memory_content(joined_tags)
+            if tag_threat:
+                validation_errors.append(f"proposed_tags: {tag_threat}")
+    reason = str(delta.get("reason", "") or "").strip()
+    if reason:
+        reason_threat = scan_memory_content(reason)
+        if reason_threat:
+            validation_errors.append(f"reason: {reason_threat}")
+
     target_memory_ids = _normalized_ids(delta.get("target_memory_ids"))
     if target_memory_ids:
         _, missing, deprecated, cross_scope = _target_memories(target_memory_ids, _scope_id(delta))

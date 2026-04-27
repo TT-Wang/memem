@@ -506,6 +506,12 @@ def _build_mcp():
             )
             if raw_json:
                 return json.dumps(result, indent=2, sort_keys=True)
+            # Note: rendered markdown surfaces only the slice. Delta results
+            # (proposed writebacks + their commit/dry-run outcomes) are
+            # computed but not folded into the prompt context. Callers that
+            # need the writeback outcome must pass raw_json=True. This is
+            # intentional — prompt context stays human-narrative; structured
+            # delta state belongs in the JSON envelope.
             return _generate_prompt_context(
                 query,
                 scope_id=scope_id,

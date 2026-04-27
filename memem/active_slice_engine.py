@@ -492,13 +492,27 @@ def generate_prompt_context(
     mode: PromptContextMode = "slice",
     slice_obj: ActiveMemorySlice | None = None,
 ) -> str:
-    """Generate runtime prompt context using slice-first projection."""
-    current_slice = slice_obj or generate_active_memory_slice(
-        query,
-        scope_id=scope_id,
-        environment=environment,
-        use_llm=use_llm,
-    )
+    """Generate runtime prompt context using slice-first projection.
+
+    History persistence is the caller's responsibility. The internal slice
+    fallback path (when ``slice_obj`` is None) deliberately runs with
+    ``persist_history=False`` so that wrappers like
+    ``active_slice_response`` — which already persist — don't double-write
+    history records for what is logically one turn.
+    """
+    if slice_obj is None:
+        current_slice = _generate_active_memory_slice_internal(
+            query,
+            scope_id=scope_id,
+            environment=environment,
+            use_llm=use_llm,
+            writeback_mode="policy_only",
+            auto_commit_safe=False,
+            dry_run=True,
+            persist_history=False,
+        )
+    else:
+        current_slice = slice_obj
     if not current_slice.get("should_emit_context", True):
         return ""
 

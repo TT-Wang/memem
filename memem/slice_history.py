@@ -136,20 +136,31 @@ def persist_slice_history(
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_suffix(".lock")
     fd = open(lock_path, "w")
+    tmp_path = path.with_suffix(".tmp")
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         records = load_slice_history(history_file=path, limit=0)
         records.append(_history_record(slice_obj))
         if max_records > 0:
             records = records[-max_records:]
-        tmp_path = path.with_suffix(".tmp")
-        with open(tmp_path, "w", encoding="utf-8") as out:
-            for record in records:
-                out.write(json.dumps(record, sort_keys=True, default=str))
-                out.write("\n")
-            out.flush()
-            os.fsync(out.fileno())
-        os.replace(tmp_path, path)
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as out:
+                for record in records:
+                    out.write(json.dumps(record, sort_keys=True, default=str))
+                    out.write("\n")
+                out.flush()
+                os.fsync(out.fileno())
+            os.replace(tmp_path, path)
+        except Exception:
+            # Clean up the orphan .tmp before another lock holder reuses
+            # the fixed path. Without this, an interrupted write leaves a
+            # truncated file that the next caller would treat as a half-
+            # finished commit.
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
         return records
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)

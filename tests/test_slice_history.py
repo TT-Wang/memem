@@ -140,3 +140,60 @@ def test_explicit_resolved_tensions_do_not_duplicate_open_tensions():
 
     assert [tension["description"] for tension in annotated["open_tensions"]] == ["Owner unclear"]
     assert [tension["description"] for tension in annotated["resolved_tensions"]] == ["Migration risk unverified"]
+
+
+def test_persist_slice_history_cleans_orphan_tmp_on_failure(tmp_cortex_dir, monkeypatch):
+    """If os.replace fails mid-persist, the .tmp file must be unlinked so a
+    later writer is not preempted by an in-progress orphan. H2 guard."""
+    import pytest
+
+    from memem import models, slice_history
+
+    first = _slice("slice-1", goal_titles=["Persist once"])
+    slice_history.persist_slice_history(first, max_records=4)
+
+    history_path = models.ACTIVE_SLICE_HISTORY_FILE
+    tmp_path = history_path.with_suffix(".tmp")
+
+    def boom(*_args, **_kwargs):
+        raise OSError("simulated cross-device replace failure")
+
+    monkeypatch.setattr(slice_history.os, "replace", boom)
+
+    with pytest.raises(OSError, match="simulated"):
+        slice_history.persist_slice_history(_slice("slice-2"), max_records=4)
+
+    assert not tmp_path.exists(), "orphan .tmp must be cleaned up after a failed replace"
+
+
+def test_persist_slice_history_serializes_concurrent_writers(tmp_cortex_dir):
+    """Two threads writing simultaneously must each land a record without
+    corruption. Exercises the fcntl LOCK_EX guard."""
+    import threading
+
+    from memem import slice_history
+
+    errors: list[BaseException] = []
+    barrier = threading.Barrier(4)
+
+    def writer(i: int) -> None:
+        barrier.wait()
+        try:
+            slice_history.persist_slice_history(
+                _slice(f"slice-thread-{i}", goal_titles=[f"Goal {i}"]),
+                max_records=64,
+            )
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=writer, args=(i,)) for i in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"concurrent writers must not error: {errors}"
+    loaded = slice_history.load_slice_history(scope_id="memem", session_id="session-1", limit=64)
+    slice_ids = {entry["slice_id"] for entry in loaded}
+    for i in range(4):
+        assert f"slice-thread-{i}" in slice_ids

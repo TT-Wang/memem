@@ -8,6 +8,13 @@ import tempfile
 from collections.abc import Collection
 from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 
+try:
+    import fcntl  # POSIX-only; memem targets macOS/Linux
+    _HAS_FCNTL = True
+except ImportError:  # pragma: no cover — Windows fallback
+    fcntl = None  # type: ignore[assignment]
+    _HAS_FCNTL = False
+
 from memem.active_slice import DeltaWritebackResult, WritebackSummary
 from memem.delta_policy import DeltaPolicyDecision, evaluate_delta_proposal
 from memem.models import DELTA_AUDIT_LOG, DELTA_STATE_DIR, _normalize_scope_id, now_iso
@@ -95,9 +102,23 @@ def _write_json_file(path: str, payload: dict[str, Any]) -> None:
 
 
 def _append_delta_audit_entry(entry: dict[str, Any]) -> None:
+    """Append one JSON-line to the audit log, locked exclusively.
+
+    Concurrent writers (hook subprocess + MCP tool call) would otherwise
+    interleave bytes mid-line, breaking the JSONL invariant readers rely on.
+    """
     DELTA_AUDIT_LOG.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(entry, sort_keys=True, default=str) + "\n"
     with open(DELTA_AUDIT_LOG, "a", encoding="utf-8") as handle:
-        handle.write(json.dumps(entry, sort_keys=True, default=str) + "\n")
+        if _HAS_FCNTL:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                handle.write(line)
+                handle.flush()
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        else:
+            handle.write(line)
 
 
 def _preview_related_link(delta: DeltaProposal, target_memory_ids: list[str]) -> DeltaExecutionPreview:
@@ -212,12 +233,16 @@ def _commit_time_decision(
     delta: DeltaProposal,
     provided_decision: DeltaPolicyDecision | None,
 ) -> DeltaPolicyDecision:
-    current_decision = evaluate_delta_proposal(delta)
-    if provided_decision and _decision_changed(provided_decision, current_decision):
-        warnings = list(current_decision.get("warnings", []))
-        warnings.append("Commit-time policy re-evaluation detected a vault-state change; stale decision was discarded.")
-        current_decision["warnings"] = warnings
-    return current_decision
+    """Re-evaluate at commit time only when no fresh decision was provided.
+
+    The batch path passes the same decision it already evaluated upstream;
+    re-running ``evaluate_delta_proposal`` here would double the FTS
+    duplicate-check cost on every save_new_memory delta. Trust the caller
+    when a decision is supplied, and only re-run when none is given.
+    """
+    if provided_decision is not None:
+        return provided_decision
+    return evaluate_delta_proposal(delta)
 
 
 def _project_for_delta(delta: DeltaProposal, decision: DeltaPolicyDecision) -> str:
@@ -396,6 +421,11 @@ def _writeback_status(
     persistence_failed: bool = False,
 ) -> SummaryStatus:
     if persistence_failed:
+        # A dry-run that fails persistence still touched no vault state.
+        # Returning "partial" here would mislead callers into thinking
+        # writes happened. Check dry_run before any other branch.
+        if dry_run:
+            return "dry_run"
         if any(result.get("status") == "committed" for result in results):
             return "partial"
         if any(result.get("status") in {"blocked", "rejected"} for result in results):
@@ -759,46 +789,42 @@ def commit_deltas(
     decisions = [evaluate_delta_proposal(delta) for delta in scoped_deltas]
 
     if auto_only and not dry_run:
+        # Position-keyed bookkeeping: callers can theoretically supply two
+        # deltas with the same (or empty) delta_id. Indexing by position
+        # avoids a silent overwrite where the second delta's result would
+        # replace the first's in the returned list.
         eligible: list[DeltaProposal] = []
         eligible_decisions: list[DeltaPolicyDecision] = []
-        deferred: dict[str, dict[str, Any]] = {}
-        for delta, decision in zip(scoped_deltas, decisions, strict=False):
-            delta_id = str(delta.get("delta_id", "") or "")
+        eligible_positions: list[int] = []
+        ordered: list[dict[str, Any] | None] = [None] * len(scoped_deltas)
+        for pos, (delta, decision) in enumerate(zip(scoped_deltas, decisions, strict=False)):
             preview = _build_preview(delta, decision)
             if decision.get("commit_policy") == "auto_safe" and decision.get("decision") == "commit_safe":
                 eligible.append(delta)
                 eligible_decisions.append(decision)
+                eligible_positions.append(pos)
                 continue
-            deferred[delta_id] = _auto_only_result(delta, decision, dry_run=dry_run, preview=preview)
+            ordered[pos] = _auto_only_result(delta, decision, dry_run=dry_run, preview=preview)
 
-        executed_by_id: dict[str, dict[str, Any]] = {}
         if eligible:
             batch = execute_delta_writeback(
                 eligible,
                 dry_run=dry_run,
                 policy_decisions=eligible_decisions,
             )
-            preview_by_id = {
-                str(preview.get("delta_id", "") or ""): preview
-                for preview in batch.get("previews", [])
-                if str(preview.get("delta_id", "") or "")
-            }
-            for result in batch.get("results", []):
-                delta_id = str(result.get("delta_id", "") or "")
-                executed_by_id[delta_id] = _public_result(
+            previews = batch.get("previews", []) or []
+            results = batch.get("results", []) or []
+            for offset, result in enumerate(results):
+                preview = previews[offset] if offset < len(previews) else None
+                ordered[eligible_positions[offset]] = _public_result(
                     result,
-                    preview=preview_by_id.get(delta_id),
+                    preview=preview,
                     execution_id=str(batch.get("execution_id", "") or ""),
                     audit_log_path=str(batch.get("audit_log_path", "") or ""),
                     state_file=str(batch.get("state_file", "") or ""),
                     writeback_summary=batch.get("writeback_summary", {}),
                 )
-
-        ordered: list[dict[str, Any]] = []
-        for delta in scoped_deltas:
-            delta_id = str(delta.get("delta_id", "") or "")
-            ordered.append(executed_by_id.get(delta_id) or deferred[delta_id])
-        return ordered
+        return [entry for entry in ordered if entry is not None]
 
     batch = execute_delta_writeback(
         scoped_deltas,
