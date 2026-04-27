@@ -348,6 +348,7 @@ def _generate_active_memory_slice_internal(
         try:
             activation = judge_activation_with_llm(query, normalized_scope, activation_env, filtered_bundle)
         except Exception as exc:
+            log.warning("LLM activation failed (%s); falling back to heuristic", exc)
             activation = judge_activation_heuristically(query, normalized_scope, activation_env, filtered_bundle)
             activation["warnings"] = list(activation.get("warnings", [])) + [
                 f"LLM activation raised {type(exc).__name__}; used heuristic activation.",

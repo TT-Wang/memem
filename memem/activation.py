@@ -519,6 +519,23 @@ def _sanitize_llm_result(data: dict[str, Any]) -> ActivationResult:
     return result
 
 
+def judge_activation(
+    query: str,
+    scope_id: str,
+    environment: dict[str, Any],
+    candidate_bundle: CandidateBundle,
+    *,
+    use_llm: bool = True,
+) -> ActivationResult:
+    """Public entrypoint — try LLM, fall back to heuristic on any failure."""
+    if use_llm:
+        try:
+            return judge_activation_with_llm(query, scope_id, environment, candidate_bundle)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("LLM activation failed (%s); falling back to heuristic", exc)
+    return judge_activation_heuristically(query, scope_id, environment, candidate_bundle)
+
+
 def judge_activation_with_llm(
     query: str,
     scope_id: str,
