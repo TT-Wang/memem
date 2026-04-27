@@ -157,3 +157,123 @@ def test_role_specific_scoring_changes_order():
 
     assert decision_score > decision_as_failure
     assert failure_score > failure_as_decision
+
+
+# --- Cross-project score penalty tests (m2) ---
+
+
+def test_same_project_scores_higher_than_cross_project_in_scope_strict():
+    """scope_strict=True: same-project candidate must outscore an identical cross-project one."""
+    from memem.activation import score_candidate_for_role
+
+    same_project = {
+        "candidate_id": "same",
+        "candidate_type": "memory",
+        "memory_id": "same",
+        "title": "Auth implementation notes",
+        "summary": "Auth implementation details and decisions made.",
+        "project": "memem",
+        "importance": 3,
+        "score": 0.7,
+    }
+    cross_project = {
+        "candidate_id": "cross",
+        "candidate_type": "memory",
+        "memory_id": "cross",
+        "title": "Auth implementation notes",
+        "summary": "Auth implementation details and decisions made.",
+        "project": "other-project",
+        "importance": 3,
+        "score": 0.7,
+    }
+    environment = {"scope_id": "memem", "scope_strict": True}
+    query = "auth implementation"
+
+    same_score = score_candidate_for_role(same_project, "decisions", query, environment)
+    cross_score = score_candidate_for_role(cross_project, "decisions", query, environment)
+
+    assert same_score > cross_score, (
+        f"Expected same-project score ({same_score:.4f}) > cross-project score ({cross_score:.4f})"
+    )
+
+
+def test_cross_project_candidate_still_appears_in_output_scope_strict():
+    """scope_strict=True: cross-project candidates must not be dropped, only penalized."""
+    from memem.activation import judge_activation_heuristically
+    from memem.active_slice import current_query_candidate
+
+    bundle = {
+        "current_goal_candidates": [current_query_candidate("Fix auth bug", "memem")],
+        "memory_candidates": [
+            {
+                "candidate_id": "same-mem",
+                "candidate_type": "memory",
+                "memory_id": "same-mem",
+                "title": "Must preserve login constraint",
+                "summary": "The fix must preserve the login constraint.",
+                "project": "memem",
+                "importance": 4,
+                "score": 0.75,
+            },
+            {
+                "candidate_id": "cross-mem",
+                "candidate_type": "memory",
+                "memory_id": "cross-mem",
+                "title": "Constraint from other project",
+                "summary": "Cross-project constraint that should remain visible.",
+                "project": "other-project",
+                "importance": 4,
+                "score": 0.75,
+            },
+        ],
+        "playbook_candidate": None,
+        "transcript_candidates": [],
+        "artifact_candidates": [],
+        "environment_candidates": [],
+    }
+
+    result = judge_activation_heuristically(
+        "Fix auth bug",
+        "memem",
+        {"scope_id": "memem", "scope_strict": True},
+        bundle,
+    )
+
+    all_entries = (
+        result.get("goals", [])
+        + result.get("constraints", [])
+        + result.get("decisions", [])
+        + result.get("preferences", [])
+        + result.get("failure_patterns", [])
+        + result.get("artifact_context", [])
+        + result.get("background", [])
+    )
+    all_ids = {entry["candidate_id"] for entry in all_entries}
+    assert "cross-mem" in all_ids, "Cross-project candidate was dropped; it should remain visible-but-secondary."
+
+
+def test_no_penalty_without_scope_strict():
+    """scope_strict=False (default): cross-project candidates get no additional penalty."""
+    from memem.activation import score_candidate_for_role
+
+    candidate = {
+        "candidate_id": "cross",
+        "candidate_type": "memory",
+        "memory_id": "cross",
+        "title": "Decision from other project",
+        "summary": "We decided to adopt this pattern across projects.",
+        "project": "other-project",
+        "importance": 3,
+        "score": 0.7,
+    }
+    env_strict = {"scope_id": "memem", "scope_strict": True}
+    env_default = {"scope_id": "memem"}
+    query = "adopt pattern"
+
+    score_no_strict = score_candidate_for_role(candidate, "decisions", query, env_default)
+    score_strict = score_candidate_for_role(candidate, "decisions", query, env_strict)
+
+    assert score_no_strict > score_strict, (
+        f"Without scope_strict, cross-project score ({score_no_strict:.4f}) should exceed "
+        f"scope_strict score ({score_strict:.4f})"
+    )

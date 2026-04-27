@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 from typing import Any, cast
 
@@ -18,6 +19,8 @@ from memem.active_slice import (
 from memem.capabilities import assembly_available
 
 log = logging.getLogger("memem-activation")
+
+CROSS_PROJECT_SCORE_PENALTY: float = float(os.environ.get("MEMEM_CROSS_PROJECT_PENALTY", "0.3"))
 
 _CONSTRAINT_CUES = {"must", "never", "requires", "require", "constraint", "blocked", "cannot", "do not", "should not"}
 _FAILURE_CUES = {"bug", "failure", "regression", "failed", "issue", "risk", "loophole", "avoid"}
@@ -193,26 +196,38 @@ def score_candidate_for_role(candidate: Candidate, role: str, query: str, enviro
 
     if role == "goals":
         if ctype == "current_query":
-            return 1.0
-        return min(1.0, base + importance + (overlap * 0.3) + project_bonus + focus_bonus + task_mode_bonus)
-    if role == "constraints":
+            role_score = 1.0
+        else:
+            role_score = min(1.0, base + importance + (overlap * 0.3) + project_bonus + focus_bonus + task_mode_bonus)
+    elif role == "constraints":
         cue_bonus = 0.34 if _contains(text, _CONSTRAINT_CUES) else -0.1
-        return min(1.0, max(0.0, base + importance + cue_bonus + (overlap * 0.12) + project_bonus + focus_bonus + continuity_bonus + task_mode_bonus))
-    if role == "decisions":
+        role_score = min(1.0, max(0.0, base + importance + cue_bonus + (overlap * 0.12) + project_bonus + focus_bonus + continuity_bonus + task_mode_bonus))
+    elif role == "decisions":
         cue_bonus = 0.3 if _contains(text, _DECISION_CUES) else -0.08
-        return min(1.0, max(0.0, base + importance + cue_bonus + artifact_match + (overlap * 0.14) + project_bonus + focus_bonus + task_mode_bonus))
-    if role == "preferences":
+        role_score = min(1.0, max(0.0, base + importance + cue_bonus + artifact_match + (overlap * 0.14) + project_bonus + focus_bonus + task_mode_bonus))
+    elif role == "preferences":
         cue_bonus = 0.28 if _contains(text, _PREFERENCE_CUES) else -0.08
-        return min(1.0, max(0.0, base + cue_bonus + (overlap * 0.12) + project_bonus + focus_bonus + task_mode_bonus))
-    if role == "failure_patterns":
+        role_score = min(1.0, max(0.0, base + cue_bonus + (overlap * 0.12) + project_bonus + focus_bonus + task_mode_bonus))
+    elif role == "failure_patterns":
         cue_bonus = 0.34 if _contains(text, _FAILURE_CUES) else -0.08
-        return min(1.0, max(0.0, base + importance + cue_bonus + artifact_match + (overlap * 0.14) + project_bonus + focus_bonus + continuity_bonus + task_mode_bonus))
-    if role == "artifact_context":
+        role_score = min(1.0, max(0.0, base + importance + cue_bonus + artifact_match + (overlap * 0.14) + project_bonus + focus_bonus + continuity_bonus + task_mode_bonus))
+    elif role == "artifact_context":
         cue_bonus = 0.35 if ctype in {"playbook", "artifact", "transcript"} else -0.08
-        return min(1.0, max(0.0, base + cue_bonus + artifact_match + (overlap * 0.12) + project_bonus + focus_bonus + continuity_bonus + task_mode_bonus))
-    if role == "background":
-        return min(1.0, max(0.0, base + (overlap * 0.18) + (importance * 0.5) + focus_bonus + task_mode_bonus))
-    return base
+        role_score = min(1.0, max(0.0, base + cue_bonus + artifact_match + (overlap * 0.12) + project_bonus + focus_bonus + continuity_bonus + task_mode_bonus))
+    elif role == "background":
+        role_score = min(1.0, max(0.0, base + (overlap * 0.18) + (importance * 0.5) + focus_bonus + task_mode_bonus))
+    else:
+        role_score = base
+
+    # Apply cross-project penalty when scope_strict mode is active
+    if (
+        environment.get("scope_strict") is True
+        and candidate.get("project") != environment.get("scope_id")
+        and ctype != "current_query"
+    ):
+        role_score = role_score * CROSS_PROJECT_SCORE_PENALTY
+
+    return role_score
 
 
 def extract_open_tensions(
