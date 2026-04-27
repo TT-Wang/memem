@@ -145,6 +145,69 @@ def test_find_settled_sessions_skips_memem_subprocess_fossils(tmp_cortex_dir, tm
         )
 
 
+def test_find_settled_sessions_skips_sessions_with_credentials(tmp_cortex_dir, tmp_path, monkeypatch):
+    """v0.11.2 fix: refuse to mine sessions that contain credential patterns.
+
+    A user can paste tokens (GitHub PATs, AWS keys, etc.) into chat for
+    debugging. Without this filter, those tokens get summarized by Haiku
+    into the obsidian vault as durable memories. The filter scans the
+    raw JSONL for credential patterns and skips matching sessions.
+    """
+    import json as _json
+    import os as _os
+    from pathlib import Path as _Path
+
+    from memem import session_state
+    importlib.reload(session_state)
+
+    projects = tmp_path / "projects"
+    (projects / "user-project").mkdir(parents=True)
+
+    def write_session(name: str, body_text: str) -> _Path:
+        path = projects / "user-project" / f"{name}.jsonl"
+        lines = [
+            _json.dumps({"type": "summary", "summary": "test"}),
+            _json.dumps({
+                "type": "user",
+                "message": {"role": "user", "content": "regular ask"},
+            }),
+            _json.dumps({"type": "assistant", "message": {"content": body_text}}),
+            # Pad to clear the >5k size gate
+            _json.dumps({"type": "assistant", "message": {"content": "x" * 6000}}),
+        ]
+        path.write_text("\n".join(lines))
+        old = time.time() - 1800
+        _os.utime(path, (old, old))
+        return path
+
+    monkeypatch.setattr(session_state, "SESSIONS_DIRS", [projects])
+
+    clean = write_session("clean", "Just normal conversation, nothing sensitive.")
+    ghp = write_session("ghp", "token: ghp_uoW8R4RvAsSWCEey8eFnX5FnleI0Wx0jWG")
+    fine_grained = write_session(
+        "fine-grained", "PAT=github_pat_11ABC23DE0AbCdEfGhIjKl_AbCdEfGhIjKlMn",
+    )
+    aws = write_session("aws", "export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE")
+    anthropic = write_session(
+        "anthropic", "ANTHROPIC_API_KEY=sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz",
+    )
+    slack = write_session("slack", "tok = xoxb-12345678901-AbCdEfGhIjKlMnOpQrStUvWxYz")
+    gitlab = write_session("gitlab", "PRIVATE-TOKEN: glpat-AbCdEfGhIjKlMnOpQrSt")
+
+    results = session_state.find_settled_sessions(bypass_gate=True)
+
+    assert clean in results, "clean session must still be mineable"
+    for path, label in [
+        (ghp, "GitHub classic PAT"),
+        (fine_grained, "GitHub fine-grained PAT"),
+        (aws, "AWS access key"),
+        (anthropic, "Anthropic API key"),
+        (slack, "Slack token"),
+        (gitlab, "GitLab PAT"),
+    ]:
+        assert path not in results, f"{label} should be filtered, but was returned"
+
+
 def test_find_settled_sessions_skips_lexie_project_by_default(tmp_cortex_dir, tmp_path, monkeypatch):
     """Lexie owns its own mining pipeline; memem should not mine its sessions by default."""
     from memem import session_state

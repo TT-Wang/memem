@@ -1,6 +1,7 @@
 import fcntl
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -293,6 +294,43 @@ def _looks_like_memem_subprocess(jsonl_path: Path) -> bool:
     return False
 
 
+# Credential patterns we refuse to mine. Defense-in-depth so that a token
+# pasted into chat (e.g. for debugging) never reaches the Haiku miner or
+# gets persisted to the obsidian vault. False positives are acceptable —
+# skipping one session is cheap; leaking a token is not.
+_CREDENTIAL_PATTERNS = re.compile(
+    rb"(?:"
+    rb"ghp_[A-Za-z0-9]{20,}"           # GitHub classic PAT
+    rb"|github_pat_[A-Za-z0-9_]{20,}"  # GitHub fine-grained PAT
+    rb"|gh[oush]_[A-Za-z0-9]{20,}"     # GitHub OAuth/app/refresh tokens
+    rb"|glpat-[A-Za-z0-9_-]{20,}"      # GitLab PAT
+    rb"|sk-ant-[A-Za-z0-9_-]{20,}"     # Anthropic API key
+    rb"|AKIA[0-9A-Z]{16}"              # AWS access key id
+    rb"|xox[abprs]-[A-Za-z0-9-]{20,}"  # Slack tokens
+    rb")"
+)
+
+# Read at most this many bytes per session when scanning for credentials.
+# Keeps the scan bounded for very large transcripts. JSONL lines are
+# self-contained so partial reads still match credential substrings.
+_CREDENTIAL_SCAN_MAX_BYTES = 4 * 1024 * 1024
+
+
+def _session_contains_credentials(jsonl_path: Path) -> bool:
+    """True if the JSONL contains a known credential pattern.
+
+    Scans the raw bytes of the file (no JSON parsing) so it catches tokens
+    in any position — user prompt, assistant reply, tool result, file diff
+    — not just the first user message.
+    """
+    try:
+        with open(jsonl_path, "rb") as fh:
+            data = fh.read(_CREDENTIAL_SCAN_MAX_BYTES)
+    except OSError:
+        return False
+    return bool(_CREDENTIAL_PATTERNS.search(data))
+
+
 def find_settled_sessions(
     states: dict[str, dict] | None = None,
     bypass_gate: bool = False,
@@ -350,6 +388,11 @@ def find_settled_sessions(
             # that inherit the miner daemon's cwd (e.g. the memem repo dir).
             # See _looks_like_memem_subprocess for the prompt signatures.
             if _looks_like_memem_subprocess(jsonl_path):
+                continue
+            # Credential filter: refuse to mine sessions that contain
+            # GitHub PATs, AWS keys, Anthropic API keys, etc. Prevents
+            # leaked tokens from being summarized into the vault.
+            if _session_contains_credentials(jsonl_path):
                 continue
             settled.append((int(stat.st_mtime_ns), jsonl_path))
 
