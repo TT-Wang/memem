@@ -76,6 +76,7 @@ def _parse_state_line(line: str) -> dict | None:
         "version": str(state.get("version", MINER_STATE_VERSION)),
         "updated_at": str(state.get("updated_at", "")),
         "message": str(state.get("message", "")),
+        "attempts": int(state.get("attempts", 0)),
     }
 
 
@@ -136,7 +137,7 @@ def save_mined_session_state(states: dict[str, dict]) -> None:
     os.replace(temp_path, MINED_SESSIONS_FILE)
 
 
-def update_session_state(path: Path, status: str, message: str = "") -> dict:
+def update_session_state(path: Path, status: str, message: str = "", attempts: int = 0) -> dict:
     lock_path = MINED_SESSIONS_FILE.with_suffix(".lock")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd = open(lock_path, "w")
@@ -153,6 +154,7 @@ def update_session_state(path: Path, status: str, message: str = "") -> dict:
             "version": MINER_STATE_VERSION,
             "updated_at": _now(),
             "message": message[:500],
+            "attempts": int(attempts),
         }
         states[session_id] = state
         save_mined_session_state(states)

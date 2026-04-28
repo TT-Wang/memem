@@ -1,6 +1,7 @@
 STATUS_IN_PROGRESS = "in_progress"
 STATUS_COMPLETE = "complete"
 STATUS_FAILED = "failed"
+STATUS_RETRYING = "retrying"
 
 MINER_STATE_VERSION = "2"
 

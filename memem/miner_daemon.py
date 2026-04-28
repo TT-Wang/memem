@@ -21,7 +21,7 @@ import sys
 import time
 from pathlib import Path
 
-from memem.miner_protocol import FATAL_EXIT_CODE, STATUS_FAILED, TRANSIENT_EXIT_CODE
+from memem.miner_protocol import FATAL_EXIT_CODE, STATUS_FAILED, STATUS_RETRYING, TRANSIENT_EXIT_CODE
 from memem.models import MEMEM_DIR
 from memem.session_state import (
     MINED_SESSIONS_FILE,
@@ -385,10 +385,21 @@ def _run_loop():
                                 jsonl_path,
                                 STATUS_FAILED,
                                 message=f"miner gave up after {count} consecutive failures",
+                                attempts=count,
                             )
                         except OSError as exc:
                             log.error("Could not persist failure state: %s", exc)
                         failure_counts.pop(jsonl_path.stem, None)
+                    else:
+                        try:
+                            update_session_state(
+                                jsonl_path,
+                                STATUS_RETRYING,
+                                message=f"transient failure, attempt {count}",
+                                attempts=count,
+                            )
+                        except OSError as exc:
+                            log.error("Could not persist retrying state: %s", exc)
             if processed > 0:
                 log.info("Rebuilding index after %d completed sessions", processed)
                 try:
