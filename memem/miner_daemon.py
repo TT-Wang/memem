@@ -15,12 +15,17 @@ import json
 import logging
 import logging.handlers
 import os
+import random
 import signal
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
+
+from tenacity import (
+    wait_random_exponential,  # noqa: F401 — imported for dep resolution; formula implemented manually below
+)
 
 from memem.miner_errors import PermanentError, TransientError
 from memem.miner_protocol import FATAL_EXIT_CODE, STATUS_COMPLETE, STATUS_FAILED, STATUS_RETRYING, TRANSIENT_EXIT_CODE
@@ -53,6 +58,23 @@ GLOBAL_LOCK_FILE = Path.home() / ".memem" / "miner.global.lock"
 _GLOBAL_LOCK_FH = None
 
 log = logging.getLogger("memem-miner")
+
+
+def _next_backoff_seconds(attempt: int) -> float:
+    """Full Jitter backoff (AWS de-correlation pattern) — random in [0, 2^attempt) capped.
+
+    attempt=1 -> random in [0, 2)
+    attempt=2 -> random in [0, 4)
+    attempt=3 -> random in [0, 8)
+    ... capped at BACKOFF_MAX_SECONDS (1800s)
+
+    Full Jitter spreads simultaneous restarts that would otherwise pile up
+    at the same moment after a shared failure (the "thundering herd" problem).
+    tenacity is imported above as a runtime dep; the formula is implemented
+    manually because tenacity's wait API is decorator-oriented.
+    """
+    cap = min(2 ** attempt, BACKOFF_MAX_SECONDS)
+    return random.uniform(0, cap)
 
 
 def _configure_logging() -> None:
@@ -386,6 +408,7 @@ def _run_loop():
     # failures=0 and failures=MAX-1 across daemon restarts.
     failure_counts: dict[str, int] = _seed_failure_counts_from_state(load_mined_session_state())
     sleep_seconds = POLL_INTERVAL
+    backoff_attempt = 0
 
     while True:
         if _shutdown_requested:
@@ -446,15 +469,17 @@ def _run_loop():
                 except RetryableMinerError as exc:
                     log.error("Index rebuild failed: %s", exc)
 
-            # Backoff: if every attempt failed, double the sleep up to the cap.
+            # Backoff: if every attempt failed, apply Full Jitter backoff up to the cap.
             # On any progress, snap back to the normal poll interval.
             if attempted > 0 and failed == attempted:
-                sleep_seconds = min(sleep_seconds * 2, BACKOFF_MAX_SECONDS)
+                backoff_attempt += 1
+                sleep_seconds = max(POLL_INTERVAL, _next_backoff_seconds(backoff_attempt))
                 log.info(
-                    "All %d sessions failed this cycle — backing off to %ds",
-                    attempted, sleep_seconds,
+                    "All %d sessions failed this cycle — backing off to %.1fs (attempt %d)",
+                    attempted, sleep_seconds, backoff_attempt,
                 )
             else:
+                backoff_attempt = 0
                 sleep_seconds = POLL_INTERVAL
         except FatalMinerError as exc:
             log.error("Stopping miner after fatal error: %s", exc)

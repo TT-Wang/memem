@@ -147,3 +147,28 @@ def test_session_is_terminal_handles_missing_state(tmp_cortex_dir):
 
     assert session_state.session_is_terminal(jsonl, None) is False
     assert session_state.session_is_terminal(jsonl, {}) is False
+
+
+# ---------------------------------------------------------------------------
+# Backoff jitter tests (m13)
+# ---------------------------------------------------------------------------
+
+from memem.miner_daemon import BACKOFF_MAX_SECONDS, _next_backoff_seconds  # noqa: E402
+
+
+def test_backoff_bounded_by_max():
+    """_next_backoff_seconds must never exceed BACKOFF_MAX_SECONDS regardless of attempt count."""
+    for _ in range(100):
+        val = _next_backoff_seconds(20)
+        assert val <= BACKOFF_MAX_SECONDS, f"backoff {val} exceeded cap {BACKOFF_MAX_SECONDS}"
+
+
+def test_backoff_has_jitter():
+    """Jitter is non-deterministic — 20 samples at attempt=5 must not all be identical."""
+    samples = [_next_backoff_seconds(5) for _ in range(20)]
+    assert len(set(samples)) > 1, "All backoff samples were identical — jitter is not working"
+
+
+def test_tenacity_importable():
+    """tenacity must be importable from the runtime environment."""
+    import tenacity  # noqa: F401
