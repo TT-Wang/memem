@@ -23,6 +23,7 @@ import threading
 import time
 from pathlib import Path
 
+import structlog
 from tenacity import (
     wait_random_exponential,  # noqa: F401 — imported for dep resolution; formula implemented manually below
 )
@@ -65,7 +66,7 @@ BACKOFF_MAX_SECONDS = 1800
 GLOBAL_LOCK_FILE = Path.home() / ".memem" / "miner.global.lock"
 _GLOBAL_LOCK_FH = None
 
-log = logging.getLogger("memem-miner")
+log = structlog.get_logger("memem-miner")
 
 _circuit_breaker = CircuitBreaker()
 
@@ -88,24 +89,38 @@ def _next_backoff_seconds(attempt: int) -> float:
 
 
 def _configure_logging() -> None:
-    """Attach the rotating file handler — called only when the daemon actually starts.
+    """Configure structlog for JSON output to a rotating file handler.
 
     Deferring this out of module scope keeps ``import memem.miner_daemon``
     side-effect-free so tests and tooling can import it without creating the
-    real ``~/.cortex/miner.log`` file or clobbering the host process root logger.
+    real ``~/.memem/miner.log`` file or clobbering the host process root logger.
     """
-    if any(isinstance(h, logging.handlers.RotatingFileHandler) for h in log.handlers):
-        return  # Already configured
+    if any(isinstance(h, logging.handlers.RotatingFileHandler) for h in logging.getLogger("memem-miner").handlers):
+        return
     MEMEM_DIR.mkdir(parents=True, exist_ok=True)
     handler = logging.handlers.RotatingFileHandler(
-        str(LOG_FILE), maxBytes=5 * 1024 * 1024, backupCount=2,
+        str(LOG_FILE),
+        maxBytes=10 * 1024 * 1024,  # 10 MB
+        backupCount=5,
     )
-    handler.setFormatter(logging.Formatter(
-        "%(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S",
-    ))
-    log.addHandler(handler)
-    log.setLevel(logging.INFO)
-    log.propagate = False
+    handler.setFormatter(logging.Formatter("%(message)s"))  # structlog renders the JSON itself
+    stdlib_logger = logging.getLogger("memem-miner")
+    stdlib_logger.addHandler(handler)
+    stdlib_logger.setLevel(logging.INFO)
+    stdlib_logger.propagate = False
+
+    structlog.configure(
+        processors=[
+            structlog.contextvars.merge_contextvars,
+            structlog.processors.add_log_level,
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.format_exc_info,
+            structlog.processors.JSONRenderer(),
+        ],
+        wrapper_class=structlog.stdlib.BoundLogger,
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        cache_logger_on_first_use=True,
+    )
 
 
 # Backward-compat aliases — new code should use the taxonomy classes directly.
@@ -130,7 +145,7 @@ def _refuse_ephemeral_test_miner() -> bool:
         return False
     message = f"Refusing to start miner from ephemeral test state: {MEMEM_DIR}"
     print(message)
-    log.warning(message)
+    log.warning("ephemeral_test_miner_refused", memem_dir=str(MEMEM_DIR))
     return True
 
 
@@ -178,7 +193,7 @@ def _ensure_single_miner() -> bool:
         return True
     message = f"Another memem miner is already running (global lock: {GLOBAL_LOCK_FILE})"
     print(message)
-    log.warning(message)
+    log.warning("miner_already_running", global_lock=str(GLOBAL_LOCK_FILE))
     return False
 
 
@@ -230,7 +245,7 @@ def _request_shutdown(signum, frame):
     """Set shutdown flag; main loop drains and exits cleanly at next iteration."""
     global _shutdown_requested
     _shutdown_requested = True
-    log.info("Shutdown requested (signal %d) — draining in-flight work", signum)
+    log.info("shutdown_requested", signal=signum)
 
 
 def start_daemon():
@@ -282,7 +297,7 @@ def start_daemon():
     signal.signal(signal.SIGTERM, _request_shutdown)
     signal.signal(signal.SIGINT, _request_shutdown)
 
-    log.info("Miner daemon started (PID %d)", os.getpid())
+    log.info("miner_daemon_started", pid=os.getpid())
     _run_loop()
 
 
@@ -359,23 +374,25 @@ def _run_server_command(args: list[str], expect_json: bool = True):
 
 
 def _mine_session(jsonl_path: Path) -> tuple[int, bool]:
-    log.info("Mining session: %s", jsonl_path.stem[:12])
+    sid = jsonl_path.stem[:12]
+    log.info("mining_session", session_id=sid)
+    t0 = time.monotonic()
 
     try:
         result = _run_server_command(["--mine-session", str(jsonl_path)])
+        duration_ms = int((time.monotonic() - t0) * 1000)
         if result.get("skipped"):
-            log.info("  -> skipped (%s)", result.get("reason", "unknown"))
+            log.info("session_processed", session_id=sid, outcome="skipped", duration_ms=duration_ms, reason=result.get("reason", "unknown"))
             return 0, False
         saved = result.get("memories_saved", 0)
-        if saved > 0:
-            log.info("  -> %d memories extracted", saved)
-        else:
-            log.info("  -> no new memories found")
+        outcome = "success" if saved > 0 else "success"
+        log.info("session_processed", session_id=sid, outcome=outcome, duration_ms=duration_ms, memories_saved=saved)
         return saved, True
     except RetryableMinerError as exc:
+        duration_ms = int((time.monotonic() - t0) * 1000)
         if _is_fatal_api_error(exc):
             raise FatalMinerError(f"Claude API/auth error, miner stopping: {exc}") from exc
-        log.error("  -> retryable mining failure: %s", exc)
+        log.error("session_processed", session_id=sid, outcome="failure", duration_ms=duration_ms, error=str(exc))
         return 0, False
 
 
@@ -402,10 +419,10 @@ def _seed_failure_counts_from_state(states: dict) -> dict[str, int]:
 
 def _run_loop():
     log.info(
-        "Starting mining loop (poll=%ds, settle=%ds, state=%s)",
-        POLL_INTERVAL,
-        SETTLE_SECONDS,
-        MINED_SESSIONS_FILE,
+        "mining_loop_started",
+        poll_interval=POLL_INTERVAL,
+        settle_seconds=SETTLE_SECONDS,
+        state_file=str(MINED_SESSIONS_FILE),
     )
     # Establish the install-time gate on first daemon run so subsequent
     # scans only mine sessions created after the daemon started. v0.10.2:
@@ -422,7 +439,7 @@ def _run_loop():
 
     while True:
         if _shutdown_requested:
-            log.info("Shutdown flag set — draining and exiting")
+            log.info("shutdown_draining")
             _release_global_lock()
             try:
                 PID_FILE.unlink(missing_ok=True)
@@ -443,7 +460,7 @@ def _run_loop():
                     try:
                         update_session_state(jsonl_path, STATUS_BLOCKED, message="circuit breaker open")
                     except OSError as exc:
-                        log.error("could not record STATUS_BLOCKED: %s", exc)
+                        log.error("status_blocked_write_failed", error=str(exc))
                     continue
 
                 attempted += 1
@@ -460,8 +477,9 @@ def _run_loop():
                         failed += 1
                         if count >= MAX_SESSION_FAILURES:
                             log.warning(
-                                "Marking session %s as failed after %d retries",
-                                jsonl_path.stem[:12], count,
+                                "session_marked_failed",
+                                session_id=jsonl_path.stem[:12],
+                                attempts=count,
                             )
                             try:
                                 update_session_state(
@@ -471,7 +489,7 @@ def _run_loop():
                                     attempts=count,
                                 )
                             except OSError as exc:
-                                log.error("Could not persist failure state: %s", exc)
+                                log.error("persist_failure_state_failed", error=str(exc))
                             failure_counts.pop(jsonl_path.stem, None)
                         else:
                             try:
@@ -482,16 +500,16 @@ def _run_loop():
                                     attempts=count,
                                 )
                             except OSError as exc:
-                                log.error("Could not persist retrying state: %s", exc)
+                                log.error("persist_retrying_state_failed", error=str(exc))
                 except PermanentError as exc:
                     _circuit_breaker.record_failure(exc)
                     raise  # let outer handler do its thing
             if processed > 0:
-                log.info("Rebuilding index after %d completed sessions", processed)
+                log.info("rebuilding_index", completed_sessions=processed)
                 try:
                     _run_server_command(["--rebuild-index"], expect_json=False)
                 except RetryableMinerError as exc:
-                    log.error("Index rebuild failed: %s", exc)
+                    log.error("index_rebuild_failed", error=str(exc))
 
             # Backoff: if every attempt failed, apply Full Jitter backoff up to the cap.
             # On any progress, snap back to the normal poll interval.
@@ -499,17 +517,19 @@ def _run_loop():
                 backoff_attempt += 1
                 sleep_seconds = max(POLL_INTERVAL, _next_backoff_seconds(backoff_attempt))
                 log.info(
-                    "All %d sessions failed this cycle — backing off to %.1fs (attempt %d)",
-                    attempted, sleep_seconds, backoff_attempt,
+                    "all_sessions_failed_backoff",
+                    attempted=attempted,
+                    sleep_seconds=round(sleep_seconds, 1),
+                    backoff_attempt=backoff_attempt,
                 )
             else:
                 backoff_attempt = 0
                 sleep_seconds = POLL_INTERVAL
         except FatalMinerError as exc:
-            log.error("Stopping miner after fatal error: %s", exc)
+            log.error("fatal_error_stopping_miner", error=str(exc))
             raise SystemExit(FATAL_EXIT_CODE)
         except Exception as exc:
-            log.error("Loop error: %s", exc)
+            log.error("loop_error", error=str(exc))
 
         time.sleep(sleep_seconds)
 
@@ -535,7 +555,7 @@ if __name__ == "__main__":
         signal.signal(signal.SIGTERM, _request_shutdown)
         signal.signal(signal.SIGINT, _request_shutdown)
         print(f"Miner running in foreground (PID {os.getpid()})")
-        log.info("Miner running in foreground (PID %d)", os.getpid())
+        log.info("miner_foreground_started", pid=os.getpid())
         _run_loop()
     else:
         print(f"Usage: {sys.argv[0]} start|stop|status|run")

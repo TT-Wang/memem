@@ -25,6 +25,7 @@ dependencies = [
     "mcp>=1.0",
     "python-frontmatter>=1.0",
     "rapidfuzz>=3.0.0",
+    "structlog>=24.0",
     "tenacity>=8.0",
 ]
 
