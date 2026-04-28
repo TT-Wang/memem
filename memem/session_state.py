@@ -1,6 +1,4 @@
-import fcntl
 import json
-import os
 import re
 import shutil
 import sys
@@ -11,7 +9,6 @@ from memem.miner_protocol import MINER_STATE_VERSION, STATUS_COMPLETE, STATUS_FA
 from memem.models import (
     MEMEM_DIR,
     _env,
-    _now,
 )
 
 MINED_SESSIONS_FILE = MEMEM_DIR / ".mined_sessions"
@@ -91,77 +88,34 @@ def _backup_corrupt_file() -> None:
     )
 
 
+def _db_path() -> "Path":
+    """Return the SQLite DB path for the current MEMEM_DIR.
+
+    Computed at call time (not module load time) so that monkeypatching
+    MEMEM_DIR + reloading session_state in tests picks up the right path
+    without also requiring a reload of session_state_db.
+    """
+    return MINED_SESSIONS_FILE.parent / "mined_sessions.db"
+
+
 def load_mined_session_state() -> dict[str, dict]:
-    if not MINED_SESSIONS_FILE.exists():
-        return {}
+    from memem import session_state_db  # noqa: PLC0415
 
-    states: dict[str, dict] = {}
-    try:
-        raw_text = MINED_SESSIONS_FILE.read_text()
-    except OSError:
-        return {}
-    except Exception:
-        _backup_corrupt_file()
-        return {}
-
-    try:
-        for line in raw_text.splitlines():
-            state = _parse_state_line(line)
-            if state:
-                states[state["session_id"]] = state
-    except OSError:
-        return {}
-
-    # If the file was non-empty but zero lines parsed, treat as corrupt.
-    if raw_text.strip() and not states:
-        _backup_corrupt_file()
-        return {}
-
-    return states
+    return session_state_db.load_mined_session_state(db_path=_db_path())
 
 
 def save_mined_session_state(states: dict[str, dict]) -> None:
-    MINED_SESSIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = MINED_SESSIONS_FILE.with_suffix(".tmp")
-    lines = []
-    for session_id in sorted(states):
-        state = dict(states[session_id])
-        state["session_id"] = session_id
-        lines.append(json.dumps(state, sort_keys=True))
-    content = ("\n".join(lines) + "\n") if lines else ""
-    # Atomic write: fsync before rename so a crash can't leave an empty file.
-    with open(temp_path, "w") as fh:
-        fh.write(content)
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(temp_path, MINED_SESSIONS_FILE)
+    from memem import session_state_db  # noqa: PLC0415
+
+    session_state_db.save_mined_session_state(states, db_path=_db_path())
 
 
 def update_session_state(path: Path, status: str, message: str = "", attempts: int = 0) -> dict:
-    lock_path = MINED_SESSIONS_FILE.with_suffix(".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fd = open(lock_path, "w")
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        states = load_mined_session_state()
-        fingerprint = session_fingerprint(path)
-        session_id = path.stem
-        state = {
-            "session_id": session_id,
-            "status": status,
-            "mtime_ns": fingerprint["mtime_ns"],
-            "size": fingerprint["size"],
-            "version": MINER_STATE_VERSION,
-            "updated_at": _now(),
-            "message": message[:500],
-            "attempts": int(attempts),
-        }
-        states[session_id] = state
-        save_mined_session_state(states)
-        return state
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        fd.close()
+    from memem import session_state_db  # noqa: PLC0415
+
+    return session_state_db.update_session_state(
+        path, status, message=message, attempts=attempts, db_path=_db_path()
+    )
 
 
 def session_is_complete(path: Path, state: dict | None) -> bool:
