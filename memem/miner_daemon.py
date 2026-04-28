@@ -466,7 +466,7 @@ def _mine_session(jsonl_path: Path) -> tuple[int, bool]:
             log.info("session_processed", session_id=sid, outcome="skipped", duration_ms=duration_ms, reason=result.get("reason", "unknown"))
             return 0, False
         saved = result.get("memories_saved", 0)
-        outcome = "success" if saved > 0 else "success"
+        outcome = "success" if saved > 0 else "empty"
         log.info("session_processed", session_id=sid, outcome=outcome, duration_ms=duration_ms, memories_saved=saved)
         return saved, True
     except RetryableMinerError as exc:
@@ -491,10 +491,11 @@ def _seed_failure_counts_from_state(states: dict) -> dict[str, int]:
     against the failure cap). Sessions with attempts=0 are excluded (no
     failures recorded yet, nothing to seed).
     """
+    excluded = {STATUS_COMPLETE, STATUS_BLOCKED}
     return {
         sid: int(s.get("attempts", 0))
         for sid, s in states.items()
-        if int(s.get("attempts", 0)) > 0 and s.get("status") != STATUS_COMPLETE
+        if int(s.get("attempts", 0)) > 0 and s.get("status") not in excluded
     }
 
 
@@ -585,6 +586,20 @@ def _run_loop():
                                 log.error("persist_retrying_state_failed", error=str(exc))
                 except PermanentError as exc:
                     _circuit_breaker.record_failure(exc)
+                    # Persist STATUS_FAILED before re-raising so a wrapper
+                    # restart sees the session as terminal and skips it. Without
+                    # this, the same session triggers PermanentError again on
+                    # restart, repeating until the wrapper's 5-in-60s crash
+                    # guard fires (5 rapid wrapper restarts before stop).
+                    try:
+                        update_session_state(
+                            jsonl_path,
+                            STATUS_FAILED,
+                            message=f"permanent error: {exc}",
+                            attempts=failure_counts.get(jsonl_path.stem, 0) + 1,
+                        )
+                    except OSError as persist_exc:
+                        log.error("persist_failed_state_failed", error=str(persist_exc))
                     raise  # let outer handler do its thing
             if processed > 0:
                 log.info("rebuilding_index", completed_sessions=processed)

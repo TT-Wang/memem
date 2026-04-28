@@ -5,7 +5,7 @@ import sys
 import time
 from pathlib import Path
 
-from memem.miner_protocol import MINER_STATE_VERSION, STATUS_BLOCKED, STATUS_COMPLETE, STATUS_FAILED
+from memem.miner_protocol import MINER_STATE_VERSION, STATUS_COMPLETE, STATUS_FAILED
 from memem.models import (
     MEMEM_DIR,
     _env,
@@ -141,10 +141,15 @@ def session_is_terminal(path: Path, state: dict | None) -> bool:
     Terminal sessions are skipped by the miner. If the JSONL changes (mtime/size
     differs from the recorded fingerprint), the session re-enters the queue —
     so a previously-failed session that gets new content will be retried.
+
+    STATUS_BLOCKED is intentionally NOT terminal: the circuit breaker's
+    `is_open()` check is the correct gate while OPEN. Once the breaker
+    transitions to HALF_OPEN, blocked sessions must re-enter the queue so
+    `record_success` can fire and close the breaker.
     """
     if not state:
         return False
-    if state.get("status") not in {STATUS_COMPLETE, STATUS_FAILED, STATUS_BLOCKED}:
+    if state.get("status") not in {STATUS_COMPLETE, STATUS_FAILED}:
         return False
     if str(state.get("version", "")) != MINER_STATE_VERSION:
         return False

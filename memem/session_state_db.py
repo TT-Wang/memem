@@ -137,6 +137,9 @@ def _migrate_jsonl(conn: sqlite3.Connection, jsonl_path: Path) -> None:
     for line in raw_text.splitlines():
         entry = _parse_state_line(line)
         if entry:
+            # Migrated rows: last_error mirrors message (legacy schema had no
+            # separate last_error field). Live writes populate them independently.
+            entry["last_error"] = entry.get("message", "")
             rows.append(entry)
 
     # If the file was non-empty but zero lines parsed, treat as corrupt.
@@ -152,7 +155,7 @@ def _migrate_jsonl(conn: sqlite3.Connection, jsonl_path: Path) -> None:
                 (session_id, status, attempts, last_error,
                  mtime_ns, size, version, updated_at, message)
             VALUES
-                (:session_id, :status, :attempts, :message,
+                (:session_id, :status, :attempts, :last_error,
                  :mtime_ns, :size, :version, :updated_at, :message)
             """,
             rows,
