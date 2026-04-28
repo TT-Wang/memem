@@ -12,6 +12,34 @@ from memem.models import DEFAULT_LAYER, now_iso
 if TYPE_CHECKING:
     from memem.delta import DeltaProposal
 
+
+# ---------------------------------------------------------------------------
+# Universal MemoryItem — used by recall pipeline slice outputs
+# ---------------------------------------------------------------------------
+
+
+class MemoryItem(TypedDict, total=False):
+    # — Required —
+    id: str
+    title: str
+    content: str
+    source_type: Literal["user", "mined", "import", "transcript", "playbook"]
+
+    # — Intrinsic but optional —
+    layer: int                # 0-3
+    project: str
+    importance: int
+    tags: list[str]
+    created_at: str
+    updated_at: str
+    related: list[str]
+
+    # — Per-slice extras (set by the recall pipeline) —
+    score: float
+    snippet: str              # truncated essence for compact display
+    parent_id: str            # for timeline graph relationships
+    position: int             # for chronological ordering
+
 CandidateType = Literal["memory", "playbook", "transcript", "artifact", "environment", "current_query"]
 ArtifactType = Literal["playbook", "memory_note", "transcript", "external_file", "repo_file", "draft"]
 ActiveRole = Literal[
@@ -215,6 +243,22 @@ class ActiveMemorySlice(TypedDict, total=False):
     activation_mode: Literal["heuristic", "llm", "hybrid"]
     confidence: float
     warnings: list[str]
+    # ── Universal fields for recall pipeline slices ──
+    slice_kind: Literal["active", "search", "get", "timeline", "assembled"]
+    items: list[MemoryItem]
+    ordering: Literal["relevance", "chronological", "manual"]
+    layer_summary: dict[int, int]  # {0: 1, 1: 0, 2: 3, 3: 0} count per layer in items
+    # ── Extra fields for get/timeline kinds ──
+    missing_ids: list[str]
+    linked: list[MemoryItem]
+    anchor_id: str
+    anchor_title: str
+    before_items: list[MemoryItem]
+    after_items: list[MemoryItem]
+
+
+# Type alias for new code that wants the cleaner name.
+MemorySlice = ActiveMemorySlice
 
 
 def _stable_id(prefix: str, payload: Any) -> str:
@@ -746,3 +790,183 @@ def render_slice_as_prompt_context(slice_obj: ActiveMemorySlice) -> str:
 
 def render_slice_as_compact_context(slice_obj: ActiveMemorySlice, max_chars: int = 4000) -> str:
     return _render_slice(slice_obj, max_chars=max_chars)
+
+
+# ---------------------------------------------------------------------------
+# Universal slice renderers for recall pipeline
+# ---------------------------------------------------------------------------
+
+
+def _format_compact_index_line_from_item(item: MemoryItem) -> str:
+    """Produce the standard compact line format from a MemoryItem.
+
+    Format: ``[<8-char-id>] L<layer> <title> — <snippet>``
+    Byte-identical to _format_compact_index_line in recall.py.
+    """
+    mem_id = item.get("id", "")[:8]
+    layer = item.get("layer", DEFAULT_LAYER)
+    title = item.get("title", "")[:80]
+    snippet = item.get("snippet", "") or item.get("content", "")[:80]
+    snippet = snippet.replace("\n", " ").strip()[:80]
+    return f"[{mem_id}] L{layer} {title} — {snippet}"
+
+
+def _layer_summary_from_items(items: list[MemoryItem]) -> dict[int, int]:
+    """Count items per layer. Returns {layer: count} for all layers present."""
+    counts: dict[int, int] = {}
+    for item in items:
+        raw = item.get("layer")
+        layer = int(raw) if raw is not None else DEFAULT_LAYER
+        counts[layer] = counts.get(layer, 0) + 1
+    return counts
+
+
+def _render_search_slice(slice_data: ActiveMemorySlice) -> str:
+    """Render a search result slice preserving the existing compact index format.
+
+    Keeps backward-compat strings: "### Compact memory index", "memory_get(ids=".
+    Adds optional layer summary line.
+    """
+    items = slice_data.get("items", [])
+    linked = slice_data.get("linked", [])
+    layer_summary = slice_data.get("layer_summary", {})
+
+    lines = [f"### Compact memory index ({len(items)} results)"]
+    if layer_summary:
+        layer_str = ", ".join(f"L{k}={v}" for k, v in sorted(layer_summary.items()) if v)
+        if layer_str:
+            lines.append(f"_layers: {layer_str}_")
+    for item in items:
+        lines.append(_format_compact_index_line_from_item(item))
+
+    if linked:
+        lines.append("")
+        lines.append(f"### Related memories (via graph traversal, {len(linked)} linked)")
+        for item in linked:
+            lines.append(_format_compact_index_line_from_item(item))
+
+    lines.append("")
+    lines.append("_Use memory_get(ids=[...]) to fetch full content for any of these._")
+    return "\n".join(lines)
+
+
+def _render_get_slice(slice_data: ActiveMemorySlice) -> str:
+    """Render a get-kind slice: full content per item + linked related section.
+
+    Preserves the ### [id] title format and [not-found: id] markers
+    used by existing tests.
+    """
+    items = slice_data.get("items", [])
+    missing_ids = slice_data.get("missing_ids", [])
+    linked = slice_data.get("linked", [])
+
+    lines: list[str] = []
+    for item in items:
+        mid = item.get("id", "")[:8]
+        layer = item.get("layer", DEFAULT_LAYER)
+        title = item.get("title", "Untitled")
+        project = item.get("project", "general")
+        source_type = item.get("source_type", "unknown")
+        tags = item.get("tags", [])
+        related = item.get("related", [])
+        content = item.get("content", "")
+
+        item_lines = [
+            f"### [{mid}] {title}",
+            f"- **layer:** L{layer}",
+            f"- **project:** {project}",
+            f"- **source:** {source_type}",
+        ]
+        if tags:
+            item_lines.append(f"- **tags:** {', '.join(tags)}")
+        if related:
+            item_lines.append(f"- **related:** {', '.join(r[:8] for r in related)}")
+        item_lines.append("")
+        item_lines.append(content)
+        item_lines.append("")
+        lines.append("\n".join(item_lines))
+
+    for mid in missing_ids:
+        lines.append(f"[not-found: {mid}]")
+
+    if linked:
+        lines.append(f"### Related memories (via graph traversal, {len(linked)} linked)")
+        for item in linked:
+            lines.append(_format_compact_index_line_from_item(item))
+
+    return "\n".join(lines)
+
+
+def _render_timeline_slice(slice_data: ActiveMemorySlice) -> str:
+    """Render a timeline-kind slice: chronological ordering with before/after sections.
+
+    Preserves the format of the original memory_timeline output.
+    """
+    anchor_id = slice_data.get("anchor_id", "")[:8]
+    anchor_title = slice_data.get("anchor_title", "Untitled")
+    before_items = slice_data.get("before_items", [])
+    anchor_item = None
+    after_items = slice_data.get("after_items", [])
+    # The anchor is stored as the first item in items if present
+    all_items = slice_data.get("items", [])
+    for item in all_items:
+        if item.get("id", "")[:8] == anchor_id:
+            anchor_item = item
+            break
+
+    lines = [f"### Timeline around [{anchor_id}] {anchor_title}", ""]
+    if before_items:
+        lines.append(f"**Before ({len(before_items)}):**")
+        for item in before_items:
+            ts = item.get("created_at", "")[:10]
+            lines.append(f"- {ts}  {_format_compact_index_line_from_item(item)}")
+        lines.append("")
+    lines.append("**Anchor:**")
+    anchor_ts = ""
+    if anchor_item:
+        anchor_ts = anchor_item.get("created_at", "")[:10]
+        anchor_line = _format_compact_index_line_from_item(anchor_item)
+    else:
+        anchor_line = f"[{anchor_id}] {anchor_title}"
+    lines.append(f"- {anchor_ts}  {anchor_line}")
+    lines.append("")
+    if after_items:
+        lines.append(f"**After ({len(after_items)}):**")
+        for item in after_items:
+            ts = item.get("created_at", "")[:10]
+            lines.append(f"- {ts}  {_format_compact_index_line_from_item(item)}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _render_assembled_slice(slice_data: ActiveMemorySlice) -> str:
+    """Render an assembled briefing slice (stub for m3; m4 will refine)."""
+    items = slice_data.get("items", [])
+    lines = ["## Composed Briefing", ""]
+    for item in items:
+        lines.append(_format_compact_index_line_from_item(item))
+    return "\n".join(lines)
+
+
+def render_slice_markdown(slice_data: ActiveMemorySlice) -> str:
+    """Universal markdown renderer for any MemorySlice variant.
+
+    Branches on slice_kind to pick the right section structure:
+    - active:    use existing render_slice_as_prompt_context
+    - search:    compact index + optional layer summary
+    - get:       full content per item (### [id] title format)
+    - timeline:  chronologically ordered items with before/after sections
+    - assembled: composed briefing (stub; m4 will refine)
+    """
+    kind = slice_data.get("slice_kind", "active")
+    if kind == "active":
+        return render_slice_as_prompt_context(slice_data)
+    if kind == "search":
+        return _render_search_slice(slice_data)
+    if kind == "get":
+        return _render_get_slice(slice_data)
+    if kind == "timeline":
+        return _render_timeline_slice(slice_data)
+    if kind == "assembled":
+        return _render_assembled_slice(slice_data)
+    return render_slice_as_prompt_context(slice_data)  # fallback

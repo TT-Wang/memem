@@ -2,7 +2,14 @@ import logging
 from collections import Counter
 from datetime import UTC, datetime
 
-from memem.models import DEFAULT_LAYER, LAST_BRIEF_PATH
+from memem.active_slice import (
+    ActiveMemorySlice,
+    MemoryItem,
+    _layer_summary_from_items,
+    _stable_id,
+    render_slice_markdown,
+)
+from memem.models import DEFAULT_LAYER, LAST_BRIEF_PATH, now_iso
 from memem.obsidian_store import (
     _find_memory,
     _obsidian_memories,
@@ -455,6 +462,46 @@ def _linked_memories(primary: list[dict], hops: int = 2) -> list[dict]:
     return [m for m in expanded if m.get("id", "")[:8] not in primary_ids]
 
 
+def _memory_to_item(
+    mem: dict,
+    score: float | None = None,
+    include_snippet: bool = False,
+    position: int | None = None,
+    parent_id: str | None = None,
+) -> MemoryItem:
+    """Convert a raw memory dict to a universal MemoryItem for slice output."""
+    essence = mem.get("essence") or mem.get("full_record", "") or ""
+    snippet = " ".join(essence.split())[:80] if include_snippet else ""
+    raw_layer = mem.get("layer")
+    layer = int(raw_layer) if raw_layer is not None else DEFAULT_LAYER
+    item: MemoryItem = {
+        "id": mem.get("id", ""),
+        "title": mem.get("title", "Untitled"),
+        "content": essence,
+        "layer": layer,
+        "project": mem.get("project", "general"),
+        "tags": mem.get("domain_tags") or mem.get("tags") or [],
+        "created_at": mem.get("created_at", ""),
+        "updated_at": mem.get("updated_at", ""),
+        "related": mem.get("related", []),
+    }
+    # source_type must match the Literal — validate or default
+    raw_source = mem.get("source_type", "user")
+    if raw_source in ("user", "mined", "import", "transcript", "playbook"):
+        item["source_type"] = raw_source  # type: ignore[typeddict-item]
+    if score is not None:
+        item["score"] = float(score)
+    if snippet:
+        item["snippet"] = snippet
+    if position is not None:
+        item["position"] = position
+    if parent_id is not None:
+        item["parent_id"] = parent_id
+    if mem.get("importance") is not None:
+        item["importance"] = int(mem.get("importance", 3) or 3)
+    return item
+
+
 def memory_search(query: str, limit: int = 10, scope_id: str = "default") -> str:
     """Layer 1 (compact index) search — the 3-tier recall entry point.
 
@@ -470,19 +517,22 @@ def memory_search(query: str, limit: int = 10, scope_id: str = "default") -> str
 
     linked = _linked_memories(memories)
 
-    lines = [f"### Compact memory index ({len(memories)} results)"]
-    for mem in memories:
-        lines.append(_format_compact_index_line(mem))
+    items = [_memory_to_item(m, include_snippet=True) for m in memories]
+    linked_items = [_memory_to_item(m, include_snippet=True) for m in linked]
+    layer_summary = _layer_summary_from_items(items)
 
-    if linked:
-        lines.append("")
-        lines.append(f"### Related memories (via graph traversal, {len(linked)} linked)")
-        for mem in linked:
-            lines.append(_format_compact_index_line(mem))
-
-    lines.append("")
-    lines.append("_Use memory_get(ids=[...]) to fetch full content for any of these._")
-    return "\n".join(lines)
+    slice_data: ActiveMemorySlice = {
+        "slice_id": _stable_id("search", (query, scope_id, limit)),
+        "slice_kind": "search",
+        "scope_id": scope_id,
+        "query": query,
+        "generated_at": now_iso(),
+        "ordering": "relevance",
+        "items": items,
+        "linked": linked_items,
+        "layer_summary": layer_summary,
+    }
+    return render_slice_markdown(slice_data)
 
 
 def memory_get(ids: list[str], scope_id: str = "default") -> str:
@@ -504,20 +554,25 @@ def memory_get(ids: list[str], scope_id: str = "default") -> str:
         else:
             missing.append(mid)
 
-    lines: list[str] = []
-    for mem in found:
-        lines.append(_format_full_memory(mem))
-
-    for mid in missing:
-        lines.append(f"[not-found: {mid}]")
-
+    items = [_memory_to_item(m, include_snippet=False) for m in found]
     linked = _linked_memories(found)
-    if linked:
-        lines.append(f"### Related memories (via graph traversal, {len(linked)} linked)")
-        for mem in linked:
-            lines.append(_format_compact_index_line(mem))
+    linked_items = [_memory_to_item(m, include_snippet=True) for m in linked]
 
-    return "\n".join(lines) if lines else f"No memories found for ids: {ids}"
+    if not items and not missing:
+        return f"No memories found for ids: {ids}"
+
+    slice_data: ActiveMemorySlice = {
+        "slice_id": _stable_id("get", (tuple(ids), scope_id)),
+        "slice_kind": "get",
+        "scope_id": scope_id,
+        "generated_at": now_iso(),
+        "ordering": "manual",
+        "items": items,
+        "missing_ids": missing,
+        "linked": linked_items,
+        "layer_summary": _layer_summary_from_items(items),
+    }
+    return render_slice_markdown(slice_data)
 
 
 def memory_timeline(
@@ -589,24 +644,25 @@ def memory_timeline(
     before = before[-depth_before:] if depth_before > 0 else []
     after = after[:depth_after] if depth_after > 0 else []
 
-    lines = [f"### Timeline around [{anchor_id8}] {anchor.get('title', 'Untitled')}"]
-    lines.append("")
-    if before:
-        lines.append(f"**Before ({len(before)}):**")
-        for mem in before:
-            ts = mem.get("created_at", "")[:10]
-            lines.append(f"- {ts}  {_format_compact_index_line(mem)}")
-        lines.append("")
-    lines.append("**Anchor:**")
-    lines.append(f"- {anchor.get('created_at', '')[:10]}  {_format_compact_index_line(anchor)}")
-    lines.append("")
-    if after:
-        lines.append(f"**After ({len(after)}):**")
-        for mem in after:
-            ts = mem.get("created_at", "")[:10]
-            lines.append(f"- {ts}  {_format_compact_index_line(mem)}")
-        lines.append("")
-    return "\n".join(lines)
+    anchor_item = _memory_to_item(anchor, include_snippet=True)
+    before_items = [_memory_to_item(m, include_snippet=True, position=i) for i, m in enumerate(before)]
+    after_items = [_memory_to_item(m, include_snippet=True, position=i) for i, m in enumerate(after)]
+    all_items = [anchor_item, *before_items, *after_items]
+
+    slice_data: ActiveMemorySlice = {
+        "slice_id": _stable_id("timeline", (memory_id, scope_id, depth_before, depth_after)),
+        "slice_kind": "timeline",
+        "scope_id": scope_id,
+        "generated_at": now_iso(),
+        "ordering": "chronological",
+        "items": all_items,
+        "anchor_id": anchor_id8,
+        "anchor_title": anchor.get("title", "Untitled"),
+        "before_items": before_items,
+        "after_items": after_items,
+        "layer_summary": _layer_summary_from_items(all_items),
+    }
+    return render_slice_markdown(slice_data)
 
 
 def _format_memory_as_bullet(mem: dict) -> str:
@@ -626,14 +682,25 @@ def memory_recall(query: str, scope_id: str = "default", limit: int = 10, rerank
     if not memories and ("No matching" in transcript_results or not transcript_results):
         return f"No memories found for: {query}"
 
-    sections = []
-    if memories:
-        lines = ["### Memories"]
-        for mem in memories:
-            lines.append(_format_memory_as_bullet(mem))
-        lines.append("")
-        sections.append("\n".join(lines))
+    items = [_memory_to_item(m, include_snippet=True) for m in memories]
+    layer_summary = _layer_summary_from_items(items)
 
+    slice_data: ActiveMemorySlice = {
+        "slice_id": _stable_id("recall", (query, scope_id, limit)),
+        "slice_kind": "search",
+        "scope_id": scope_id,
+        "query": query,
+        "generated_at": now_iso(),
+        "ordering": "relevance",
+        "items": items,
+        "linked": [],
+        "layer_summary": layer_summary,
+    }
+    result = render_slice_markdown(slice_data) if memories else ""
+
+    sections = []
+    if result:
+        sections.append(result)
     if transcript_results and "No matching" not in transcript_results:
         sections.append(f"### Related Session Logs\n\n{transcript_results}")
 
