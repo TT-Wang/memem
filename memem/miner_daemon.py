@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 
 from memem.miner_errors import PermanentError, TransientError
-from memem.miner_protocol import FATAL_EXIT_CODE, STATUS_FAILED, STATUS_RETRYING, TRANSIENT_EXIT_CODE
+from memem.miner_protocol import FATAL_EXIT_CODE, STATUS_COMPLETE, STATUS_FAILED, STATUS_RETRYING, TRANSIENT_EXIT_CODE
 from memem.models import MEMEM_DIR
 from memem.session_state import (
     MINED_SESSIONS_FILE,
@@ -344,6 +344,27 @@ def _mine_session(jsonl_path: Path) -> tuple[int, bool]:
         return 0, False
 
 
+def _seed_failure_counts_from_state(states: dict) -> dict[str, int]:
+    """Seed the in-memory failure counter from persisted session state.
+
+    On daemon restart the in-memory failure_counts dict is empty, so
+    sessions with persisted attempts=N would reset to 0 and could
+    ping-pong between 0 and MAX-1 across restarts forever. This helper
+    reads the persisted attempts value for each non-complete session and
+    returns an initial counter so the cap enforcement picks up where the
+    previous run left off.
+
+    COMPLETE sessions are excluded (they succeeded and should not count
+    against the failure cap). Sessions with attempts=0 are excluded (no
+    failures recorded yet, nothing to seed).
+    """
+    return {
+        sid: int(s.get("attempts", 0))
+        for sid, s in states.items()
+        if int(s.get("attempts", 0)) > 0 and s.get("status") != STATUS_COMPLETE
+    }
+
+
 def _run_loop():
     log.info(
         "Starting mining loop (poll=%ds, settle=%ds, state=%s)",
@@ -357,9 +378,10 @@ def _run_loop():
     # explicitly here instead of relying on lazy-creation.
     _ensure_installed_at()
 
-    # Per-session consecutive-failure counter, in-memory only. Persisted
-    # STATUS_FAILED is the durable equivalent and survives daemon restarts.
-    failure_counts: dict[str, int] = {}
+    # Seed failure_counts from persisted state so restarts don't reset the
+    # counter. Without this, a flaky session could ping-pong forever between
+    # failures=0 and failures=MAX-1 across daemon restarts.
+    failure_counts: dict[str, int] = _seed_failure_counts_from_state(load_mined_session_state())
     sleep_seconds = POLL_INTERVAL
 
     while True:
