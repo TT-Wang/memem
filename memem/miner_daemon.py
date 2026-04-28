@@ -34,6 +34,7 @@ from memem.session_state import (
 
 PID_FILE = MEMEM_DIR / "miner.pid"
 LOG_FILE = MEMEM_DIR / "miner.log"
+_shutdown_requested = False
 POLL_INTERVAL = 60
 SUBPROCESS_TIMEOUT_SECONDS = 300  # was hardcoded as timeout=300 in subprocess.run
 SUBPROCESS_KILL_GRACE_SECONDS = 5  # SIGTERM grace before SIGKILL
@@ -188,11 +189,11 @@ def _read_pid() -> int | None:
         return None
 
 
-def _cleanup(signum=None, frame=None):
-    log.info("Miner daemon stopping (signal %s)", signum)
-    PID_FILE.unlink(missing_ok=True)
-    _release_global_lock()
-    sys.exit(0)
+def _request_shutdown(signum, frame):
+    """Set shutdown flag; main loop drains and exits cleanly at next iteration."""
+    global _shutdown_requested
+    _shutdown_requested = True
+    log.info("Shutdown requested (signal %d) — draining in-flight work", signum)
 
 
 def start_daemon():
@@ -234,13 +235,15 @@ def start_daemon():
     os.dup2(devnull_r.fileno(), sys.stdin.fileno())
     os.dup2(devnull_w.fileno(), sys.stdout.fileno())
     os.dup2(devnull_w.fileno(), sys.stderr.fileno())
+    devnull_r.close()
+    devnull_w.close()
 
     if not _ensure_single_miner():
         raise SystemExit(0)
 
     _write_pid()
-    signal.signal(signal.SIGTERM, _cleanup)
-    signal.signal(signal.SIGINT, _cleanup)
+    signal.signal(signal.SIGTERM, _request_shutdown)
+    signal.signal(signal.SIGINT, _request_shutdown)
 
     log.info("Miner daemon started (PID %d)", os.getpid())
     _run_loop()
@@ -357,6 +360,14 @@ def _run_loop():
     sleep_seconds = POLL_INTERVAL
 
     while True:
+        if _shutdown_requested:
+            log.info("Shutdown flag set — draining and exiting")
+            _release_global_lock()
+            try:
+                PID_FILE.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return
         try:
             states = load_mined_session_state()
             sessions = find_settled_sessions(states)
@@ -444,8 +455,8 @@ if __name__ == "__main__":
         if not _ensure_single_miner():
             raise SystemExit(0)
         _write_pid()
-        signal.signal(signal.SIGTERM, _cleanup)
-        signal.signal(signal.SIGINT, _cleanup)
+        signal.signal(signal.SIGTERM, _request_shutdown)
+        signal.signal(signal.SIGINT, _request_shutdown)
         print(f"Miner running in foreground (PID {os.getpid()})")
         log.info("Miner running in foreground (PID %d)", os.getpid())
         _run_loop()
