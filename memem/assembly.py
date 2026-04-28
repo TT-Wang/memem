@@ -13,7 +13,7 @@ import json
 import logging
 import subprocess
 
-from memem.models import _normalize_scope_id, now_iso
+from memem.models import DEFAULT_LAYER, _normalize_scope_id, now_iso
 from memem.obsidian_store import (
     _deprecate_memory,
     _find_memory,
@@ -51,9 +51,9 @@ def _active_items_to_memory_items(slice_obj: "dict") -> "list[dict]":
                 "title": entry.get("title", "Untitled"),
                 "content": summary,
                 "snippet": summary[:80],
-                "layer": entry.get("layer", 2),
+                "layer": entry.get("layer", DEFAULT_LAYER),
                 "score": entry.get("score", 0.5),
-                "source_type": entry.get("source_type", "memory"),
+                "source_type": entry.get("source_type", "user"),
                 "project": entry.get("project", "general"),
             })
     return items

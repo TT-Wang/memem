@@ -306,8 +306,9 @@ def test_context_assemble_composes_with_general_when_sparse(tmp_vault, tmp_corte
     result = context_assemble("deployment API documentation", project="sparse-proj")
 
     assert isinstance(result, str), f"Expected str, got {type(result)}"
-    # The composite slice with augmentation should mention the strategy
-    # OR have sub_slices count > 1 (reflected as "augmentation" in composition_strategy)
-    assert "augmentation" in result or len(result) > 0, (
+    # Sparse-project augmentation must surface in the rendered composition_strategy
+    # line ("_strategy: primary+general-augmentation, ..."). Without this, a future
+    # regression that drops the strategy line would silently pass.
+    assert "augmentation" in result, (
         f"Expected augmentation strategy in assembled output. Got:\n{result[:500]}"
     )

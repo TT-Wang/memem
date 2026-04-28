@@ -804,11 +804,13 @@ def _format_compact_index_line_from_item(item: MemoryItem) -> str:
     """Produce the standard compact line format from a MemoryItem.
 
     Format: ``[<8-char-id>] L<layer> <title> — <snippet>``
-    Byte-identical to _format_compact_index_line in recall.py.
+    Matches _format_compact_index_line in recall.py: title is NOT truncated
+    here (titles can be up to 120 chars per _parse_obsidian_memory_file);
+    only the snippet is clipped at 80 chars.
     """
     mem_id = item.get("id", "")[:8]
     layer = item.get("layer", DEFAULT_LAYER)
-    title = item.get("title", "")[:80]
+    title = item.get("title", "Untitled")
     snippet = item.get("snippet", "") or item.get("content", "")[:80]
     snippet = snippet.replace("\n", " ").strip()[:80]
     return f"[{mem_id}] L{layer} {title} — {snippet}"
