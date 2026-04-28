@@ -34,7 +34,7 @@ from memem.environment_context import (
     environment_candidates_from_environment,
     normalize_runtime_environment,
 )
-from memem.models import _normalize_scope_id
+from memem.models import LAYER_L0, LAYER_L3, _normalize_scope_id
 from memem.slice_history import annotate_slice_continuity, load_slice_history, persist_slice_history
 
 log = logging.getLogger("memem-active-slice")
@@ -57,6 +57,30 @@ def _dedupe_candidates(candidates: list[Candidate]) -> list[Candidate]:
         seen.add(key)
         result.append(candidate)
     return result
+
+
+def _gather_l0_anchors(scope_id: str) -> list[Candidate]:
+    """Always-include L0 (project identity) memories for the active scope.
+
+    L0 memories are intrinsic to the project — they should be in every active
+    slice for that scope, regardless of query relevance. Anchor score 0.95 so
+    they survive reranking but don't dominate over highly-relevant L2 hits.
+    """
+    try:
+        from memem.obsidian_store import _obsidian_memories
+    except Exception:
+        return []
+    all_mems = _obsidian_memories()
+    normalized = _normalize_scope_id(scope_id)
+    l0_for_scope = [
+        m for m in all_mems
+        if m.get("layer") == LAYER_L0
+        and _normalize_scope_id(str(m.get("project", "general") or "general")) == normalized
+    ]
+    return [
+        normalize_memory_candidate(m, source_reason="l0_anchor", score=0.95)
+        for m in l0_for_scope
+    ]
 
 
 def _playbook_candidate(scope_id: str) -> Candidate | None:
@@ -128,6 +152,8 @@ def generate_candidates(
     normalized_scope = _normalize_scope_id(scope_id)
     current = [current_query_candidate(query, normalized_scope)]
 
+    l0_anchors = _gather_l0_anchors(normalized_scope)
+
     memory_candidates: list[Candidate] = []
     try:
         from memem.recall import _search_memories
@@ -146,6 +172,23 @@ def generate_candidates(
         ]
     except Exception as exc:
         log.debug("recall candidate generation failed: %s", exc)
+
+    # Filter L3 (archival) memories — they must not appear in auto-recall slices.
+    memory_candidates = [c for c in memory_candidates if c.get("layer") != LAYER_L3]
+
+    # Dedup: L0 anchors come first so they win the score competition (0.95).
+    # If an L0 memory also matched the relevance query it would appear twice;
+    # dedup by memory_id removes the lower-scored relevance copy.
+    seen_ids: set[str] = set()
+    deduped_memory_candidates: list[Candidate] = []
+    for cand in l0_anchors + memory_candidates:
+        mem_id = cand.get("memory_id", "")
+        if mem_id and mem_id in seen_ids:
+            continue
+        if mem_id:
+            seen_ids.add(mem_id)
+        deduped_memory_candidates.append(cand)
+    memory_candidates = deduped_memory_candidates
 
     graph_candidates = _graph_candidates(memory_candidates)
     playbook = _playbook_candidate(normalized_scope)
