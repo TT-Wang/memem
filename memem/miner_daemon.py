@@ -35,6 +35,8 @@ from memem.session_state import (
 PID_FILE = MEMEM_DIR / "miner.pid"
 LOG_FILE = MEMEM_DIR / "miner.log"
 POLL_INTERVAL = 60
+SUBPROCESS_TIMEOUT_SECONDS = 300  # was hardcoded as timeout=300 in subprocess.run
+SUBPROCESS_KILL_GRACE_SECONDS = 5  # SIGTERM grace before SIGKILL
 # After this many consecutive failures on the same session, persist STATUS_FAILED
 # so it stops being re-attempted every poll. The fingerprint check in
 # find_settled_sessions will let it back in if the JSONL file changes.
@@ -269,19 +271,40 @@ def _run_server_command(args: list[str], expect_json: bool = True):
     plugin_root = str(Path(__file__).resolve().parent.parent)
     env = os.environ.copy()
     env["PYTHONPATH"] = plugin_root + os.pathsep + env.get("PYTHONPATH", "")
-    result = subprocess.run(
-        [sys.executable, "-m", "memem.server", *args],
-        capture_output=True,
+    cmd = [sys.executable, "-m", "memem.server", *args]
+    with subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=300,
         env=env,
         start_new_session=True,
-    )
-    stdout = result.stdout.strip()
-    stderr = result.stderr.strip()
-    if result.returncode != 0:
-        detail = stderr or stdout or f"command failed with exit code {result.returncode}"
-        if result.returncode == FATAL_EXIT_CODE:
+    ) as p:
+        try:
+            stdout, stderr = p.communicate(timeout=SUBPROCESS_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired:
+            # kill the whole process group, not just the child
+            try:
+                os.killpg(os.getpgid(p.pid), signal.SIGTERM)
+            except ProcessLookupError:
+                pass  # already dead
+            try:
+                stdout, stderr = p.communicate(timeout=SUBPROCESS_KILL_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                stdout, stderr = p.communicate()
+            raise RetryableMinerError(
+                f"subprocess timed out after {SUBPROCESS_TIMEOUT_SECONDS}s; killed process group"
+            )
+
+    stdout = (stdout or "").strip()
+    stderr = (stderr or "").strip()
+    if p.returncode != 0:
+        detail = stderr or stdout or f"command failed with exit code {p.returncode}"
+        if p.returncode == FATAL_EXIT_CODE:
             raise FatalMinerError(detail)
         raise RetryableMinerError(detail)
     if not expect_json or not stdout:
