@@ -27,8 +27,16 @@ from tenacity import (
     wait_random_exponential,  # noqa: F401 — imported for dep resolution; formula implemented manually below
 )
 
+from memem.miner_circuit_breaker import CircuitBreaker
 from memem.miner_errors import PermanentError, TransientError
-from memem.miner_protocol import FATAL_EXIT_CODE, STATUS_COMPLETE, STATUS_FAILED, STATUS_RETRYING, TRANSIENT_EXIT_CODE
+from memem.miner_protocol import (
+    FATAL_EXIT_CODE,
+    STATUS_BLOCKED,
+    STATUS_COMPLETE,
+    STATUS_FAILED,
+    STATUS_RETRYING,
+    TRANSIENT_EXIT_CODE,
+)
 from memem.models import MEMEM_DIR
 from memem.session_state import (
     MINED_SESSIONS_FILE,
@@ -58,6 +66,8 @@ GLOBAL_LOCK_FILE = Path.home() / ".memem" / "miner.global.lock"
 _GLOBAL_LOCK_FH = None
 
 log = logging.getLogger("memem-miner")
+
+_circuit_breaker = CircuitBreaker()
 
 
 def _next_backoff_seconds(attempt: int) -> float:
@@ -427,41 +437,55 @@ def _run_loop():
             attempted = 0
             failed = 0
             for jsonl_path in sessions:
+                if _circuit_breaker.is_open():
+                    # Skip processing; mark blocked so it stays out of the queue
+                    # until next file change.
+                    try:
+                        update_session_state(jsonl_path, STATUS_BLOCKED, message="circuit breaker open")
+                    except OSError as exc:
+                        log.error("could not record STATUS_BLOCKED: %s", exc)
+                    continue
+
                 attempted += 1
-                saved, completed = _mine_session(jsonl_path)
-                total_saved += saved
-                if completed:
-                    processed += 1
-                    failure_counts.pop(jsonl_path.stem, None)
-                else:
-                    count = failure_counts.get(jsonl_path.stem, 0) + 1
-                    failure_counts[jsonl_path.stem] = count
-                    failed += 1
-                    if count >= MAX_SESSION_FAILURES:
-                        log.warning(
-                            "Marking session %s as failed after %d retries",
-                            jsonl_path.stem[:12], count,
-                        )
-                        try:
-                            update_session_state(
-                                jsonl_path,
-                                STATUS_FAILED,
-                                message=f"miner gave up after {count} consecutive failures",
-                                attempts=count,
-                            )
-                        except OSError as exc:
-                            log.error("Could not persist failure state: %s", exc)
+                try:
+                    saved, completed = _mine_session(jsonl_path)
+                    total_saved += saved
+                    if completed:
+                        _circuit_breaker.record_success()
+                        processed += 1
                         failure_counts.pop(jsonl_path.stem, None)
                     else:
-                        try:
-                            update_session_state(
-                                jsonl_path,
-                                STATUS_RETRYING,
-                                message=f"transient failure, attempt {count}",
-                                attempts=count,
+                        count = failure_counts.get(jsonl_path.stem, 0) + 1
+                        failure_counts[jsonl_path.stem] = count
+                        failed += 1
+                        if count >= MAX_SESSION_FAILURES:
+                            log.warning(
+                                "Marking session %s as failed after %d retries",
+                                jsonl_path.stem[:12], count,
                             )
-                        except OSError as exc:
-                            log.error("Could not persist retrying state: %s", exc)
+                            try:
+                                update_session_state(
+                                    jsonl_path,
+                                    STATUS_FAILED,
+                                    message=f"miner gave up after {count} consecutive failures",
+                                    attempts=count,
+                                )
+                            except OSError as exc:
+                                log.error("Could not persist failure state: %s", exc)
+                            failure_counts.pop(jsonl_path.stem, None)
+                        else:
+                            try:
+                                update_session_state(
+                                    jsonl_path,
+                                    STATUS_RETRYING,
+                                    message=f"transient failure, attempt {count}",
+                                    attempts=count,
+                                )
+                            except OSError as exc:
+                                log.error("Could not persist retrying state: %s", exc)
+                except PermanentError as exc:
+                    _circuit_breaker.record_failure(exc)
+                    raise  # let outer handler do its thing
             if processed > 0:
                 log.info("Rebuilding index after %d completed sessions", processed)
                 try:

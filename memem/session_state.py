@@ -5,7 +5,7 @@ import sys
 import time
 from pathlib import Path
 
-from memem.miner_protocol import MINER_STATE_VERSION, STATUS_COMPLETE, STATUS_FAILED
+from memem.miner_protocol import MINER_STATE_VERSION, STATUS_BLOCKED, STATUS_COMPLETE, STATUS_FAILED
 from memem.models import (
     MEMEM_DIR,
     _env,
@@ -144,7 +144,7 @@ def session_is_terminal(path: Path, state: dict | None) -> bool:
     """
     if not state:
         return False
-    if state.get("status") not in {STATUS_COMPLETE, STATUS_FAILED}:
+    if state.get("status") not in {STATUS_COMPLETE, STATUS_FAILED, STATUS_BLOCKED}:
         return False
     if str(state.get("version", "")) != MINER_STATE_VERSION:
         return False
