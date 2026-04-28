@@ -631,6 +631,21 @@ def _build_mcp():
                 ),
             ),
         ] = "",
+        layer: Annotated[
+            int | None,
+            Field(
+                ge=0,
+                le=3,
+                description=(
+                    "Optional layer override (0=identity, 1=generic, 2=domain, 3=archival). "
+                    "Omit to auto-classify via the same heuristic the miner uses. "
+                    "Use 0 only for project-identity facts ('my-app uses Postgres + Redis'). "
+                    "Use 1 for cross-project conventions. "
+                    "Use 3 for rare/archival lessons that should be tool-call-only. "
+                    "Most saves should leave this unset."
+                ),
+            ),
+        ] = None,
     ) -> str:
         """Save a durable lesson, decision, or convention to persistent memory.
 
@@ -690,7 +705,7 @@ def _build_mcp():
                 scope_id="my-webapp",
             )
         """
-        return _memory_save(content, title=title, scope_id=scope_id, tags=tags)
+        return _memory_save(content, title=title, scope_id=scope_id, tags=tags, layer=layer)
 
     @mcp.tool()
     def memory_list(

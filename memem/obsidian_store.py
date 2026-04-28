@@ -391,7 +391,8 @@ def _strip_generated_related_section(body: str) -> str:
 
 def _make_memory(content: str, title: str, tags: list[str] | None = None,
                  project: str = "general", source_type: str = "user",
-                 source_session: str = "", importance: int = 3) -> dict:
+                 source_session: str = "", importance: int = 3,
+                 layer: int | None = None) -> dict:
     # Reject junk content
     stripped = content.strip().strip(".")
     if len(stripped) < 10:
@@ -407,7 +408,7 @@ def _make_memory(content: str, title: str, tags: list[str] | None = None,
             raise ValueError(f"Title: {title_threat}")
 
     normalized_project = (project or "general").strip() or "general"
-    return {
+    mem = {
         "id": str(uuid.uuid4()),
         "title": title,
         "essence": content,
@@ -420,6 +421,23 @@ def _make_memory(content: str, title: str, tags: list[str] | None = None,
         "updated_at": _now(),
         "schema_version": 1,
     }
+
+    # Layer assignment: explicit param wins; otherwise auto-classify.
+    if layer is not None:
+        if not isinstance(layer, int) or not (0 <= layer <= 3):
+            raise ValueError(f"layer must be int 0-3, got {layer!r}")
+        mem["layer"] = layer
+    else:
+        # Auto-classify via the same heuristic mining uses. Need vault snapshot
+        # for the L0 cap check. Lazy-load to avoid circular import.
+        from memem.mining import classify_layer
+        try:
+            vault_snapshot = _obsidian_memories()
+        except Exception:
+            vault_snapshot = []
+        mem["layer"] = classify_layer(mem, vault_snapshot)
+
+    return mem
 
 
 # ---------------------------------------------------------------------------

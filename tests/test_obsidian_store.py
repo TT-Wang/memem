@@ -446,3 +446,57 @@ def test_purge_mined_memories_clears_fts_and_index(tmp_vault, tmp_cortex_dir):
     index_path = Path(obsidian_store.INDEX_PATH)
     if index_path.exists():
         assert mined["id"][:8] not in index_path.read_text()
+
+
+# ---------------------------------------------------------------------------
+# Layer assignment in _make_memory
+# ---------------------------------------------------------------------------
+
+def test_make_memory_assigns_layer_when_explicit(tmp_vault, tmp_cortex_dir):
+    """Explicit layer param is stored without modification."""
+    import importlib
+
+    from memem import obsidian_store
+    importlib.reload(obsidian_store)
+
+    mem = obsidian_store._make_memory(
+        content="This project uses Postgres and Redis for storage.",
+        title="Storage stack identity",
+        project="my-app",
+        source_type="user",
+        importance=4,
+        layer=0,
+    )
+    assert mem["layer"] == 0
+
+
+def test_make_memory_auto_classifies_when_layer_none(tmp_vault, tmp_cortex_dir):
+    """When layer is not passed, _make_memory auto-classifies (returns int 0-3)."""
+    import importlib
+
+    from memem import obsidian_store
+    importlib.reload(obsidian_store)
+
+    mem = obsidian_store._make_memory(
+        content="Always use parameterized queries to avoid SQL injection attacks.",
+        title="SQL injection prevention",
+        project="general",
+        source_type="user",
+    )
+    assert isinstance(mem["layer"], int)
+    assert 0 <= mem["layer"] <= 3
+
+
+def test_make_memory_rejects_invalid_layer(tmp_vault, tmp_cortex_dir):
+    """layer values outside 0-3 must raise ValueError."""
+    import importlib
+
+    from memem import obsidian_store
+    importlib.reload(obsidian_store)
+
+    with pytest.raises(ValueError, match="layer must be int 0-3"):
+        obsidian_store._make_memory(
+            content="Some valid content that is long enough to pass checks.",
+            title="Test invalid layer",
+            layer=5,
+        )

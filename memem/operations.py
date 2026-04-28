@@ -11,7 +11,8 @@ from memem.obsidian_store import (
 )
 
 
-def memory_save(content: str, title: str = "", scope_id: str = "default", tags: str = "") -> str:
+def memory_save(content: str, title: str = "", scope_id: str = "default",
+                tags: str = "", layer: int | None = None) -> str:
     domain_tags = [tag.strip() for tag in tags.split(",") if tag.strip()] if tags else []
     effective_title = title or content[:60]
     project = _normalize_scope_id(scope_id)
@@ -27,6 +28,7 @@ def memory_save(content: str, title: str = "", scope_id: str = "default", tags: 
             tags=domain_tags,
             project=project,
             source_type="user",
+            layer=layer,
         )
         _save_memory(mem)
         return f'Memory saved: {mem["id"][:8]}... "{effective_title}"'
