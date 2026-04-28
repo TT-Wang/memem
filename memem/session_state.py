@@ -2,6 +2,8 @@ import fcntl
 import json
 import os
 import re
+import shutil
+import sys
 import time
 from pathlib import Path
 
@@ -77,18 +79,43 @@ def _parse_state_line(line: str) -> dict | None:
     }
 
 
+def _backup_corrupt_file() -> None:
+    """Copy MINED_SESSIONS_FILE to a timestamped backup and warn on stderr."""
+    timestamp = int(time.time())
+    backup = MINED_SESSIONS_FILE.with_name(f".mined_sessions.corrupt.{timestamp}")
+    shutil.copy2(MINED_SESSIONS_FILE, backup)
+    print(
+        f"WARNING: corrupt session state file backed up to {backup}; starting fresh",
+        file=sys.stderr,
+    )
+
+
 def load_mined_session_state() -> dict[str, dict]:
     if not MINED_SESSIONS_FILE.exists():
         return {}
 
     states: dict[str, dict] = {}
     try:
-        for line in MINED_SESSIONS_FILE.read_text().splitlines():
+        raw_text = MINED_SESSIONS_FILE.read_text()
+    except OSError:
+        return {}
+    except Exception:
+        _backup_corrupt_file()
+        return {}
+
+    try:
+        for line in raw_text.splitlines():
             state = _parse_state_line(line)
             if state:
                 states[state["session_id"]] = state
     except OSError:
         return {}
+
+    # If the file was non-empty but zero lines parsed, treat as corrupt.
+    if raw_text.strip() and not states:
+        _backup_corrupt_file()
+        return {}
+
     return states
 
 
