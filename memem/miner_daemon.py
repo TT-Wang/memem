@@ -21,6 +21,7 @@ import sys
 import time
 from pathlib import Path
 
+from memem.miner_errors import PermanentError, TransientError
 from memem.miner_protocol import FATAL_EXIT_CODE, STATUS_FAILED, STATUS_RETRYING, TRANSIENT_EXIT_CODE
 from memem.models import MEMEM_DIR
 from memem.session_state import (
@@ -72,12 +73,9 @@ def _configure_logging() -> None:
     log.propagate = False
 
 
-class FatalMinerError(RuntimeError):
-    """Raised when storage state is unsafe and the miner must stop."""
-
-
-class RetryableMinerError(RuntimeError):
-    """Raised for transient per-session failures."""
+# Backward-compat aliases — new code should use the taxonomy classes directly.
+RetryableMinerError = TransientError
+FatalMinerError = PermanentError
 
 
 def _is_ephemeral_test_state_dir(path: Path = MEMEM_DIR) -> bool:
@@ -170,7 +168,7 @@ def _is_fatal_api_error(exc: BaseException) -> bool:
         "quota",
         "authentication_error",
         "invalid authentication",
-        "not logged in",
+        "you are not logged in",
         "please run /login",
         "timed out",
     )
@@ -311,9 +309,10 @@ def _run_server_command(args: list[str], expect_json: bool = True):
     stderr = (stderr or "").strip()
     if p.returncode != 0:
         detail = stderr or stdout or f"command failed with exit code {p.returncode}"
-        if p.returncode == FATAL_EXIT_CODE:
-            raise FatalMinerError(detail)
-        raise RetryableMinerError(detail)
+        if p.returncode == TRANSIENT_EXIT_CODE:
+            raise TransientError(detail)
+        # Default: anything else (including FATAL_EXIT_CODE and unknown codes) is permanent.
+        raise PermanentError(detail)
     if not expect_json or not stdout:
         return stdout
     try:
