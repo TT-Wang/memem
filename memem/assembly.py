@@ -1,8 +1,9 @@
 """Explicit assembly projection and memory consolidation.
 
-context_assemble remains callable as a secondary path when a caller wants
-Haiku to rewrite playbooks, memories, and transcript search results into a
-single narrative briefing. The default runtime path is Active Memory Slice.
+context_assemble is the secondary path for building a structured context
+briefing. After m4, it calls the active slice engine 1-2 times, merges the
+resulting slices into a composite "assembled" MemorySlice, and renders it
+via render_slice_markdown.
 
 _consolidate_project is the 'dreaming' pass that merges redundant memories
 and deprecates obsolete ones.
@@ -12,7 +13,7 @@ import json
 import logging
 import subprocess
 
-from memem.models import PLAYBOOK_DIR, _normalize_scope_id
+from memem.models import _normalize_scope_id, now_iso
 from memem.obsidian_store import (
     _deprecate_memory,
     _find_memory,
@@ -22,109 +23,119 @@ from memem.obsidian_store import (
 
 log = logging.getLogger("memem-assembly")
 
+# Threshold: if the primary slice has fewer items than this, augment with general scope.
+_SPARSE_THRESHOLD = 5
 
-_ASSEMBLE_SYSTEM = (
-    "You are a context assembly engine. Given a user's query and raw knowledge "
-    "materials, produce a comprehensive briefing that contains everything an AI "
-    "assistant would need to answer the query well. Include all relevant facts, "
-    "decisions, conventions, and context. Exclude anything unrelated to the query. "
-    "Format as clean markdown. Be thorough — include everything relevant, but "
-    "nothing that isn't. Output ONLY the briefing, no meta-commentary."
-)
+
+def _active_items_to_memory_items(slice_obj: "dict") -> "list[dict]":
+    """Convert ActiveMemoryItem entries from an ActiveMemorySlice into MemoryItem dicts.
+
+    ActiveMemoryItem has: memory_id, role, title, summary, layer, score, etc.
+    MemoryItem needs:     id, title, content, layer, score, snippet, source_type, project.
+    """
+    seen: set[str] = set()
+    items: list[dict] = []
+
+    role_sections = ["goals", "constraints", "active_background", "decisions", "preferences", "failure_patterns"]
+    for section_key in role_sections:
+        for entry in slice_obj.get(section_key, []):
+            mem_id = entry.get("memory_id", "")
+            if not mem_id:
+                continue
+            if mem_id in seen:
+                continue
+            seen.add(mem_id)
+            summary = entry.get("summary", "") or ""
+            items.append({
+                "id": mem_id,
+                "title": entry.get("title", "Untitled"),
+                "content": summary,
+                "snippet": summary[:80],
+                "layer": entry.get("layer", 2),
+                "score": entry.get("score", 0.5),
+                "source_type": entry.get("source_type", "memory"),
+                "project": entry.get("project", "general"),
+            })
+    return items
+
+
+def _merge_slices(sub_slices: "list[dict]", query: str, project: str) -> "dict":
+    """Fold N ActiveMemorySlice-sourced item lists into one composite MemorySlice."""
+    from memem.active_slice import _layer_summary_from_items, _stable_id
+
+    seen_ids: set[str] = set()
+    merged_items: list[dict] = []
+
+    for sub in sub_slices:
+        for item in sub.get("items", []):
+            item_id = item.get("id", "")
+            if item_id and item_id in seen_ids:
+                continue
+            if item_id:
+                seen_ids.add(item_id)
+            merged_items.append(item)
+
+    layer_summary = _layer_summary_from_items(merged_items)  # type: ignore[arg-type]
+
+    n_subs = len(sub_slices)
+    strategy = "primary-only" if n_subs == 1 else "primary+general-augmentation"
+
+    return {
+        "slice_id": _stable_id("assembled", {"query": query, "project": project, "generated_at": now_iso()}),
+        "scope_id": project,
+        "query": query,
+        "generated_at": now_iso(),
+        "slice_kind": "assembled",
+        "items": merged_items,
+        "layer_summary": layer_summary,
+        "sub_slices": sub_slices,
+        "composition_strategy": strategy,
+    }
 
 
 def context_assemble(query: str, project: str = "default") -> str:
-    """Assemble an explicit narrative briefing from all available knowledge.
+    """Assemble a composite briefing by composing active slice projections.
 
-    This is the secondary projection path. It gathers playbook, relevant
-    memories, and session history, then uses Haiku to produce a focused
-    briefing for the given query.
+    This is the secondary projection path. It calls the active slice engine
+    once for the active project scope, and optionally a second time for the
+    "general" scope when the primary result is sparse. The resulting slices
+    are merged into a single composite "assembled" MemorySlice and rendered
+    via render_slice_markdown.
     """
+    from memem.active_slice import render_slice_markdown
+    from memem.active_slice_engine import build_slice
+
     normalized = _normalize_scope_id(project)
 
-    # Load playbook if exists
-    playbook_content = ""
-    playbook_path = PLAYBOOK_DIR / f"{normalized}.md"
-    if playbook_path.exists():
-        try:
-            content = playbook_path.read_text().strip()
-            # Strip hash comment at end
-            lines = content.split("\n")
-            if lines and (lines[-1].strip().startswith("<!-- cortex-hash:") or lines[-1].strip().startswith("<!-- refined:")):
-                content = "\n".join(lines[:-1]).strip()
-            playbook_content = content
-        except OSError:
-            pass
+    # Primary slice: active project scope
+    primary_slice = build_slice(query, scope_id=normalized, use_llm=False)
+    primary_items = _active_items_to_memory_items(primary_slice)
+    primary_as_sub: dict = {
+        "scope_id": normalized,
+        "slice_id": primary_slice.get("slice_id", ""),
+        "items": primary_items,
+    }
 
-    # Get relevant memories (lazy import to avoid circular dep)
-    from memem.recall import _search_memories
-    memories = _search_memories(query, scope_id=normalized, limit=20, record_access=False)
+    sub_slices = [primary_as_sub]
 
-    # Get transcript search results (lazy import)
-    from memem.transcripts import transcript_search
-    transcript_results = transcript_search(query, limit=3)
+    # Cross-project augmentation when primary is sparse
+    if len(primary_items) < _SPARSE_THRESHOLD and normalized != "general":
+        general_slice = build_slice(query, scope_id="general", use_llm=False)
+        general_items = _active_items_to_memory_items(general_slice)
+        if general_items:
+            sub_slices.append({
+                "scope_id": "general",
+                "slice_id": general_slice.get("slice_id", ""),
+                "items": general_items,
+            })
 
-    # Early return if nothing to assemble
-    if not playbook_content and not memories and ("No matching" in transcript_results or not transcript_results):
+    composite = _merge_slices(sub_slices, query=query, project=normalized)
+
+    # Early return if nothing was assembled
+    if not composite.get("items"):
         return ""
 
-    # Format materials
-    parts = []
-    if playbook_content:
-        parts.append(f"PLAYBOOK:\n{playbook_content}")
-
-    if memories:
-        mem_lines = []
-        for mem in memories:
-            title = mem.get("title", "Untitled")
-            essence = mem.get("essence", mem.get("full_record", ""))
-            mem_lines.append(f"## {title}\n{essence}")
-        parts.append("RELEVANT MEMORIES:\n" + "\n\n".join(mem_lines))
-
-    if transcript_results and "No matching" not in transcript_results:
-        parts.append(f"RELATED SESSIONS:\n{transcript_results}")
-
-    materials = "\n\n".join(parts)
-    # Cap at 50K chars
-    if len(materials) > 50000:
-        materials = materials[:50000]
-
-    prompt = f"QUERY: {query}\n\n{materials}"
-
-    # Degraded mode: if the `claude` CLI isn't available, return the raw
-    # materials (playbook + memory list) instead of failing or silently
-    # returning empty. The caller still gets useful context.
-    from memem.capabilities import assembly_available
-    if not assembly_available():
-        log.info("context_assemble: claude CLI unavailable, returning raw materials (degraded)")
-        return materials if materials else (playbook_content or "")
-
-    # Haiku assembles the brief. On any failure — subprocess exception,
-    # non-zero exit, empty stdout — fall back to the raw `materials` we
-    # already collected locally (playbook + memories + transcript search).
-    # v0.10.2 fix: previously these branches returned only playbook_content,
-    # silently dropping memories and transcripts when Haiku was unstable.
-    try:
-        result = subprocess.run(
-            ["claude", "-p", "--model", "haiku", "--tools", "", "--system-prompt", _ASSEMBLE_SYSTEM],
-            input=prompt,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-    except Exception:
-        log.info("context_assemble: claude subprocess failed, returning raw materials")
-        return materials or playbook_content or ""
-
-    if result.returncode != 0 or not result.stdout.strip():
-        log.info(
-            "context_assemble: claude returned rc=%s empty=%s, returning raw materials",
-            result.returncode,
-            not result.stdout.strip(),
-        )
-        return materials or playbook_content or ""
-
-    return result.stdout.strip()
+    return render_slice_markdown(composite)  # type: ignore[arg-type]
 
 
 _CONSOLIDATION_SYSTEM = (

@@ -255,6 +255,9 @@ class ActiveMemorySlice(TypedDict, total=False):
     anchor_title: str
     before_items: list[MemoryItem]
     after_items: list[MemoryItem]
+    # ── Extra fields for assembled kind ──
+    sub_slices: list[ActiveMemorySlice]
+    composition_strategy: str
 
 
 # Type alias for new code that wants the cleaner name.
@@ -940,11 +943,24 @@ def _render_timeline_slice(slice_data: ActiveMemorySlice) -> str:
 
 
 def _render_assembled_slice(slice_data: ActiveMemorySlice) -> str:
-    """Render an assembled briefing slice (stub for m3; m4 will refine)."""
+    """Render an assembled briefing slice (composed from sub-slices via context_assemble)."""
     items = slice_data.get("items", [])
-    lines = ["## Composed Briefing", ""]
+    layer_summary = slice_data.get("layer_summary", {})
+    sub_slices = slice_data.get("sub_slices", [])
+    composition = slice_data.get("composition_strategy", "")
+
+    lines = ["## Composed Briefing"]
+    if composition:
+        lines.append(f"_strategy: {composition}, sources: {len(sub_slices)} sub-slices_")
+    if layer_summary:
+        layer_str = ", ".join(f"L{k}={v}" for k, v in sorted(layer_summary.items()) if v)
+        if layer_str:
+            lines.append(f"_layers: {layer_str}_")
+    lines.append("")
+
     for item in items:
         lines.append(_format_compact_index_line_from_item(item))
+
     return "\n".join(lines)
 
 

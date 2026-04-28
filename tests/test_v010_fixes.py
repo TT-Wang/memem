@@ -345,41 +345,30 @@ def test_find_settled_sessions_bypass_gate_param(tmp_cortex_dir, tmp_path, monke
 
 
 def test_context_assemble_returns_materials_on_haiku_failure(tmp_vault, monkeypatch):
-    """v0.10.2 fix #4: context_assemble must return raw materials on failure.
+    """v0.10.2 fix #4 (updated m4): context_assemble includes memories from active slice.
 
-    Previously the exception branches returned `playbook_content or ""`,
-    throwing away already-collected memories and transcript results when
-    Haiku was unstable.
+    After m4 context_assemble calls the active slice engine (build_slice) instead
+    of Haiku, so "Haiku failure" is no longer a concern. The assertion is preserved:
+    memories recalled by the slice engine must appear in the assembled output.
     """
-    from memem import assembly
-    importlib.reload(assembly)
-
-    # context_assemble calls _search_memories (lazy imported from recall)
-    # for its memory set. Patch that directly.
+    # Patch _search_memories so the active slice engine returns Memory 1.
     from memem import recall
     monkeypatch.setattr(
         recall, "_search_memories",
-        lambda query, scope_id=None, limit=20, record_access=False, expand_links=True: [
-            {"id": "m1", "title": "Memory 1", "essence": "important context", "project": "test"},
+        lambda query, scope_id=None, limit=20, record_access=False, expand_links=False,
+               rerank_model=None: [
+            {"id": "m1" + "0" * 30, "title": "Memory 1", "essence": "important context",
+             "project": "test", "layer": 2, "importance": 3, "status": "active",
+             "source_type": "user"},
         ],
     )
-    monkeypatch.setattr(
-        "memem.transcripts.transcript_search",
-        lambda query, limit=3: "session log snippet",
-    )
-    import memem.capabilities
-    monkeypatch.setattr(memem.capabilities, "assembly_available", lambda: True)
 
-    # Haiku subprocess raises
-    def boom(*args, **kwargs):
-        raise RuntimeError("haiku down")
-    monkeypatch.setattr(assembly.subprocess, "run", boom)
+    from memem.assembly import context_assemble
+    result = context_assemble("what do we know about X?", project="default")
 
-    result = assembly.context_assemble("what do we know about X?", project="default")
-
-    # Must include the memory (not just playbook or transcript)
+    # Must include the memory
     assert "Memory 1" in result, (
-        f"context_assemble dropped memories on Haiku failure. Got: {result!r}"
+        f"context_assemble dropped memories. Got: {result!r}"
     )
 
 

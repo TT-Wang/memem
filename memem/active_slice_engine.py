@@ -213,6 +213,33 @@ def generate_candidates(
     }
 
 
+def build_slice(
+    query: str,
+    scope_id: str = "default",
+    environment: dict[str, Any] | None = None,
+    use_llm: bool = False,
+) -> ActiveMemorySlice:
+    """Build and return a structured ActiveMemorySlice dict without rendering.
+
+    This is the preferred entry point for callers that need the slice structure
+    (e.g. context_assemble merging multiple slices). LLM activation is disabled
+    by default to keep assembly fast; callers can opt in by passing use_llm=True.
+
+    History persistence is intentionally disabled: assembly callers will call
+    this for multiple scopes and should not create spurious history records.
+    """
+    return _generate_active_memory_slice_internal(
+        query,
+        scope_id=scope_id,
+        environment=environment,
+        use_llm=use_llm,
+        writeback_mode="policy_only",
+        auto_commit_safe=False,
+        dry_run=True,
+        persist_history=False,
+    )
+
+
 def generate_active_memory_slice(
     query: str,
     scope_id: str = "default",
