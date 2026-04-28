@@ -50,6 +50,7 @@ from memem.session_state import (
 
 PID_FILE = MEMEM_DIR / "miner.pid"
 LOG_FILE = MEMEM_DIR / "miner.log"
+HEARTBEAT_FILE = MEMEM_DIR / "miner.heartbeat"
 _shutdown_requested = False
 POLL_INTERVAL = 60
 MAX_CONCURRENT_SUBPROCESSES = 1
@@ -69,6 +70,19 @@ _GLOBAL_LOCK_FH = None
 log = structlog.get_logger("memem-miner")
 
 _circuit_breaker = CircuitBreaker()
+
+
+def _write_heartbeat() -> None:
+    """Touch the heartbeat file with the current timestamp.
+
+    Used by --status to detect a hung daemon: if heartbeat mtime is older
+    than 2x POLL_INTERVAL, something is wrong.
+    """
+    try:
+        HEARTBEAT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        HEARTBEAT_FILE.write_text(str(int(time.time())))
+    except OSError as exc:
+        log.warning("heartbeat_write_failed", error=str(exc))
 
 
 def _next_backoff_seconds(attempt: int) -> float:
@@ -316,10 +330,77 @@ def stop_daemon():
 
 def status_daemon():
     pid = _read_pid()
+    print("memem miner status")
+    print("=" * 18)
+
     if pid:
-        print(f"Miner daemon running (PID {pid})")
+        print(f"Daemon:    running (PID {pid})")
     else:
-        print("Miner daemon not running")
+        print("Daemon:    not running")
+
+    # Heartbeat
+    if HEARTBEAT_FILE.exists():
+        mtime = HEARTBEAT_FILE.stat().st_mtime
+        age = int(time.time() - mtime)
+        ts_iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(mtime))
+        print(f"Heartbeat: {ts_iso} ({age}s ago)")
+    else:
+        print("Heartbeat: missing (daemon never started or never wrote)")
+
+    # Lock owner
+    if GLOBAL_LOCK_FILE.exists():
+        try:
+            lock_pid = GLOBAL_LOCK_FILE.read_text().strip().splitlines()[0]
+            print(f"Lock:      held by PID {lock_pid} ({GLOBAL_LOCK_FILE})")
+        except (OSError, IndexError):
+            print(f"Lock:      file present but unreadable ({GLOBAL_LOCK_FILE})")
+    else:
+        print("Lock:      no lockfile present")
+
+    # Circuit breaker
+    # Note: _circuit_breaker is the module-level instance, which is freshly
+    # constructed (CLOSED state) in a --status invocation. It does NOT reflect
+    # the running daemon's actual breaker state because Python processes don't
+    # share in-process objects. For a cross-process view, breaker state would
+    # need to be persisted to disk — that is out of scope for m16.
+    print()
+    print("Circuit breaker:")
+    info = _circuit_breaker.state_info()
+    print(f"  state:                 {info['state']}")
+    print(f"  consecutive_failures:  {info['consecutive_failures']}")
+    print(f"  failure_threshold:     {info['failure_threshold']}")
+
+    # Per-session attempts — read DB
+    try:
+        from memem.session_state import load_mined_session_state  # noqa: PLC0415
+        all_states = load_mined_session_state()
+        in_progress = [
+            (sid, s) for sid, s in all_states.items()
+            if s.get("status") in (STATUS_RETRYING, STATUS_FAILED, STATUS_BLOCKED)
+            and int(s.get("attempts", 0)) > 0
+        ]
+        in_progress.sort(key=lambda x: int(x[1].get("attempts", 0)), reverse=True)
+        if in_progress:
+            print()
+            print("Per-session attempts (top 5 by attempts):")
+            for sid, s in in_progress[:5]:
+                msg = s.get("message", "")[:60]
+                print(f"  {sid[:12]}: status={s.get('status')} attempts={s.get('attempts')} last_error={msg!r}")
+    except Exception as exc:
+        print(f"Per-session: error reading state DB: {exc}")
+
+    # Recent log tail
+    print()
+    print("Recent log (last 20 lines):")
+    if LOG_FILE.exists():
+        try:
+            lines = LOG_FILE.read_text().splitlines()
+            for line in lines[-20:]:
+                print(f"  {line}")
+        except OSError as exc:
+            print(f"  (error reading log: {exc})")
+    else:
+        print("  (no log file)")
 
 
 def _run_server_command(args: list[str], expect_json: bool = True):
@@ -438,6 +519,7 @@ def _run_loop():
     backoff_attempt = 0
 
     while True:
+        _write_heartbeat()
         if _shutdown_requested:
             log.info("shutdown_draining")
             _release_global_lock()
