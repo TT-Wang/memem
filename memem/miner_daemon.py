@@ -275,6 +275,7 @@ def _run_server_command(args: list[str], expect_json: bool = True):
         text=True,
         timeout=300,
         env=env,
+        start_new_session=True,
     )
     stdout = result.stdout.strip()
     stderr = result.stderr.strip()
