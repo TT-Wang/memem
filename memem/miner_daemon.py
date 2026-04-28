@@ -149,6 +149,12 @@ def _is_fatal_api_error(exc: BaseException) -> bool:
     thousands of subprocess spawns per hour when the `claude` CLI was logged
     out. Now we surface them as fatal so the daemon exits cleanly and waits
     for the user to re-authenticate.
+
+    Hung subprocess timeouts are also fatal: when _run_server_command raises
+    subprocess.TimeoutExpired the text reads "Command '...' timed out after N
+    seconds". The pattern "timed out" matches this verb form while intentionally
+    NOT matching "read timeout" or "connection timeout" (noun form), which are
+    transient API hiccups that should be retried.
     """
     text = str(exc).lower()
     fatal_patterns = (
@@ -159,6 +165,7 @@ def _is_fatal_api_error(exc: BaseException) -> bool:
         "invalid authentication",
         "not logged in",
         "please run /login",
+        "timed out",
     )
     return any(pattern in text for pattern in fatal_patterns)
 

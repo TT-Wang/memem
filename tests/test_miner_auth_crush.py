@@ -18,6 +18,7 @@ These tests pin the four mechanisms that prevent the regression:
 """
 
 import importlib
+from pathlib import Path
 
 import pytest
 
@@ -39,6 +40,9 @@ from memem.miner_protocol import (
         "You have hit your limit for this month",
         "rate limit exceeded, retry later",
         "API quota reached",
+        "Command '['claude', '-p']' timed out after 300 seconds",
+        "subprocess timed out",
+        "mining timed out after 600.5 seconds",
     ],
 )
 def test_fatal_api_error_classifies_known_fatal_messages(message):
