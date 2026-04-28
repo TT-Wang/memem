@@ -105,7 +105,11 @@ def _acquire_global_lock() -> bool:
     """Allow only one memem miner per OS user, regardless of MEMEM_DIR."""
     global _GLOBAL_LOCK_FH
     GLOBAL_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
-    fh = open(GLOBAL_LOCK_FILE, "a+")
+    old_umask = os.umask(0o177)  # 0o177 = restrict to owner-only (0600)
+    try:
+        fh = open(GLOBAL_LOCK_FILE, "a+")
+    finally:
+        os.umask(old_umask)
     try:
         fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
