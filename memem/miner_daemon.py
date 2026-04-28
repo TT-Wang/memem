@@ -18,6 +18,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -37,6 +38,8 @@ PID_FILE = MEMEM_DIR / "miner.pid"
 LOG_FILE = MEMEM_DIR / "miner.log"
 _shutdown_requested = False
 POLL_INTERVAL = 60
+MAX_CONCURRENT_SUBPROCESSES = 1
+_subprocess_semaphore = threading.Semaphore(MAX_CONCURRENT_SUBPROCESSES)
 SUBPROCESS_TIMEOUT_SECONDS = 300  # was hardcoded as timeout=300 in subprocess.run
 SUBPROCESS_KILL_GRACE_SECONDS = 5  # SIGTERM grace before SIGKILL
 # After this many consecutive failures on the same session, persist STATUS_FAILED
@@ -277,7 +280,7 @@ def _run_server_command(args: list[str], expect_json: bool = True):
     env = os.environ.copy()
     env["PYTHONPATH"] = plugin_root + os.pathsep + env.get("PYTHONPATH", "")
     cmd = [sys.executable, "-m", "memem.server", *args]
-    with subprocess.Popen(
+    with _subprocess_semaphore, subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
