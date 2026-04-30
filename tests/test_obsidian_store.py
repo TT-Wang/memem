@@ -313,6 +313,7 @@ def test_pkl_cache_subprocess_cold_start(tmp_vault, tmp_cortex_dir):
     import importlib
     import subprocess
     import sys
+    from pathlib import Path
 
     from memem import obsidian_store
     importlib.reload(obsidian_store)
@@ -324,12 +325,14 @@ def test_pkl_cache_subprocess_cold_start(tmp_vault, tmp_cortex_dir):
     obsidian_store._save_memory(m)
     obsidian_store._trigger_sweep()
 
+    # Repo root inferred from this test file's location — works on any host
+    repo_root = str(Path(__file__).resolve().parent.parent)
     result = subprocess.run(
         [sys.executable, "-c",
          "import os, sys; "
          f"os.environ['MEMEM_DIR'] = {str(tmp_cortex_dir)!r}; "
          f"os.environ['MEMEM_OBSIDIAN_VAULT'] = {str(tmp_vault)!r}; "
-         "sys.path.insert(0, '/home/claude-user/cortex-plugin'); "
+         f"sys.path.insert(0, {repo_root!r}); "
          "from memem.obsidian_store import _find_memory, _obsidian_memories; "
          "mems = _obsidian_memories(); "
          "print(f'COUNT={len(mems)}'); "

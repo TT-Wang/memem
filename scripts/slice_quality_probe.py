@@ -7,8 +7,8 @@ Runs 20 synthesized queries against generate_active_memory_slice and captures
   (c) cosmetic_tension_count — tensions with the cosmetic cluster description
   (d) avg_activation_count — mean total entries per query
 
-Usage:
-    PYTHONPATH=/home/claude-user/cortex-plugin python3 scripts/slice_quality_probe.py \
+Usage (run from the memem repo root):
+    PYTHONPATH=. python3 scripts/slice_quality_probe.py \
         --output .forge/state/memem-vault-cleanup-baseline.json
 """
 
