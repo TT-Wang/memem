@@ -12,6 +12,8 @@ and deprecates obsolete ones.
 import json
 import logging
 import subprocess
+from collections.abc import Mapping
+from typing import Any
 
 from memem.models import DEFAULT_LAYER, _normalize_scope_id, now_iso
 from memem.obsidian_store import (
@@ -27,7 +29,7 @@ log = logging.getLogger("memem-assembly")
 _SPARSE_THRESHOLD = 5
 
 
-def _active_items_to_memory_items(slice_obj: "dict") -> "list[dict]":
+def _active_items_to_memory_items(slice_obj: Mapping[str, Any]) -> "list[dict]":
     """Convert ActiveMemoryItem entries from an ActiveMemorySlice into MemoryItem dicts.
 
     ActiveMemoryItem has: memory_id, role, title, summary, layer, score, etc.

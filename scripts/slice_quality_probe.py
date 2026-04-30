@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 COSMETIC_TENSION_DESC = "Multiple strong candidate clusters suggest an unresolved tradeoff."
@@ -222,10 +223,12 @@ def run_probe(output_path: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Slice quality baseline probe")
+    repo_root = Path(__file__).resolve().parent.parent
+    default_output = repo_root / ".forge" / "state" / "memem-vault-cleanup-baseline.json"
     parser.add_argument(
         "--output",
-        default="/home/claude-user/cortex-plugin/.forge/state/memem-vault-cleanup-baseline.json",
-        help="Output JSON file path",
+        default=str(default_output),
+        help="Output JSON file path (default: <repo>/.forge/state/memem-vault-cleanup-baseline.json)",
     )
     args = parser.parse_args()
     run_probe(args.output)

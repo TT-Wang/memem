@@ -77,7 +77,7 @@ def _ensure_frontmatter() -> None:
         return
     try:
         import frontmatter as _fm_mod
-        import yaml as _yaml_mod
+        import yaml as _yaml_mod  # type: ignore[import-untyped]
         from frontmatter.default_handlers import YAMLHandler as _YAMLHandler
     except ImportError as exc:
         raise ImportError(

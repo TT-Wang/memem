@@ -815,7 +815,7 @@ def commit_deltas(
             previews = batch.get("previews", []) or []
             results = batch.get("results", []) or []
             for offset, result in enumerate(results):
-                preview = previews[offset] if offset < len(previews) else None
+                preview = previews[offset] if offset < len(previews) else None  # type: ignore[assignment]
                 ordered[eligible_positions[offset]] = _public_result(
                     result,
                     preview=preview,
