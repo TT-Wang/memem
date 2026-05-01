@@ -30,6 +30,15 @@ memem is a Claude Code plugin that gives Claude persistent memory across session
 
 It's **local-first**: no cloud services, no API keys required, no vendor lock-in. Everything lives in `~/obsidian-brain/memem/memories/` as human-readable markdown.
 
+### What's new in v1.1
+
+- **Layered memory becomes real end-to-end.** Every memory now lives in one of four layers (L0/L1/L2/L3) at save time, not just at mining time. `memory_save` accepts an optional `layer` param (Claude can override) and auto-classifies otherwise. The slice engine pins L0 (project identity) on every prompt and gates L3 (rare archival) behind explicit search.
+- **Slice as universal recall format.** `memory_search`, `memory_get`, `memory_timeline`, `memory_recall`, and `context_assemble` all return slice-formatted output via a single `render_slice_markdown` dispatcher. `context_assemble` composes via `active_memory_slice` rather than rolling its own briefing.
+
+### What's new in v1.0 (miner hardening)
+
+A 16-module refactor closed the entire spawn-storm class of bugs that had previously taken down hosts. The miner now uses `start_new_session=True` + `os.killpg` for process-group cleanup on timeout, an inverted `TransientError`/`PermanentError` taxonomy with `PermanentError` as default, persisted attempt counters with DLQ at MAX_FAILURES, a SIGTERM-drained graceful shutdown, SQLite WAL state storage, a hand-rolled circuit breaker, structured JSON logs with `RotatingFileHandler`, and a 5-in-60s wrapper crash guard.
+
 ## When should I use memem?
 
 Use memem if:
@@ -86,16 +95,18 @@ The lower-level recall tools still exist for explicit drilling:
 3. `memory_timeline(id)` -> chronological thread
 4. `context_assemble(query, project)` -> optional secondary narrative briefing
 
-**Memory layers (auto-classified at mining time):**
+**Memory layers (auto-classified at save AND mining time; Claude can override):**
 
-| Layer | Purpose | Injection |
+| Layer | Purpose | Slice behavior |
 |-------|---------|-----------|
-| **L0** | Project identity — tech stack, repo structure, core conventions | Full content at session start |
-| **L1** | Generic conventions — testing, style, commit patterns | Compact index at session start |
-| **L2** | Domain-specific — most memories (default) | Compact index at session start |
-| **L3** | Rare/archival — niche failure modes, one-off lessons | Compact index at session start |
+| **L0** | Project identity — tech stack, repo structure, core conventions | **Always pinned** in every active slice for that project (anchor score 0.95) |
+| **L1** | Generic conventions — testing, style, commit patterns | Ranked + scored alongside L2 |
+| **L2** | Domain-specific — most memories (default) | Ranked + scored (default search hits) |
+| **L3** | Rare/archival — niche failure modes, one-off lessons | **Excluded from auto-recall**; only via explicit `memory_search`/`memory_get` |
 
-Token efficiency: session start injects ~50 tokens per L1-L3 memory (ID + title + snippet) instead of full content. Claude drills into specific memories via `memory_get(ids=[...])` only when it needs full detail.
+A heuristic (`mining.py:classify_layer`) assigns layers based on importance, structural tags, content length, and the per-project L0 cap. `memory_save(content, ..., layer=N)` accepts an explicit override (0-3) when Claude judges better than the heuristic.
+
+Token efficiency: session start injects L0 verbatim plus a compact index for L1-L2 (~50 tokens per entry: ID + L<n> + title + snippet). Claude drills into specific memories via `memory_get(ids=[...])` only when it needs full detail.
 
 **Active Memory Slice runtime kernel:**
 
@@ -242,14 +253,19 @@ You can point memem elsewhere via `MEMEM_DIR` and `MEMEM_OBSIDIAN_VAULT` env var
 
 ## What are the MCP tools Claude can call?
 
+All recall tools return **slice-formatted markdown** via a unified `render_slice_markdown` dispatcher (introduced in v1.1) so output structure is consistent across tools.
+
 | Tool | What it does |
 |------|------|
-| `memory_save(content, title, tags)` | Store a lesson. Security-scanned for prompt injection and credential exfil before writing. |
-| `memory_recall(query, limit)` | Search memories. FTS5 + temporal decay + access reinforcement + importance weighting. |
+| `memory_save(content, title, tags, layer?)` | Store a lesson. Security-scanned for prompt injection and credential exfil before writing. `layer` is optional (0-3); auto-classifies via `classify_layer` if omitted. |
+| `memory_search(query, limit, scope_id)` | **[L1]** Compact index slice — IDs + layer + title + 1-line snippet. Use first to narrow candidates. |
+| `memory_get(ids, scope_id)` | **[L2]** Full content slice for specific memory IDs. Use after `memory_search`. |
+| `memory_timeline(memory_id, scope_id)` | **[L3]** Chronological thread via `related[]` graph + same-project window. |
+| `memory_recall(query, scope_id, limit)` | Legacy alias — search + full content in one slice. |
 | `memory_list(scope_id)` | List all memories with stats, grouped by project. |
 | `memory_import(source_path)` | Bulk import from files, directories, or chat exports. |
 | `transcript_search(query)` | Search raw Claude Code session JSONL logs (not the mined memories). |
-| `context_assemble(query, project)` | On-demand query-tailored briefing from playbooks + memories + transcripts. Explicit secondary projection only. |
+| `context_assemble(query, project)` | Composite briefing: calls `active_memory_slice` 1-2 times (project + general scope when sparse), merges into one assembled slice. |
 | `memory_graph(memory_id)` | Inspect typed/scored graph neighbors for one memory. |
 | `memory_graph_audit()` | Report graph quality issues: orphans, dead links, hubs, stale edges. |
 | `memory_graph_rebuild(scope_id)` | Rebuild the graph side index from the Obsidian vault. |
@@ -331,19 +347,25 @@ memem is split into small, focused modules:
 - `telemetry.py` — access tracking, event log (atomic writes, fcntl-locked)
 - `search_index.py` — SQLite FTS5 index
 - `graph_index.py` — typed/scored related-memory graph side index
-- `active_slice.py` — active slice schemas and markdown projection
+- `active_slice.py` — `MemoryItem` + `ActiveMemorySlice` schemas, `render_slice_markdown` dispatcher
 - `activation.py` — heuristic + bounded LLM activation judgement
 - `boundaries.py` — scope/deprecated/budget/redundancy filters
 - `delta.py` — non-mutating candidate delta proposals
-- `active_slice_engine.py` — candidate generation and slice orchestration
-- `obsidian_store.py` — memory I/O, dedup scoring, contradiction detection
+- `active_slice_engine.py` — candidate generation, layer-aware (L0 anchors + L3 gating), `build_slice` public entry
+- `obsidian_store.py` — memory I/O, dedup scoring, contradiction detection, layer auto-classification on save
+- `recall.py` — slice-format recall tools (`memory_search`/`memory_get`/`memory_timeline`/`memory_recall`)
 - `playbook.py` — per-project playbook grow + refine
-- `assembly.py` — context assembly via Haiku
+- `assembly.py` — `context_assemble` composes via `active_memory_slice`
 - `capabilities.py` — runtime feature detection for degraded mode
 - `storage.py` — server-lifecycle helpers (PID management, miner auto-start)
 - `server.py` — thin MCP entrypoint (FastMCP imported lazily)
 - `cli.py` — command dispatcher for non-MCP entrypoints
-- `mining.py` — session mining pipeline
+- `mining.py` — session mining pipeline (Haiku extraction)
+- `miner_daemon.py` — long-running daemon with structlog JSON output, semaphore concurrency cap, heartbeat
+- `miner_protocol.py` — exit codes (FATAL=75 / TRANSIENT=20) and status constants
+- `miner_errors.py` — `TransientError` / `PermanentError` taxonomy (PermanentError default)
+- `miner_circuit_breaker.py` — hand-rolled CB; opens after 5 consecutive PermanentErrors, 5min cooldown
+- `session_state.py` / `session_state_db.py` — SQLite WAL state for the miner (auto-migrates from JSONL on first run)
 
 **Multi-signal recall scoring:**
 - 50% FTS relevance
@@ -421,9 +443,9 @@ memem works without Obsidian — it just writes markdown. But Obsidian gives you
 git clone https://github.com/TT-Wang/memem.git
 cd memem
 pip install -e ".[dev]"
-pytest             # 54 tests
+pytest             # 428 tests
 ruff check .       # lint
-mypy memem # type check (strict)
+mypy memem         # type check
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the PR process and [CHANGELOG.md](CHANGELOG.md) for version history.
