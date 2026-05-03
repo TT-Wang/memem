@@ -203,6 +203,15 @@ def generate_candidates(
         deduped_memory_candidates.append(cand)
     memory_candidates = deduped_memory_candidates
 
+    # A-MemGuard lesson exclusion: filter out memories flagged by lessons for this query.
+    try:
+        from memem.lessons import excluded_memory_ids_for_query
+        excluded = excluded_memory_ids_for_query(query)
+        if excluded:
+            memory_candidates = [c for c in memory_candidates if c.get("memory_id") not in excluded]
+    except Exception as exc:
+        log.debug("lesson exclusion failed: %s", exc)
+
     graph_candidates = _graph_candidates(memory_candidates)
     playbook = _playbook_candidate(normalized_scope)
     transcript_setting = env.get("include_transcripts", os.environ.get("MEMEM_ACTIVE_SLICE_TRANSCRIPTS", "0"))

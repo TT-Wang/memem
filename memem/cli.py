@@ -554,6 +554,51 @@ def dispatch_cli(argv: list[str], mcp) -> None:
             print("  (Pass --apply to execute proposals)")
         return
 
+    if cmd == "--record-lesson":
+        # A-MemGuard: record a lesson (anti-memory annotation).
+        # Usage: --record-lesson --memory-id <id> --query-class <class>
+        #        --anti-pattern <desc> [--evidence <text>] [--source manual|user|dreamer]
+        memory_id = ""
+        query_class = ""
+        anti_pattern = ""
+        evidence = ""
+        source = "manual"
+        i = 2
+        while i < len(argv):
+            arg = argv[i]
+            if arg == "--memory-id" and i + 1 < len(argv):
+                memory_id = argv[i + 1]
+                i += 2
+            elif arg == "--query-class" and i + 1 < len(argv):
+                query_class = argv[i + 1]
+                i += 2
+            elif arg == "--anti-pattern" and i + 1 < len(argv):
+                anti_pattern = argv[i + 1]
+                i += 2
+            elif arg == "--evidence" and i + 1 < len(argv):
+                evidence = argv[i + 1]
+                i += 2
+            elif arg == "--source" and i + 1 < len(argv):
+                source = argv[i + 1]
+                i += 2
+            else:
+                i += 1
+        if not memory_id or not query_class or not anti_pattern:
+            raise SystemExit(
+                "Usage: --record-lesson --memory-id <id> --query-class <class> "
+                "--anti-pattern <desc> [--evidence <text>] [--source manual|user|dreamer]"
+            )
+        from memem.lessons import record_lesson
+        lesson_id = record_lesson(
+            targeted_memory_id=memory_id,
+            query_class=query_class,
+            anti_pattern=anti_pattern,
+            evidence=evidence,
+            source=source,
+        )
+        print(f"Lesson recorded: {lesson_id}")
+        return
+
     if cmd is None:
         _register_server_pid()
         mcp.run(transport="stdio")
