@@ -530,6 +530,30 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         subprocess.run(["bash", wrapper, action])
         return
 
+    if cmd == "--dream":
+        from memem.dreamer import run_dream_cycle
+        apply = "--apply" in argv
+        result = run_dream_cycle(dry_run=not apply)
+        diff = result["diff"]
+        apply_result = result["apply_result"]
+        mode = "DRY-RUN" if result["dry_run"] else "APPLIED"
+        print(f"[memem dreamer] {mode}")
+        print(f"  Diff log:            {result['diff_path']}")
+        print(f"  Vault size:          {diff['vault_size']}")
+        print(f"  Demotion candidates: {len(diff['demotion_candidates'])}")
+        print(f"  Contradiction pairs: {len(diff['contradiction_pairs'])}")
+        print(f"  Cluster summaries:   {len(diff['cluster_summaries'])}")
+        if apply_result:
+            print(f"  Demoted:             {apply_result['demoted']}")
+            print(f"  Invalidated:         {apply_result['invalidated']}")
+            if apply_result.get("errors"):
+                print(f"  Errors ({len(apply_result['errors'])}):")
+                for err in apply_result["errors"]:
+                    print(f"    - {err}")
+        if result["dry_run"]:
+            print("  (Pass --apply to execute proposals)")
+        return
+
     if cmd is None:
         _register_server_pid()
         mcp.run(transport="stdio")
