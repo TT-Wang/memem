@@ -39,6 +39,11 @@ class MemoryItem(TypedDict, total=False):
     invalid_at: str | None    # when superseded; None = currently valid
     replaced_by: str | None   # memory_id of successor; None if still valid
 
+    # — Decay fields (v2 m3 schema) —
+    last_accessed_at: str     # bumped on every recall hit
+    access_count: int         # incremented on every recall hit
+    decay_immune: bool        # opt-out flag; defaults to False
+
     # — Per-slice extras (set by the recall pipeline) —
     score: float
     snippet: str              # truncated essence for compact display

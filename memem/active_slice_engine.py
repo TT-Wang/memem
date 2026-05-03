@@ -167,10 +167,22 @@ def generate_candidates(
             expand_links=False,
             rerank_model=rerank_model,
         )
-        memory_candidates = [
-            normalize_memory_candidate(mem, source_reason="recall", score=0.75 - (idx * 0.02))
-            for idx, mem in enumerate(memories[:_MAX_MEMORY_CANDIDATES])
-        ]
+        try:
+            from memem import decay as _decay
+        except Exception:
+            _decay = None  # type: ignore[assignment]
+        memory_candidates = []
+        for idx, mem in enumerate(memories[:_MAX_MEMORY_CANDIDATES]):
+            base_score = 0.75 - (idx * 0.02)
+            if _decay is not None:
+                try:
+                    strength = _decay.compute_strength(mem)
+                    base_score = base_score * strength
+                except Exception as _dexc:
+                    log.debug("decay.compute_strength failed for %s: %s", mem.get("id", "")[:8], _dexc)
+            memory_candidates.append(
+                normalize_memory_candidate(mem, source_reason="recall", score=base_score)
+            )
     except Exception as exc:
         log.debug("recall candidate generation failed: %s", exc)
 
@@ -546,8 +558,11 @@ def record_slice_attribution(slice_data: dict, response_text: str) -> None:
     auto-wiring — collection happens lazily as integrations adopt it.
     """
     from memem.attribution import (
-        aggregate_signals, citation_match, embedding_similarity,
-        judge_score, should_run_judge,
+        aggregate_signals,
+        citation_match,
+        embedding_similarity,
+        judge_score,
+        should_run_judge,
     )
     from memem.telemetry import log_slice_attribution
 

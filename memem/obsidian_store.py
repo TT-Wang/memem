@@ -423,6 +423,9 @@ def _make_memory(content: str, title: str, tags: list[str] | None = None,
         "valid_at": _now(),       # bi-temporal start — when this fact became true
         "invalid_at": None,       # bi-temporal end — None means currently valid
         "replaced_by": None,      # pointer to superseding memory (None if still valid)
+        "last_accessed_at": _now(),
+        "access_count": 0,
+        "decay_immune": False,
     }
 
     # Layer assignment: explicit param wins; otherwise auto-classify.
@@ -528,6 +531,9 @@ def _write_obsidian_memory(mem: dict):
     contradicts = mem.get("contradicts", [])
     if contradicts:
         meta["contradicts"] = [_safe_tag(str(c)) for c in contradicts if _safe_tag(str(c))]
+    meta["last_accessed_at"] = mem.get("last_accessed_at", mem.get("created_at", _now()))
+    meta["access_count"] = int(mem.get("access_count", 0) or 0)
+    meta["decay_immune"] = bool(mem.get("decay_immune", False))
 
     essence = _strip_generated_related_section(str(mem.get("essence", "") or ""))
 
@@ -581,6 +587,8 @@ def _parse_obsidian_memory_file(md_file: Path) -> dict | None:
         "source_session": "",
         "access_count": 0,
         "last_accessed": "",
+        "last_accessed_at": "",
+        "decay_immune": False,
         "updated_at": "",
         "importance": 3,
         "schema_version": 0,
@@ -640,6 +648,15 @@ def _parse_obsidian_memory_file(md_file: Path) -> dict | None:
     mem["schema_version"] = _int_field("schema_version", 0)
     mem["layer"] = _int_field("layer", DEFAULT_LAYER)
 
+    # Boolean fields
+    def _bool_field(key: str, default: bool) -> bool:
+        raw = fm_meta.get(key)
+        if raw is None:
+            return default
+        if isinstance(raw, bool):
+            return raw
+        return str(raw).lower() in ("true", "1", "yes")
+
     raw_contradicts = fm_meta.get("contradicts", [])
     if isinstance(raw_contradicts, list) and raw_contradicts:
         mem["contradicts"] = [str(c) for c in raw_contradicts]
@@ -651,6 +668,10 @@ def _parse_obsidian_memory_file(md_file: Path) -> dict | None:
     mem["invalid_at"] = _fm_val_to_str(raw_invalid_at) if raw_invalid_at is not None else None
     raw_replaced_by = fm_meta.get("replaced_by")
     mem["replaced_by"] = str(raw_replaced_by) if raw_replaced_by is not None else None
+
+    # Decay fields (v2 m3 schema)
+    mem["last_accessed_at"] = _fm_val_to_str(fm_meta.get("last_accessed_at", "")) or mem.get("created_at", "")
+    mem["decay_immune"] = _bool_field("decay_immune", False)
 
     clean_body = _strip_generated_related_section(body).strip()
     mem["essence"] = clean_body
@@ -728,6 +749,20 @@ def _load_obsidian_memories(picked_ids: list[str]) -> list[dict]:
             "body": mem.get("full_record", mem.get("essence", "")),
         })
     return results
+
+
+def bump_access(memory_id: str) -> None:
+    """Increment access_count and update last_accessed_at for a memory.
+
+    Atomic via the existing fcntl-locked write pattern. Called by recall
+    on every hit.
+    """
+    mem = _find_memory(memory_id)
+    if not mem:
+        return
+    mem["access_count"] = int(mem.get("access_count", 0) or 0) + 1
+    mem["last_accessed_at"] = _now()
+    _write_obsidian_memory(mem)
 
 
 # ---------------------------------------------------------------------------

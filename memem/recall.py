@@ -319,11 +319,16 @@ def _search_memories(
             else fts_results[:limit]
         )
         if record_access:
+            from memem.obsidian_store import bump_access
             session_id = _get_current_session_id()
             for mem in results:
                 mem_id = mem.get("id", "")
                 if mem_id:
                     _record_access(mem_id)
+                    try:
+                        bump_access(mem_id)
+                    except Exception as _exc:
+                        log.debug("bump_access failed for %s: %s", mem_id[:8], _exc)
                     if session_id:
                         from memem.telemetry import record_session_recall
 
@@ -397,11 +402,16 @@ def _search_memories(
 
     # Track access for returned memories (skip for internal/assembly calls)
     if record_access:
+        from memem.obsidian_store import bump_access
         session_id = _get_current_session_id()
         for mem in results:
             mem_id = mem.get("id", "")
             if mem_id:
                 _record_access(mem_id)
+                try:
+                    bump_access(mem_id)
+                except Exception as _exc:
+                    log.debug("bump_access failed for %s: %s", mem_id[:8], _exc)
                 if session_id:
                     from memem.telemetry import record_session_recall
 

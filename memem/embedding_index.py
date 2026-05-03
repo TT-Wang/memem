@@ -219,7 +219,7 @@ def _search_embedding_with_scores(query: str, limit: int = 20) -> list[tuple[str
         return []
 
 
-def _embed_text(text: str) -> "list[float] | None":
+def _embed_text(text: str) -> list[float] | None:
     """Encode a single text string into an embedding vector.
 
     Returns a list of floats (the embedding) or None if the optional

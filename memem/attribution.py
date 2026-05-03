@@ -11,10 +11,10 @@ References:
   - A-MemGuard (arXiv 2510.02373): consensus required, single-judge unsafe
 """
 from __future__ import annotations
+
 import os
 import random
 import re
-from typing import Optional
 
 # 8-char id mention pattern, e.g. "[abc12345]" or "abc12345..." in plain text.
 _ID_MENTION_RE = re.compile(r"\b[a-f0-9]{8}\b")
@@ -66,7 +66,7 @@ def citation_match(memory_id: str, memory_title: str, response_text: str) -> boo
     return False
 
 
-def should_run_judge(sample_rate: Optional[float] = None) -> bool:
+def should_run_judge(sample_rate: float | None = None) -> bool:
     """Stochastic gate for the expensive LLM-judge call.
 
     Default sample rate from env MEMEM_JUDGE_SAMPLE_RATE (default 0.05).
@@ -79,7 +79,7 @@ def should_run_judge(sample_rate: Optional[float] = None) -> bool:
     return random.random() < sample_rate
 
 
-def judge_score(memory_essence: str, response_text: str, query: str) -> Optional[float]:
+def judge_score(memory_essence: str, response_text: str, query: str) -> float | None:
     """LLM-judge whether the memory influenced the response. Returns None on
     failure or skip. Returns float in [0,1] on success.
 
@@ -89,7 +89,7 @@ def judge_score(memory_essence: str, response_text: str, query: str) -> Optional
     return None
 
 
-def aggregate_signals(emb_sim: float, citation: bool, judge: Optional[float]) -> float:
+def aggregate_signals(emb_sim: float, citation: bool, judge: float | None) -> float:
     """Combine the three signals into a single attribution score [0, 1].
 
     Weights chosen so that:

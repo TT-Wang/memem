@@ -1,14 +1,21 @@
 """Regression guard: _save_memory must not emit dead schema fields in vault frontmatter.
 
-The 11 fields below were removed from the schema. This test locks that in so
+The fields below were removed from the schema. This test locks that in so
 future refactors cannot accidentally re-introduce them.
+
+Note: access_count, last_accessed_at, and decay_immune are v2 m3 live schema
+fields. The old `last_accessed` (without _at) and `access_count` (pre-v2)
+were removed; `access_count` is now a live field (m3 re-introduces it with
+proper semantics tied to decay). Only the pre-v2 `last_accessed` (no _at
+suffix) remains dead.
 """
 
 from __future__ import annotations
 
 import importlib
 
-# The 11 dead fields that must never appear in any written frontmatter.
+# Dead fields that must never appear in any written frontmatter.
+# Note: access_count is now live (m3 decay schema). last_accessed (no _at) stays dead.
 DEAD_FIELDS = {
     "associations",
     "impact_score",
@@ -19,7 +26,6 @@ DEAD_FIELDS = {
     "last_validated_at",
     "tier",
     "full_record",
-    "access_count",
     "last_accessed",
 }
 

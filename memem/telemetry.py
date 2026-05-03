@@ -10,7 +10,6 @@ import json
 import logging
 import os
 from datetime import UTC, datetime, timedelta
-from typing import Optional
 
 from memem.models import EVENT_LOG, MEMEM_DIR, TELEMETRY_FILE, now_iso
 
@@ -213,7 +212,7 @@ def log_slice_attribution(
     memory_id: str,
     embedding_sim: float,
     citation_match: bool,
-    judge_score: Optional[float],
+    judge_score: float | None,
     aggregate: float,
 ) -> None:
     """Append a slice-attribution event to the events log.

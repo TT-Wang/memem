@@ -4,7 +4,6 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
-
 # ---------------------------------------------------------------------------
 # embedding_similarity
 # ---------------------------------------------------------------------------
@@ -156,10 +155,12 @@ def test_record_slice_attribution_iterates_all_memory_items(tmp_cortex_dir):
         ],
     }
 
-    with patch("memem.telemetry.log_slice_attribution") as mock_log:
+    with (
+        patch("memem.telemetry.log_slice_attribution") as mock_log,
         # Ensure judge never fires (sample_rate=0 via env already, but be explicit)
-        with patch("memem.attribution.should_run_judge", return_value=False):
-            record_slice_attribution(slice_data, "response about testing with pytest")
+        patch("memem.attribution.should_run_judge", return_value=False),
+    ):
+        record_slice_attribution(slice_data, "response about testing with pytest")
 
     assert mock_log.call_count == 3
     called_ids = {call.args[1] for call in mock_log.call_args_list}
