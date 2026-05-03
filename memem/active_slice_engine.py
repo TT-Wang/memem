@@ -538,6 +538,44 @@ def _bundle_from_candidates(candidates: list[Candidate], original: CandidateBund
     return bundle
 
 
+def record_slice_attribution(slice_data: dict, response_text: str) -> None:
+    """Compute the 3 signals for every memory in the slice and log to telemetry.
+
+    Called by host integration (hook scripts, MCP wrappers) after the assistant
+    has produced a response that referenced this slice. m2 ships this without
+    auto-wiring — collection happens lazily as integrations adopt it.
+    """
+    from memem.attribution import (
+        aggregate_signals, citation_match, embedding_similarity,
+        judge_score, should_run_judge,
+    )
+    from memem.telemetry import log_slice_attribution
+
+    slice_id = slice_data.get("slice_id", "")
+    items = slice_data.get("items", []) or []
+    # Also check pinned/role-categorized fields
+    for field in ("goals", "constraints", "active_background", "decisions",
+                  "preferences", "failure_patterns"):
+        items.extend(slice_data.get(field, []) or [])
+
+    seen_ids: set[str] = set()
+    for item in items:
+        mem_id = item.get("memory_id") or item.get("id") or ""
+        if not mem_id or mem_id in seen_ids:
+            continue
+        seen_ids.add(mem_id)
+
+        title = item.get("title", "")
+        essence = item.get("content", "") or item.get("summary", "") or ""
+
+        emb = embedding_similarity(essence, response_text)
+        cite = citation_match(mem_id, title, response_text)
+        judge = judge_score(essence, response_text, slice_data.get("query", "")) if should_run_judge() else None
+        agg = aggregate_signals(emb, cite, judge)
+
+        log_slice_attribution(slice_id, mem_id, emb, cite, judge, agg)
+
+
 def active_slice_response(
     query: str,
     scope_id: str = "default",

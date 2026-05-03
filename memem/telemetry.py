@@ -10,6 +10,7 @@ import json
 import logging
 import os
 from datetime import UTC, datetime, timedelta
+from typing import Optional
 
 from memem.models import EVENT_LOG, MEMEM_DIR, TELEMETRY_FILE, now_iso
 
@@ -205,3 +206,28 @@ def _log_event(op: str, memory_id: str = "", **details) -> None:
             f.write(json.dumps(entry) + "\n")
     except OSError:
         pass  # Non-fatal — don't crash operations for logging failures
+
+
+def log_slice_attribution(
+    slice_id: str,
+    memory_id: str,
+    embedding_sim: float,
+    citation_match: bool,
+    judge_score: Optional[float],
+    aggregate: float,
+) -> None:
+    """Append a slice-attribution event to the events log.
+
+    Recorded for every memory in every slice that gets injected, so m3 (decay)
+    can compute usage-weighted strength and m4 (dreamer) can identify
+    inject-but-not-cited candidates for demotion.
+    """
+    _log_event(
+        "slice_attribution",
+        memory_id,
+        slice_id=slice_id,
+        embedding_sim=round(embedding_sim, 4),
+        citation_match=citation_match,
+        judge_score=judge_score,
+        aggregate=round(aggregate, 4),
+    )

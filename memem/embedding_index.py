@@ -219,6 +219,30 @@ def _search_embedding_with_scores(query: str, limit: int = 20) -> list[tuple[str
         return []
 
 
+def _embed_text(text: str) -> "list[float] | None":
+    """Encode a single text string into an embedding vector.
+
+    Returns a list of floats (the embedding) or None if the optional
+    sentence-transformers dependency is not installed or encoding fails.
+    Used by the attribution module to compute cosine similarity between
+    memory content and assistant responses.
+    """
+    if not text:
+        return None
+    model = _get_model()
+    if model is None:
+        return None
+    try:
+        vecs = model.encode([text], normalize_embeddings=True, show_progress_bar=False)
+        _st, np = _try_import()
+        if np is None:
+            return None
+        return np.asarray(vecs[0], dtype="float32").tolist()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("_embed_text failed: %s", exc)
+        return None
+
+
 def _reset_index_cache() -> None:
     """Test hook: drop in-process index cache (and the on-disk files if present)."""
     global _index_matrix, _index_ids
