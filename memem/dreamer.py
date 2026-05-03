@@ -31,7 +31,7 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
-from memem.models import LAYER_L0, MEMEM_DIR
+from memem.models import DEFAULT_LAYER, LAYER_L0, MEMEM_DIR
 
 log = logging.getLogger("memem-dreamer")
 
@@ -50,7 +50,7 @@ def _is_protected(memory: dict) -> bool:
     """Hard safety check — never modify L0 or decay_immune memories."""
     layer = memory.get("layer")
     if layer is None:
-        layer = 2
+        layer = DEFAULT_LAYER
     if int(layer) == LAYER_L0:
         return True
     return bool(memory.get("decay_immune", False))
@@ -71,9 +71,10 @@ def _recent_attribution(memory_id: str, sample_size: int = 20) -> float | None:
                     event = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if event.get("event") != "slice_attribution":
+                # telemetry._log_event writes the event-name field as 'op'
+                if event.get("op") != "slice_attribution":
                     continue
-                data = event.get("data") or event
+                data = event
                 if data.get("memory_id") != memory_id:
                     continue
                 agg = data.get("aggregate")

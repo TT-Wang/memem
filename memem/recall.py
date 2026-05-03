@@ -515,6 +515,19 @@ def _memory_to_item(
         item["parent_id"] = parent_id
     if mem.get("importance") is not None:
         item["importance"] = int(mem.get("importance", 3) or 3)
+    # v2 schema fields — propagate so MemoryItem consumers see real values
+    if mem.get("valid_at"):
+        item["valid_at"] = mem["valid_at"]
+    if mem.get("invalid_at") is not None:
+        item["invalid_at"] = mem["invalid_at"]
+    if mem.get("replaced_by") is not None:
+        item["replaced_by"] = mem["replaced_by"]
+    if mem.get("last_accessed_at"):
+        item["last_accessed_at"] = mem["last_accessed_at"]
+    if mem.get("access_count") is not None:
+        item["access_count"] = int(mem.get("access_count", 0) or 0)
+    if mem.get("decay_immune") is not None:
+        item["decay_immune"] = bool(mem.get("decay_immune", False))
     return item
 
 

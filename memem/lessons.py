@@ -34,6 +34,16 @@ from memem.models import OBSIDIAN_VAULT
 
 log = logging.getLogger("memem-lessons")
 
+
+def _lessons_dir() -> Path:
+    """Lazy resolution so tests that monkeypatch MEMEM_OBSIDIAN_VAULT mid-process
+    get the patched path. A module-level constant captured at import time would
+    pin the original vault path."""
+    from memem import models  # noqa: PLC0415
+    return models.OBSIDIAN_VAULT / "memem" / "lessons"
+
+
+# Back-compat alias for callers that imported the constant directly.
 LESSONS_DIR = OBSIDIAN_VAULT / "memem" / "lessons"
 
 

@@ -177,7 +177,10 @@ def generate_candidates(
             if _decay is not None:
                 try:
                     strength = _decay.compute_strength(mem)
-                    base_score = base_score * strength
+                    # Clamp to [0, 1] so high-strength L2 hits cannot push the
+                    # 0.95 L0 anchor out of the LLM activation top-K window.
+                    # (compute_strength can return >1 for high-importance + high-access.)
+                    base_score = min(1.0, base_score * strength)
                 except Exception as _dexc:
                     log.debug("decay.compute_strength failed for %s: %s", mem.get("id", "")[:8], _dexc)
             memory_candidates.append(

@@ -1229,6 +1229,16 @@ def invalidate_memory(memory_id: str, replaced_by: str | None = None) -> bool:
         mem["replaced_by"] = replaced_by
     _write_obsidian_memory(mem)
     _cache_refresh_from_disk(mem.get("id", ""))
+    # Drop from FTS index so explicit memory_get still works (preserved on
+    # disk) but auto-recall doesn't return it. Audit-log the invalidation.
+    try:
+        _remove_from_index(memory_id)
+    except Exception as exc:
+        log.warning("invalidate: index removal failed for %s: %s", memory_id[:8], exc)
+    try:
+        _log_event("invalidate", memory_id, replaced_by=replaced_by)
+    except Exception as exc:
+        log.warning("invalidate: event log failed for %s: %s", memory_id[:8], exc)
     return True
 
 
