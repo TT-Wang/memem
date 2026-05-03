@@ -76,6 +76,7 @@ def _gather_l0_anchors(scope_id: str) -> list[Candidate]:
         m for m in all_mems
         if m.get("layer") == LAYER_L0
         and _normalize_scope_id(str(m.get("project", "general") or "general")) == normalized
+        and m.get("invalid_at") is None  # bi-temporal filter: skip invalidated anchors
     ]
     return [
         normalize_memory_candidate(m, source_reason="l0_anchor", score=0.95)

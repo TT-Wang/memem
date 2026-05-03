@@ -420,6 +420,9 @@ def _make_memory(content: str, title: str, tags: list[str] | None = None,
         "created_at": _now(),
         "updated_at": _now(),
         "schema_version": 1,
+        "valid_at": _now(),       # bi-temporal start — when this fact became true
+        "invalid_at": None,       # bi-temporal end — None means currently valid
+        "replaced_by": None,      # pointer to superseding memory (None if still valid)
     }
 
     # Layer assignment: explicit param wins; otherwise auto-classify.
@@ -517,6 +520,11 @@ def _write_obsidian_memory(mem: dict):
     meta["status"] = mem.get("status", "active")
     meta["valid_to"] = mem.get("valid_to", "") or ""
     meta["layer"] = int(mem.get("layer", DEFAULT_LAYER))
+    meta["valid_at"] = mem.get("valid_at") or mem.get("created_at", _now())
+    if mem.get("invalid_at") is not None:
+        meta["invalid_at"] = mem["invalid_at"]
+    if mem.get("replaced_by") is not None:
+        meta["replaced_by"] = mem["replaced_by"]
     contradicts = mem.get("contradicts", [])
     if contradicts:
         meta["contradicts"] = [_safe_tag(str(c)) for c in contradicts if _safe_tag(str(c))]
@@ -635,6 +643,14 @@ def _parse_obsidian_memory_file(md_file: Path) -> dict | None:
     raw_contradicts = fm_meta.get("contradicts", [])
     if isinstance(raw_contradicts, list) and raw_contradicts:
         mem["contradicts"] = [str(c) for c in raw_contradicts]
+
+    # Bi-temporal fields (v2 schema).  valid_at defaults to created_at for
+    # memories written before the schema change.
+    mem["valid_at"] = _fm_val_to_str(fm_meta.get("valid_at", "")) or mem.get("created_at", "")
+    raw_invalid_at = fm_meta.get("invalid_at")
+    mem["invalid_at"] = _fm_val_to_str(raw_invalid_at) if raw_invalid_at is not None else None
+    raw_replaced_by = fm_meta.get("replaced_by")
+    mem["replaced_by"] = str(raw_replaced_by) if raw_replaced_by is not None else None
 
     clean_body = _strip_generated_related_section(body).strip()
     mem["essence"] = clean_body
@@ -1161,6 +1177,24 @@ def _delete_memory(memory_id: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def invalidate_memory(memory_id: str, replaced_by: str | None = None) -> bool:
+    """Mark a memory as invalid (superseded). Sets invalid_at=now, replaced_by=<id>.
+
+    Use this instead of _deprecate_memory when there's a successor fact —
+    the bi-temporal model preserves the old memory as historically-true while
+    excluding it from future recall.
+    """
+    mem = _find_memory(memory_id)
+    if not mem:
+        return False
+    mem["invalid_at"] = _now()
+    if replaced_by:
+        mem["replaced_by"] = replaced_by
+    _write_obsidian_memory(mem)
+    _cache_refresh_from_disk(mem.get("id", ""))
+    return True
 
 
 def _deprecate_memory(memory_id: str, reason: str = "superseded") -> bool:

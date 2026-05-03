@@ -121,6 +121,9 @@ def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 1
         for mid in union_ids:
             mem = _find_memory(mid)
             if mem and mem.get("status", "active") != "deprecated":
+                # Bi-temporal filter: exclude memories that have been invalidated
+                if mem.get("invalid_at") is not None:
+                    continue
                 mems.append(mem)
         if not mems:
             return []
@@ -334,6 +337,9 @@ def _search_memories(
 
     scored = []
     for mem in _obsidian_memories(scope_id):
+        # Bi-temporal filter: exclude memories that have been invalidated
+        if mem.get("invalid_at") is not None:
+            continue
         title = mem.get("title", "")
         tags = mem.get("domain_tags", [])
         body = mem.get("full_record", "")

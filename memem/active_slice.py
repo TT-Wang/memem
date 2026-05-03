@@ -34,6 +34,11 @@ class MemoryItem(TypedDict, total=False):
     updated_at: str
     related: list[str]
 
+    # — Bi-temporal fields (v2 schema) —
+    valid_at: str             # when this fact became true (ISO timestamp)
+    invalid_at: str | None    # when superseded; None = currently valid
+    replaced_by: str | None   # memory_id of successor; None if still valid
+
     # — Per-slice extras (set by the recall pipeline) —
     score: float
     snippet: str              # truncated essence for compact display
