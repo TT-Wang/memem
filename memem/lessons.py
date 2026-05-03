@@ -69,12 +69,12 @@ def record_lesson(
 
     Multiple lessons can target the same memory_id (different query_classes).
     """
-    LESSONS_DIR.mkdir(parents=True, exist_ok=True)
+    _lessons_dir().mkdir(parents=True, exist_ok=True)
     lesson_id = str(uuid.uuid4())
     slug = _slugify(anti_pattern[:60])
     short_id = lesson_id[:8]
     fname = f"{slug}-{short_id}.md"
-    path = LESSONS_DIR / fname
+    path = _lessons_dir() / fname
 
     frontmatter_lines = [
         "---",
@@ -95,10 +95,10 @@ def record_lesson(
 
 def list_lessons() -> list[dict]:
     """Return all lessons as dicts. Returns empty list if dir doesn't exist."""
-    if not LESSONS_DIR.exists():
+    if not _lessons_dir().exists():
         return []
     lessons = []
-    for path in LESSONS_DIR.glob("*.md"):
+    for path in _lessons_dir().glob("*.md"):
         lesson = _parse_lesson(path)
         if lesson:
             lessons.append(lesson)
