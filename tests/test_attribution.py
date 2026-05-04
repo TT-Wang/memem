@@ -4,13 +4,15 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
+import pytest
+
 # ---------------------------------------------------------------------------
 # embedding_similarity
 # ---------------------------------------------------------------------------
 
 def test_embedding_similarity_returns_float_0_to_1(monkeypatch):
     """Basic call returns a value in [0, 1]."""
-    import numpy as np
+    np = pytest.importorskip("numpy")  # not in runtime deps; attribution.py degrades to 0.0 if missing
 
     fake_vec = np.ones(4, dtype="float32").tolist()
 
