@@ -13,13 +13,19 @@
 # Configurable via env:
 #   MEMEM_DIR                — state dir (default ~/.memem)
 #   MEMEM_JUDGE_SAMPLE_RATE  — LLM-judge sample rate, default 0.05 (m2)
-#   MEMEM_ATTRIBUTION_TIMEOUT — max seconds to spend on this, default 10
+#   MEMEM_ATTRIBUTION_TIMEOUT — max seconds to spend on this, default 30
+#
+# Why 30s default: each invocation cold-loads sentence-transformers (~5-10s)
+# before computing per-item embeddings (~0.3-1s each). With 10-20 items per
+# slice and the prior 10s budget, only the first item's embedding ever
+# completed — the rest were killed mid-loop, costing 16/17 of the closed-
+# loop signal. 30s covers cold-start + ~20 items comfortably.
 
 set -euo pipefail
 
 MEMEM_DIR="${MEMEM_DIR:-${CORTEX_DIR:-$HOME/.memem}}"
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
-ATTRIBUTION_TIMEOUT="${MEMEM_ATTRIBUTION_TIMEOUT:-10}"
+ATTRIBUTION_TIMEOUT="${MEMEM_ATTRIBUTION_TIMEOUT:-30}"
 
 if [ -z "$PLUGIN_ROOT" ] || [ "$PLUGIN_ROOT" = '${CLAUDE_PLUGIN_ROOT}' ]; then
     # Plugin root unset — degrade silently.
