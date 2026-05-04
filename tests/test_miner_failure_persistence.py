@@ -247,3 +247,43 @@ def test_session_marked_failed_at_cap_after_restart(tmp_cortex_dir):
     final_states = ss.load_mined_session_state()
     assert final_states["seedtest04"]["status"] == STATUS_FAILED
     assert final_states["seedtest04"]["attempts"] == MAX_SESSION_FAILURES
+
+
+def test_fatal_api_error_persists_status_failed_before_raise(tmp_cortex_dir, tmp_vault, monkeypatch):
+    """Regression: when _mine_session classifies an exception as fatal-api-error
+    (e.g. 'subprocess timed out after 300s'), it MUST persist STATUS_FAILED for
+    the offending session BEFORE raising FatalMinerError. Otherwise a wrapper
+    restart re-picks the session, hits the same hang, and crash-loops through
+    the 5-in-60s wrapper budget.
+
+    Reproduced in production: session 9612f54c-bbd timed out on 2026-04-30,
+    2026-05-01, and 2026-05-04 — the same session each time, because no
+    STATUS_FAILED was written between crashes.
+    """
+    import importlib
+    from unittest.mock import patch
+
+    from memem import miner_daemon, session_state
+    importlib.reload(session_state)
+    importlib.reload(miner_daemon)
+
+    jsonl = _write_session_jsonl(tmp_cortex_dir, name="hangsim01")
+
+    # Force _run_server_command to raise a RetryableMinerError whose text
+    # matches a fatal-api pattern ('timed out' is one such pattern).
+    fake_exc = miner_daemon.RetryableMinerError(
+        "subprocess timed out after 300s; killed process group"
+    )
+    with (
+        patch.object(miner_daemon, "_run_server_command", side_effect=fake_exc),
+        pytest.raises(miner_daemon.FatalMinerError),
+    ):
+        miner_daemon._mine_session(jsonl)
+
+    # The session must be marked STATUS_FAILED on disk.
+    states = session_state.load_mined_session_state()
+    assert "hangsim01" in states, "session state was not persisted before fatal raise"
+    assert states["hangsim01"]["status"] == STATUS_FAILED
+    # attempts should be at MAX so a future restart with re-seeding immediately
+    # treats it as DLQ-eligible.
+    assert states["hangsim01"]["attempts"] >= miner_daemon.MAX_SESSION_FAILURES

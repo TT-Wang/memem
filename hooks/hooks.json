@@ -33,6 +33,17 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/post-stop-attribution.sh\"",
+            "timeout": 12
+          }
+        ]
+      }
     ]
   }
 }

@@ -472,6 +472,21 @@ def _mine_session(jsonl_path: Path) -> tuple[int, bool]:
     except RetryableMinerError as exc:
         duration_ms = int((time.monotonic() - t0) * 1000)
         if _is_fatal_api_error(exc):
+            # Persist STATUS_FAILED for this session BEFORE the daemon exits.
+            # Without this, the next wrapper restart re-picks the same session,
+            # hits the same hang/auth error, and crashes again — burning the
+            # 5-in-60s wrapper crash budget for no progress. (Recurring crash
+            # on session 9612f54c-bbd across Apr 30 / May 1 / May 4 was the
+            # symptom that surfaced this gap.)
+            try:
+                update_session_state(
+                    jsonl_path,
+                    STATUS_FAILED,
+                    message=f"fatal API/auth/timeout: {str(exc)[:200]}",
+                    attempts=MAX_SESSION_FAILURES,
+                )
+            except OSError as persist_exc:
+                log.error("persist_fatal_state_failed", session_id=sid, error=str(persist_exc))
             raise FatalMinerError(f"Claude API/auth error, miner stopping: {exc}") from exc
         log.error("session_processed", session_id=sid, outcome="failure", duration_ms=duration_ms, error=str(exc))
         return 0, False
