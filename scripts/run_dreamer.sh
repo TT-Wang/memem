@@ -11,4 +11,4 @@
 
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PYTHONPATH="$REPO_ROOT" python3 -m memem.cli --dream "$@"
+PYTHONPATH="$REPO_ROOT" python3 -m memem.server --dream "$@"
