@@ -611,6 +611,11 @@ def build_active_memory_slice(
         "activation_mode": activation_result.get("activation_mode", "heuristic"),
         "confidence": confidence,
         "warnings": activation_result.get("warnings", []),
+        # Universal items[] surface so attribution / dreamer / recall consumers
+        # can iterate the memories that landed in this slice without re-walking
+        # the section-specific lists. Mirrors the search/get/timeline builders.
+        "items": selected_memory_items,
+        "slice_kind": "active",
     }
     return slice_obj
 

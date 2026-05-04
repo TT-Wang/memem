@@ -158,7 +158,13 @@ except Exception:
     emit_empty()
 
 session_id = hook.get("session_id", "") or ""
-message = hook.get("message", hook.get("query", "")) or ""
+message = (
+    hook.get("user_prompt")
+    or hook.get("prompt")
+    or hook.get("message")
+    or hook.get("query")
+    or ""
+)
 scope = detect_scope(hook)
 cwd = str(hook.get("cwd") or os.environ.get("PWD") or os.getcwd())
 task_mode = infer_task_mode(hook, message)

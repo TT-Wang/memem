@@ -232,7 +232,7 @@ def test_auto_recall_consumes_primed_flag(tmp_path):
         input=json.dumps({
             "session_id": "primed-test",
             "cwd": str(REPO),
-            "message": "help me fix the auth bug",
+            "user_prompt": "help me fix the auth bug",
         }),
         capture_output=True,
         text=True,
@@ -278,7 +278,7 @@ def test_auto_recall_topic_shift_uses_active_slice(tmp_path):
         input=json.dumps({
             "session_id": "topic-test",
             "cwd": str(REPO),
-            "message": "brief me the project forge workflow",
+            "user_prompt": "brief me the project forge workflow",
         }),
         capture_output=True,
         text=True,
@@ -317,7 +317,7 @@ def test_auto_recall_same_topic_still_uses_active_slice(tmp_path):
         input=json.dumps({
             "session_id": "topic-test",
             "cwd": str(REPO),
-            "message": "brief me the project forge workflow",
+            "user_prompt": "brief me the project forge workflow",
         }),
         capture_output=True,
         text=True,
@@ -330,3 +330,47 @@ def test_auto_recall_same_topic_still_uses_active_slice(tmp_path):
     ctx = data["hookSpecificOutput"]["additionalContext"]
     assert "# Active Memory Slice" in ctx
     assert "## Goals" in ctx
+
+
+@skip_on_ci
+def test_auto_recall_reads_official_user_prompt_field(tmp_path):
+    """Regression for the silent-recall bug: Claude Code's UserPromptSubmit
+    stdin uses 'user_prompt' as the field name (per the official plugin-dev
+    test fixture). Earlier the hook only read 'message'/'query' and silently
+    bailed on every real prompt, producing 0 hook_additional_context
+    attachments across 100 user prompts. This test pins the contract by
+    sending ONLY 'user_prompt' (no 'message' fallback) and asserting the hook
+    still produces a non-empty active slice.
+    """
+    memem_dir = tmp_path / ".memem"
+    memem_dir.mkdir()
+    vault = _seed_vault(tmp_path, 1, project=REPO.name, body="auth bug fix constraint")
+
+    env = os.environ.copy()
+    env["MEMEM_DIR"] = str(memem_dir)
+    env["MEMEM_OBSIDIAN_VAULT"] = str(vault)
+    env["CLAUDE_PLUGIN_ROOT"] = str(REPO)
+    env["PATH"] = "/usr/bin:/bin"
+
+    result = subprocess.run(
+        ["bash", str(REPO / "hooks" / "auto-recall.sh")],
+        input=json.dumps({
+            "session_id": "official-format-test",
+            "transcript_path": "/tmp/transcript.txt",
+            "cwd": str(REPO),
+            "permission_mode": "ask",
+            "hook_event_name": "UserPromptSubmit",
+            "user_prompt": "help me fix the auth bug",
+        }),
+        capture_output=True, text=True, timeout=30, env=env,
+    )
+
+    assert result.returncode == 0, f"hook failed: {result.stderr}"
+    data = json.loads(result.stdout)
+    ctx = data["hookSpecificOutput"]["additionalContext"]
+    assert ctx.strip(), (
+        "auto-recall returned empty additionalContext when given the official "
+        "Claude Code UserPromptSubmit stdin format ('user_prompt' field). "
+        "This is the silent-recall regression — hook is reading the wrong field."
+    )
+    assert "# Active Memory Slice" in ctx

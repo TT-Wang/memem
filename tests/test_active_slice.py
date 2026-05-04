@@ -256,3 +256,56 @@ def test_models_slice_and_delta_state_paths_live_under_memem_dir():
     assert OBSIDIAN_VAULT not in ACTIVE_SLICE_HISTORY_FILE.parents
     assert OBSIDIAN_VAULT not in DELTA_AUDIT_LOG.parents
     assert OBSIDIAN_VAULT not in DELTA_STATE_DIR.parents
+
+
+def test_active_slice_populates_universal_items_field():
+    """Regression: build_active_memory_slice must set slice_obj['items']
+    so attribution / dreamer / Stop hook consumers find the memories.
+
+    The active builder previously set goals/constraints/decisions lists but
+    NOT the universal items[] field. The Stop hook iterates slice['items']
+    to compute per-memory attribution; with items=[] the closed loop was
+    silently broken — every slice got logged with items=0 even when the
+    section lists were full. This test pins the fix.
+    """
+    from memem.active_slice import build_active_memory_slice, normalize_memory_candidate
+
+    memory = normalize_memory_candidate({
+        "id": "abcdef1234567890",
+        "title": "Use pytest fixtures for setup",
+        "essence": "Prefer fixtures over manual setup so teardown is automatic.",
+        "project": "memem",
+        "importance": 4,
+        "layer": 2,
+    }, score=0.85)
+
+    slice_obj = build_active_memory_slice(
+        "how should I structure tests",
+        "memem",
+        {"task_mode": "coding", "session_id": "items-regress"},
+        {
+            "current_goal_candidates": [],
+            "memory_candidates": [memory],
+            "playbook_candidate": None,
+            "transcript_candidates": [],
+            "artifact_candidates": [],
+            "environment_candidates": [],
+        },
+        {
+            "constraints": [{"memory_id": "abcdef12", "why": "test convention", "score": 0.9}],
+        },
+    )
+
+    assert "items" in slice_obj, "slice_obj must expose universal 'items' field"
+    items = slice_obj["items"]
+    assert isinstance(items, list)
+    assert len(items) >= 1, (
+        "items[] must include the memories selected into goals/constraints/decisions; "
+        "empty list silently breaks Stop-hook attribution"
+    )
+    # Every item must have a memory_id (that's the contract attribution depends on)
+    assert all(it.get("memory_id") for it in items), (
+        "every item must carry memory_id; the dreamer/attribution code keys on it"
+    )
+    # And the slice should advertise its kind so consumers can route correctly
+    assert slice_obj.get("slice_kind") == "active"
