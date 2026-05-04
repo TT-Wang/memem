@@ -10,6 +10,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
 
+## [1.2.1] - 2026-05-05
+
+### Fixed — three silent gaps in the closed loop
+
+A field investigation triggered by "are memories actually being recalled?"
+uncovered three independent silent failures that had been quietly breaking
+recall, attribution, and the cron-driven dreamer. Each was a tiny diff
+that nuked a different stage of the loop.
+
+- **Auto-recall hook read the wrong stdin field.** `hooks/auto-recall.sh`
+  pulled `message` / `query`, but Claude Code's UserPromptSubmit payload
+  uses `user_prompt` (per the official plugin-dev test fixture). The
+  hook bailed at line 171 (`if not message: emit_empty()`) on every
+  real prompt. Forensics on a multi-day session JSONL: 100 user prompts
+  → 1 hook injection (and that one was SessionStart, not auto-recall).
+  Topic-shifts log untouched for 8 days. Fix: read `user_prompt` first
+  with fallbacks for older Codex-style payloads. The existing test
+  passed because it mocked the bug-compatible field — also fixed.
+
+- **Active slice never set the universal `items[]` field.**
+  `memem/active_slice.py` built `slice_obj` with `goals`/`constraints`/
+  `decisions` lists but skipped the `items[]` surface that Stop-hook
+  attribution and the dreamer iterate. Result: every persisted slice
+  showed `items: []` even when the section lists were full → zero
+  attribution events even when recall succeeded → dreamer's relevance
+  signal permanently dark. Fix: assign `items=selected_memory_items`
+  and `slice_kind="active"` on the active builder.
+
+- **Stop hook attribution timeout killed 16/17 of the signal.** The
+  hook's 10s `MEMEM_ATTRIBUTION_TIMEOUT` (and matching 12s hooks.json
+  bracket) was eaten by sentence-transformers cold-load (~5-10s each
+  invocation). After model load, the hook computed embedding similarity
+  for the first item and the timeout fired before the second iteration.
+  Closed-loop signal was ~17× sparser than designed. Fix: bump
+  defaults to 30s/35s. End-to-end verified: 17 items now process in
+  10.3s with full attribution coverage.
+
+- **Dreamer wrapper invoked the wrong module.** `scripts/run_dreamer.sh`
+  called `python3 -m memem.cli`, but `cli.py` has no `__main__` block —
+  the module loaded and exited 0 silently. Cron would have looked
+  successful forever while doing nothing. Fix: switch to
+  `python3 -m memem.server` (the real entrypoint that calls
+  `dispatch_cli`). Regression test pins the contract: wrapper must
+  produce the `[memem dreamer]` banner on stdout.
+
+### Added
+
+- `tests/test_run_dreamer_wrapper.py` — wrapper regression test
+- `tests/test_v011.py::test_auto_recall_reads_official_user_prompt_field`
+  — sends ONLY `user_prompt` (no fallback) and asserts non-empty
+  additionalContext
+- `tests/test_active_slice.py::test_active_slice_populates_universal_items_field`
+  — asserts the active builder fills `items[]` with `memory_id`-bearing
+  entries
+
+### Why this matters
+
+These are exactly the failures memem itself was supposed to surface and
+self-heal. They didn't because every single one passed silently — empty
+hook output, empty `items[]`, mid-loop kill, and a no-op cron all return
+exit code 0. The fixes restore the closed loop end-to-end: every prompt
+now produces a recall slice with populated `items[]`, every Stop event
+writes attribution data per memory, and the nightly cron runs the real
+dreamer. The first useful dreamer pass arrives once 1-2 weeks of
+attribution data accumulate.
+
 ## [0.11.0] - 2026-04-14
 
 ### Changed — "session-start token diet"
