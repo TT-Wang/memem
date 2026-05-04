@@ -614,7 +614,10 @@ def build_active_memory_slice(
         # Universal items[] surface so attribution / dreamer / recall consumers
         # can iterate the memories that landed in this slice without re-walking
         # the section-specific lists. Mirrors the search/get/timeline builders.
-        "items": selected_memory_items,
+        # The active builder produces ActiveMemoryItem (memory_id-keyed) rather
+        # than MemoryItem (id-keyed); consumers handle both via item.get("memory_id")
+        # or item.get("id"). The cast pacifies mypy without runtime cost.
+        "items": cast(list[MemoryItem], selected_memory_items),
         "slice_kind": "active",
     }
     return slice_obj
