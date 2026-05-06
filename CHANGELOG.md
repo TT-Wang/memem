@@ -10,6 +10,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
 
+## [1.2.2] - 2026-05-06
+
+### Fixed — miner crash-loop on actively-growing JSONLs
+
+A long-running Claude Code session (this conversation's own JSONL, in fact)
+hit the miner-kill loop documented as a known design tension: each retry
+timed out at 300s on the steadily-growing file, `STATUS_FAILED` was
+persisted, but the next eligibility check saw the fingerprint had changed
+(file kept growing) and re-included the session. Result: 102 failed mining
+attempts before the wrapper's 5-in-60s budget locked it out, daemon dead
+for 22+ hours.
+
+Two fixes, both tiny:
+
+- **`HARD_RETRY_CAP` (default 5)** — once a session is in `STATUS_FAILED`
+  with `attempts >= HARD_RETRY_CAP`, `session_is_terminal` returns True
+  regardless of fingerprint changes. The original "transient failures
+  retry on content change" design is preserved below the cap.
+- **`SETTLE_SECONDS` default 300 → 1800** — the 5-minute settle window
+  was too short for actively-typed-into sessions; the miner picked them
+  up between user turns and the Haiku subprocess timed out on a
+  still-growing file. 30 minutes ensures the user has stopped typing
+  for a meaningful gap before mining is attempted.
+
+Both are env-overridable (`MEMEM_MINER_HARD_RETRY_CAP`,
+`MEMEM_MINER_SETTLE_SECONDS`) for users with different traffic patterns.
+
+### Added
+
+- `tests/test_miner_failure_persistence.py::test_failed_session_stays_terminal_past_hard_retry_cap`
+- `tests/test_miner_failure_persistence.py::test_failed_session_below_hard_cap_still_re_includes_on_change`
+- `tests/test_miner_failure_persistence.py::test_settle_seconds_default_is_30_minutes`
+
+### Operator note
+
+The recommended dreamer cron cadence is **weekly** (e.g. `0 3 * * 0`),
+not daily. The dreamer's value comes from accumulated attribution
+diversity across many sessions; daily runs on a stable vault are no-ops.
+Existing users are encouraged to bump their crontab from `0 3 * * *` to
+`0 3 * * 0`.
+
 ## [1.2.1] - 2026-05-05
 
 ### Fixed — three silent gaps in the closed loop

@@ -287,3 +287,88 @@ def test_fatal_api_error_persists_status_failed_before_raise(tmp_cortex_dir, tmp
     # attempts should be at MAX so a future restart with re-seeding immediately
     # treats it as DLQ-eligible.
     assert states["hangsim01"]["attempts"] >= miner_daemon.MAX_SESSION_FAILURES
+
+
+# ---------------------------------------------------------------------------
+# Hard retry cap (v1.2.2): a FAILED session past HARD_RETRY_CAP stays terminal
+# regardless of content-fingerprint changes
+# ---------------------------------------------------------------------------
+
+
+def test_failed_session_stays_terminal_past_hard_retry_cap(tmp_cortex_dir):
+    """A FAILED session with attempts >= HARD_RETRY_CAP must stay terminal even
+    when the JSONL content changes.
+
+    Reproduces the production bug: this conversation's JSONL grew during use,
+    each retry timed out at 300s, fingerprint changed each retry, miner kept
+    re-including the session — 102 attempts before the hard cap was added.
+    """
+    from memem import session_state
+    ss = _ss()
+    jsonl = _write_session_jsonl(tmp_cortex_dir, name="hardcap01")
+
+    # Mark as FAILED with attempts well past the hard cap
+    ss.update_session_state(
+        jsonl, STATUS_FAILED,
+        message="exceeded retry budget",
+        attempts=session_state.HARD_RETRY_CAP + 10,
+    )
+
+    states = ss.load_mined_session_state()
+    assert ss.session_is_terminal(jsonl, states["hardcap01"]) is True
+
+    # Now mutate the JSONL (simulate content change). Without the hard cap,
+    # this would flip the session to non-terminal because the fingerprint
+    # differs. With the cap, it must stay terminal.
+    jsonl.write_text(jsonl.read_text() + "\n" + "x" * 5000)
+    states = ss.load_mined_session_state()  # reload fingerprint comparison
+    assert ss.session_is_terminal(jsonl, states["hardcap01"]) is True, (
+        "FAILED session past HARD_RETRY_CAP must stay terminal across content changes; "
+        "without this, an actively-growing JSONL crashes the miner in a loop"
+    )
+
+
+def test_failed_session_below_hard_cap_still_re_includes_on_change(tmp_cortex_dir):
+    """Sessions below the hard cap must still re-enter the queue when content
+    changes — preserving the 'transient failure can recover' design.
+    """
+    from memem import session_state
+    ss = _ss()
+    jsonl = _write_session_jsonl(tmp_cortex_dir, name="softcap01")
+
+    # FAILED with attempts well below the hard cap
+    assert session_state.HARD_RETRY_CAP >= 2
+    ss.update_session_state(
+        jsonl, STATUS_FAILED,
+        message="transient",
+        attempts=1,
+    )
+
+    states = ss.load_mined_session_state()
+    assert ss.session_is_terminal(jsonl, states["softcap01"]) is True
+
+    # Mutate the JSONL — should re-enter the queue
+    jsonl.write_text(jsonl.read_text() + "\n" + "y" * 5000)
+    states = ss.load_mined_session_state()
+    assert ss.session_is_terminal(jsonl, states["softcap01"]) is False, (
+        "FAILED session below HARD_RETRY_CAP must re-enter queue on content change"
+    )
+
+
+def test_settle_seconds_default_is_30_minutes(tmp_cortex_dir, monkeypatch):
+    """SETTLE_SECONDS default bumped 300s → 1800s.
+
+    Previous default was 5 min, which was too short for actively-typed-into
+    Claude Code sessions: the miner picked them up between user turns and the
+    Haiku subprocess timed out on a still-growing file. 30 min ensures the
+    user has stopped typing for a meaningful gap before mining is attempted.
+    """
+    import importlib
+
+    monkeypatch.delenv("MEMEM_MINER_SETTLE_SECONDS", raising=False)
+    monkeypatch.delenv("CORTEX_MINER_SETTLE_SECONDS", raising=False)
+    from memem import session_state
+    importlib.reload(session_state)
+    assert session_state.SETTLE_SECONDS == 1800, (
+        f"settle window should default to 1800s (30 min); got {session_state.SETTLE_SECONDS}"
+    )

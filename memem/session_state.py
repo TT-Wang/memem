@@ -17,7 +17,15 @@ _extra = _env("MEMEM_EXTRA_SESSION_DIRS", "CORTEX_EXTRA_SESSION_DIRS")
 if _extra:
     SESSIONS_DIRS.extend(Path(path) for path in _extra.split(":") if path)
 
-SETTLE_SECONDS = int(_env("MEMEM_MINER_SETTLE_SECONDS", "CORTEX_MINER_SETTLE_SECONDS", default="300"))
+SETTLE_SECONDS = int(_env("MEMEM_MINER_SETTLE_SECONDS", "CORTEX_MINER_SETTLE_SECONDS", default="1800"))
+# Hard retry cap: once a session has been attempted this many times and is in
+# STATUS_FAILED, treat it as permanently terminal regardless of content changes.
+# Without this, an actively-growing JSONL (e.g. a long-lived Claude Code session)
+# kept tripping mtime-changed → re-included → timeout → STATUS_FAILED → mtime
+# changed again → re-included… 102 attempts on a single session before this gate
+# was added. Default 5 = MAX_SESSION_FAILURES (3) + headroom for transient fails
+# that recovered before the file went live again.
+HARD_RETRY_CAP = int(_env("MEMEM_MINER_HARD_RETRY_CAP", default="5"))
 DEFAULT_EXCLUDED_SESSION_PROJECTS = ("-home-claude-user-lexie",)
 
 
@@ -153,6 +161,16 @@ def session_is_terminal(path: Path, state: dict | None) -> bool:
         return False
     if str(state.get("version", "")) != MINER_STATE_VERSION:
         return False
+
+    # Hard retry cap: a FAILED session that has been attempted ≥ HARD_RETRY_CAP
+    # times stays terminal regardless of content changes. Protects against
+    # pathological sessions (e.g. an actively-growing JSONL where each retry
+    # times out, file grows, mtime changes, retry re-included, ad infinitum).
+    if (
+        state.get("status") == STATUS_FAILED
+        and int(state.get("attempts", 0) or 0) >= HARD_RETRY_CAP
+    ):
+        return True
 
     try:
         fingerprint = session_fingerprint(path)
