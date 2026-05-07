@@ -463,7 +463,6 @@ def dispatch_cli(argv: list[str], mcp) -> None:
             return
 
         if sub == "export":
-            from pathlib import Path
             from memem.eval_capture import load_captures
 
             since_seconds = None
@@ -502,7 +501,6 @@ def dispatch_cli(argv: list[str], mcp) -> None:
             return
 
         if sub == "replay":
-            from pathlib import Path
             from memem.eval_replay import format_replay_report, replay
 
             baseline: Path | None = None
