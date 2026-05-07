@@ -443,6 +443,89 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         run_eval()
         return
 
+    if cmd == "eval" and len(argv) >= 3:
+        # `memem eval export [--since 7d] [--out PATH]`
+        # `memem eval replay [--against PATH] [--k 5]`
+        # `memem eval status`
+        sub = argv[2]
+        if sub == "status":
+            from memem.eval_capture import EVAL_CAPTURE_FILE, is_enabled, load_captures
+            print(f"capture enabled: {is_enabled()} (set MEMEM_EVAL_CAPTURE=1 to enable)")
+            print(f"capture file:    {EVAL_CAPTURE_FILE}")
+            if EVAL_CAPTURE_FILE.exists():
+                rows = load_captures()
+                print(f"captured rows:   {len(rows)}")
+                if rows:
+                    print(f"oldest:          {rows[0].get('ts','?')}")
+                    print(f"newest:          {rows[-1].get('ts','?')}")
+            else:
+                print("captured rows:   0 (file does not exist)")
+            return
+
+        if sub == "export":
+            from pathlib import Path
+            from memem.eval_capture import load_captures
+
+            since_seconds = None
+            output_path: Path | None = None
+            i = 3
+            while i < len(argv):
+                arg = argv[i]
+                if arg == "--since" and i + 1 < len(argv):
+                    spec = argv[i + 1]
+                    # Accept "7d", "24h", "30m", or raw seconds
+                    if spec.endswith("d"):
+                        since_seconds = float(spec[:-1]) * 86400
+                    elif spec.endswith("h"):
+                        since_seconds = float(spec[:-1]) * 3600
+                    elif spec.endswith("m"):
+                        since_seconds = float(spec[:-1]) * 60
+                    else:
+                        since_seconds = float(spec)
+                    i += 2
+                elif arg == "--out" and i + 1 < len(argv):
+                    output_path = Path(argv[i + 1])
+                    i += 2
+                else:
+                    i += 1
+            rows = load_captures(since_seconds=since_seconds)
+            if output_path:
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(output_path, "w", encoding="utf-8") as fh:
+                    for row in rows:
+                        fh.write(json.dumps(row, sort_keys=True))
+                        fh.write("\n")
+                print(f"Wrote {len(rows)} captures to {output_path}", file=sys.stderr)
+            else:
+                for row in rows:
+                    print(json.dumps(row, sort_keys=True))
+            return
+
+        if sub == "replay":
+            from pathlib import Path
+            from memem.eval_replay import format_replay_report, replay
+
+            baseline: Path | None = None
+            k = 5
+            i = 3
+            while i < len(argv):
+                arg = argv[i]
+                if arg == "--against" and i + 1 < len(argv):
+                    baseline = Path(argv[i + 1])
+                    i += 2
+                elif arg == "--k" and i + 1 < len(argv):
+                    k = int(argv[i + 1])
+                    i += 2
+                else:
+                    i += 1
+            if not baseline or not baseline.exists():
+                raise SystemExit("Usage: memem eval replay --against <baseline.ndjson> [--k 5]")
+            result = replay(baseline, k=k)
+            print(format_replay_report(result))
+            return
+
+        raise SystemExit(f"Unknown eval subcommand: {sub} (try: status, export, replay)")
+
     if cmd == "--doctor":
         from memem.capabilities import detect_capabilities, pretty_report, write_capabilities
         caps = detect_capabilities()

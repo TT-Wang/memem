@@ -538,8 +538,16 @@ def memory_search(query: str, limit: int = 10, scope_id: str = "default") -> str
     then a one-hop graph-traversed section of related memories. Use this
     FIRST to narrow candidates, then drill into specific IDs via memory_get.
     """
+    import time
+    from memem.eval_capture import capture as _eval_capture
+    _t0 = time.monotonic()
     memories = _search_memories(
         query, scope_id=scope_id, limit=limit, record_access=False, expand_links=False
+    )
+    _eval_capture(
+        query=query, mode="search", scope_id=scope_id, limit=limit,
+        memory_ids=[str(m.get("id") or "") for m in memories if m.get("id")],
+        latency_ms=(time.monotonic() - _t0) * 1000.0,
     )
     if not memories:
         return f"No memories found for: {query}"
@@ -705,7 +713,15 @@ def _format_memory_as_bullet(mem: dict) -> str:
 
 
 def memory_recall(query: str, scope_id: str = "default", limit: int = 10, rerank_model: str | None = None) -> str:
+    import time
+    from memem.eval_capture import capture as _eval_capture
+    _t0 = time.monotonic()
     memories = _search_memories(query, scope_id=scope_id, limit=limit, rerank_model=rerank_model)
+    _eval_capture(
+        query=query, mode="recall", scope_id=scope_id, limit=limit,
+        memory_ids=[str(m.get("id") or "") for m in memories if m.get("id")],
+        latency_ms=(time.monotonic() - _t0) * 1000.0,
+    )
     transcript_results = transcript_search(query, limit=3)
 
     if not memories and ("No matching" in transcript_results or not transcript_results):

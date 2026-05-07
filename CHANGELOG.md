@@ -10,6 +10,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
 
+## [1.3.0] - 2026-05-07
+
+### Added — eval-replay regression-test loop
+
+Inspired by gbrain's `eval capture/export/replay` pattern. Closed-loop
+regression test for retrieval quality, with no ground-truth labels needed:
+
+- **Capture (opt-in via `MEMEM_EVAL_CAPTURE=1`)** — every `memory_search`
+  and `memory_recall` call writes one NDJSON row to
+  `~/.memem/eval_captures.jsonl`: query (PII-scrubbed), retrieved
+  memory_ids, retrieval mode, scope, top-K, latency_ms, schema_version.
+  Off by default — no surprise data accumulation.
+- **PII scrub** — emails, JWTs, Anthropic/OpenAI keys, GitHub PATs, AWS
+  keys, Slack tokens, bearer tokens, phones, SSNs, Luhn-verified credit
+  cards. Order-aware: structured tokens first, then CC, then phone (so
+  16-digit cards don't get partially eaten by the phone regex).
+- **Export** — `memem eval export [--since 7d] [--out PATH]` snapshots
+  captures to NDJSON. `--since` accepts `7d` / `24h` / `30m` / raw seconds.
+- **Replay** — `memem eval replay --against baseline.ndjson [--k 5]`
+  re-runs every captured query against current code and reports:
+  - `mean jaccard@k` between captured and current retrieved IDs
+  - `top-1 stability` (fraction of queries where #1 result matches)
+  - `mean latency Δ` (current - baseline, ms)
+  - worst-N regressions (lowest jaccard) for inspection
+- **Status** — `memem eval status` shows whether capture is enabled,
+  current capture file, row count, oldest/newest timestamps.
+
+The loop: capture for ≥7 days during normal use → export baseline → make
+ranking change → replay → ship if Jaccard@5 holds and latency doesn't
+regress. Replaces "I think this is faster?" with three numbers.
+
+### New files
+
+- `memem/eval_capture.py` — capture + PII scrub + opt-in gate
+- `memem/eval_replay.py` — Jaccard / top-1 / latency-Δ math + replay runner
+- `tests/test_eval_replay.py` — 23 tests covering scrub patterns, opt-in
+  gate, Jaccard math, top-1 stability, error handling, end-to-end capture
+
+### Wire format
+
+NDJSON, `schema_version: 1`. Additive evolution within v1; breaking
+changes bump to v2. Each row:
+```json
+{
+  "schema_version": 1,
+  "ts": "2026-05-07T15:53:34.061992Z",
+  "mode": "search",
+  "scope_id": "cortex-plugin",
+  "query": "explain auto-recall hook",
+  "memory_ids": ["abc12345-...", "deadbeef-..."],
+  "limit": 10,
+  "latency_ms": 42.5
+}
+```
+
+### Why this matters
+
+The three silent bugs found in v1.2.1's investigation (auto-recall stdin
+field, slice items[] empty, Stop-hook timeout) all affected retrieval
+behavior in ways unit tests couldn't catch — they were "still passes its
+own tests, just doesn't recall anything useful" failures. With eval
+replay, a baseline-vs-current diff would have flagged Jaccard@5 dropping
+from 0.85 to 0.0 the moment any of those bugs landed. This is the gating
+mechanism every retrieval-quality change should pass through.
+
 ## [1.2.2] - 2026-05-06
 
 ### Fixed — miner crash-loop on actively-growing JSONLs
