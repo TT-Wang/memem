@@ -37,8 +37,8 @@ log = logging.getLogger("memem-dreamer")
 
 DREAMS_DIR = MEMEM_DIR / "dreams"
 LOW_ATTRIBUTION_THRESHOLD = 0.2
-CLUSTER_SIMILARITY_THRESHOLD = 0.85
-CLUSTER_MIN_SIZE = 3
+CLUSTER_SIMILARITY_THRESHOLD = 0.7
+CLUSTER_MIN_SIZE = 5
 SONNET_MODEL = "claude-sonnet-4-7"  # strong offline model
 
 
@@ -144,14 +144,190 @@ def find_contradiction_pairs(memories: list[dict]) -> list[dict]:
 
 
 def find_cluster_summaries(memories: list[dict]) -> list[dict]:
-    """Per-project dense clusters that could be summarized.
+    """Detect clusters of similar memories. Returns proposal dicts (dry-run).
 
-    Skips clusters smaller than CLUSTER_MIN_SIZE. Deferred-implementation:
-    returns empty list — the embedding-similarity clustering needs a
-    separate dependency-light implementation. Stub structure preserved
-    so the diff schema is stable.
+    Each proposal:
+        {
+            "project": str,
+            "cluster_ids": list[str],
+            "pattern_title": str,
+            "pattern_content": str,
+            "similarity_mean": float,
+        }
+
+    Steps:
+    1. Group by project, skip L0 + decay_immune (anchored).
+    2. For each project group >= CLUSTER_MIN_SIZE: embed content, build cosine
+       similarity matrix, greedy cluster.
+    3. For each qualifying cluster: compute similarity_mean, call Sonnet to
+       synthesize a pattern. Skip clusters on Sonnet failure.
+
+    Idempotent and side-effect free — does NOT write to vault.
+    Returns [] if embedding is unavailable.
     """
-    return []
+    try:
+        from memem.embedding_index import _embed_text
+    except ImportError:
+        log.info("embedding unavailable; skipping cluster summarization")
+        return []
+
+    try:
+        import numpy as np
+    except ImportError:
+        log.info("numpy unavailable; skipping cluster summarization")
+        return []
+
+    # Group non-protected memories by project
+    by_project: dict[str, list[dict]] = {}
+    for mem in memories:
+        if _is_protected(mem):
+            continue
+        project = mem.get("project") or "general"
+        by_project.setdefault(project, []).append(mem)
+
+    proposals: list[dict] = []
+
+    for project, group in by_project.items():
+        if len(group) < CLUSTER_MIN_SIZE:
+            continue
+
+        # Embed each memory's content
+        embeddings: list[list[float]] = []
+        valid_group: list[dict] = []
+        for mem in group:
+            content = mem.get("essence") or mem.get("content") or mem.get("title") or ""
+            vec = _embed_text(content)
+            if vec is None:
+                continue
+            embeddings.append(vec)
+            valid_group.append(mem)
+
+        if len(valid_group) < CLUSTER_MIN_SIZE:
+            continue
+
+        # Build L2-normalized float32 matrix
+        mat = np.array(embeddings, dtype=np.float32)
+        # Rows should already be L2-normalized from _embed_text (normalize_embeddings=True)
+        # but normalize again for safety
+        norms = np.linalg.norm(mat, axis=1, keepdims=True).astype(np.float32)
+        norms = np.where(norms == 0, np.float32(1.0), norms)
+        mat = (mat / norms).astype(np.float32)
+
+        # Pairwise cosine similarity
+        sim_matrix = mat @ mat.T  # shape (N, N)
+        n = len(valid_group)
+
+        # Greedy clustering
+        tried = [False] * n
+        for i in range(n):
+            if tried[i]:
+                continue
+            tried[i] = True  # mark as tried regardless of outcome
+            # Find all other un-tried memories with high similarity to i
+            similar_indices = [i]
+            for j in range(n):
+                if j == i or tried[j]:
+                    continue
+                if float(sim_matrix[i, j]) >= CLUSTER_SIMILARITY_THRESHOLD:
+                    similar_indices.append(j)
+
+            if len(similar_indices) < CLUSTER_MIN_SIZE:
+                continue
+
+            # Form cluster — mark all members as tried
+            for j in similar_indices:
+                tried[j] = True
+
+            cluster_mems = [valid_group[k] for k in similar_indices]
+            cluster_ids = [m.get("id", "") for m in cluster_mems]
+
+            # Compute mean pairwise similarity (excluding diagonal)
+            idx = np.array(similar_indices)
+            sub_sim = sim_matrix[np.ix_(idx, idx)]
+            mask = 1 - np.eye(len(idx))
+            if mask.sum() > 0:
+                similarity_mean = float((sub_sim * mask).sum() / mask.sum())
+            else:
+                similarity_mean = 1.0
+
+            # Generate synthesis via Sonnet
+            n_cluster = len(cluster_mems)
+            mem_lines = []
+            for k, m in enumerate(cluster_mems, 1):
+                title = m.get("title", "")[:80]
+                content = (m.get("essence") or m.get("content") or "")[:200]
+                mem_lines.append(f"[{k}] {title} — {content}")
+            mem_block = "\n".join(mem_lines)
+
+            prompt = (
+                f"The following {n_cluster} memories share high pairwise semantic similarity"
+                f" ({similarity_mean:.2f}).\n"
+                f"Write ONE concise pattern that captures the recurring theme."
+                f" Output in this exact format:\n"
+                f"TITLE: <one-line title, <80 chars>\n"
+                f"---\n"
+                f"<pattern body, 2-4 sentences>\n\n"
+                f"Memories:\n{mem_block}\n"
+            )
+
+            try:
+                result = subprocess.run(
+                    ["claude", "-p", "--model", SONNET_MODEL],
+                    input=prompt,
+                    capture_output=True, text=True, timeout=60,
+                    start_new_session=True,  # signal isolation; matches contradiction subprocess
+                )
+                if result.returncode != 0:
+                    log.warning(
+                        "Sonnet cluster synthesis failed (rc=%d) for project %s",
+                        result.returncode, project,
+                    )
+                    continue
+
+                out = result.stdout.strip()
+                # Parse TITLE: ... \n--- \n <body>
+                title_line = ""
+                body_text = ""
+                if "TITLE:" in out:
+                    after_title = out[out.index("TITLE:") + len("TITLE:"):].strip()
+                    if "---" in after_title:
+                        parts = after_title.split("---", 1)
+                        title_line = parts[0].strip()
+                        body_text = parts[1].strip()
+                    else:
+                        lines = after_title.splitlines()
+                        title_line = lines[0].strip()
+                        body_text = "\n".join(lines[1:]).strip()
+                else:
+                    log.warning(
+                        "Sonnet response for project %s missing TITLE: marker; skipping cluster",
+                        project,
+                    )
+                    continue
+
+                if not title_line or not body_text:
+                    log.warning(
+                        "Sonnet response for project %s missing title or body; skipping cluster",
+                        project,
+                    )
+                    continue
+
+                proposals.append({
+                    "project": project,
+                    "cluster_ids": cluster_ids,
+                    "pattern_title": title_line[:80],
+                    "pattern_content": body_text,
+                    "similarity_mean": similarity_mean,
+                })
+
+            except subprocess.TimeoutExpired:
+                log.warning("Sonnet synthesis timed out for cluster in project %s; skipping", project)
+                continue
+            except Exception as exc:
+                log.warning("Sonnet synthesis error for project %s: %s; skipping", project, exc)
+                continue
+
+    return proposals
 
 
 def build_diff(memories: list[dict]) -> dict:
@@ -219,20 +395,20 @@ def _judge_contradiction_with_sonnet(pair: dict) -> dict | None:
 
 
 def apply_diff(diff: dict, dry_run: bool = True) -> dict:
-    """Apply demotion + contradiction-resolution proposals from a diff.
+    """Apply demotion + contradiction-resolution + cluster summary proposals.
 
     dry_run=True (default): no mutations; returns counts only.
     dry_run=False: writes layer changes via _write_obsidian_memory; calls
-    invalidate_memory for contradiction losers.
+    invalidate_memory for contradiction losers; creates cluster-summary
+    pattern memories and marks constituents with clustered_into.
 
-    Cluster summaries are NOT applied (deferred to manual review).
-
-    Returns: {'demoted': N, 'invalidated': M, 'errors': [...]}.
+    Returns: {'demoted': N, 'invalidated': M, 'clustered': K, 'errors': [...]}.
     """
     from memem.obsidian_store import _find_memory, _write_obsidian_memory, invalidate_memory
 
     demoted = 0
     invalidated = 0
+    clustered = 0
     errors: list[str] = []
 
     for c in diff.get("demotion_candidates", []):
@@ -272,7 +448,40 @@ def apply_diff(diff: dict, dry_run: bool = True) -> dict:
         except Exception as exc:
             errors.append(f"invalidate {decision['loser']}: {exc}")
 
-    return {"demoted": demoted, "invalidated": invalidated, "errors": errors}
+    for proposal in diff.get("cluster_summaries", []):
+        if dry_run:
+            continue
+        # Create new pattern memory with layer=2
+        try:
+            from memem.obsidian_store import _make_memory
+            pattern_mem = _make_memory(
+                content=proposal["pattern_content"],
+                title=proposal["pattern_title"],
+                tags=["cluster-summary", "dreamer-synthesis"],
+                project=proposal.get("project", "general"),
+                layer=2,
+            )
+            _write_obsidian_memory(pattern_mem)
+            new_memory_id = pattern_mem["id"]
+        except Exception as exc:
+            errors.append(f"cluster pattern write failed for project {proposal.get('project')}: {exc}")
+            continue
+
+        # Mark each constituent with clustered_into
+        for constituent_id in proposal.get("cluster_ids", []):
+            try:
+                constituent = _find_memory(constituent_id)
+                if not constituent:
+                    errors.append(f"cluster constituent not found: {constituent_id}")
+                    continue
+                constituent["clustered_into"] = new_memory_id
+                _write_obsidian_memory(constituent)
+            except Exception as exc:
+                errors.append(f"cluster constituent update {constituent_id}: {exc}")
+
+        clustered += 1
+
+    return {"demoted": demoted, "invalidated": invalidated, "clustered": clustered, "errors": errors}
 
 
 def write_diff_log(diff: dict) -> Path:

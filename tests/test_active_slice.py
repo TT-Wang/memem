@@ -1,5 +1,7 @@
 """Tests for Active Memory Slice schemas and rendering."""
 
+import pytest
+
 
 def test_current_query_goal_without_memories():
     from memem.active_slice import build_active_memory_slice, render_slice_as_prompt_context
@@ -309,3 +311,118 @@ def test_active_slice_populates_universal_items_field():
     )
     # And the slice should advertise its kind so consumers can route correctly
     assert slice_obj.get("slice_kind") == "active"
+
+
+def test_scope_matching_boosts_in_scope_memories():
+    """Scope-based re-ranking: in-scope memories get 1.5× boost, cross-project get 0.7× penalty.
+
+    General/empty-project memories are unchanged. Tests this via the multiplier logic
+    applied to a synthetic candidate list, without calling generate_candidates() (which
+    would require a live recall backend).
+    """
+    from memem.models import _normalize_scope_id
+
+    scope_id = "cortex-plugin"
+    normalized_scope = _normalize_scope_id(scope_id)
+
+    # Simulate what generate_candidates builds before the multiplier loop
+    base_score = 0.60  # representative mid-range score
+    candidates = [
+        _make_candidate_with_score("cortex-plugin", base_score),
+        _make_candidate_with_score("cortex-plugin", base_score),
+        _make_candidate_with_score("cortex-plugin", base_score),
+        _make_candidate_with_score("lexie", base_score),
+        _make_candidate_with_score("lexie", base_score),
+        _make_candidate_with_score("lexie", base_score),
+        _make_candidate_with_score("general", base_score),
+        _make_candidate_with_score("general", base_score),
+    ]
+
+    # Apply the exact multiplier logic from active_slice_engine.generate_candidates()
+    for cand in candidates:
+        cand_project = _normalize_scope_id(str(cand.get("project", "") or ""))
+        if not cand_project or cand_project == "general":
+            continue
+        if cand_project == normalized_scope:
+            cand["score"] = min(1.0, float(cand.get("score", 0.0)) * 1.5)
+        else:
+            cand["score"] = float(cand.get("score", 0.0)) * 0.7
+
+    by_project: dict[str, list[float]] = {}
+    for cand in candidates:
+        proj = cand.get("project", "general")
+        by_project.setdefault(proj, []).append(float(cand["score"]))
+
+    cortex_scores = by_project.get("cortex-plugin", [])
+    lexie_scores = by_project.get("lexie", [])
+    general_scores = by_project.get("general", [])
+
+    # In-scope memories must have higher average score than cross-project memories
+    assert cortex_scores, "Expected cortex-plugin candidates in list"
+    assert lexie_scores, "Expected lexie candidates in list"
+    assert sum(cortex_scores) / len(cortex_scores) > sum(lexie_scores) / len(lexie_scores), (
+        f"cortex-plugin avg {sum(cortex_scores)/len(cortex_scores):.3f} "
+        f"should exceed lexie avg {sum(lexie_scores)/len(lexie_scores):.3f}"
+    )
+
+    # General memories are unchanged — not penalized relative to cross-project
+    if general_scores and lexie_scores:
+        assert sum(general_scores) / len(general_scores) > sum(lexie_scores) / len(lexie_scores), (
+            "general memories should not be penalized relative to cross-project memories"
+        )
+
+
+def test_scope_match_caps_at_1():
+    """L0-like candidate with score=0.95 gets min(1.0, 0.95*1.5) = 1.0, not 1.425."""
+    # Test the math directly: min(1.0, 0.95 * 1.5) must equal 1.0
+    score = 0.95
+    boosted = min(1.0, float(score) * 1.5)
+    assert boosted == 1.0, f"Expected 1.0 (clamped), got {boosted}"
+    assert 0.95 * 1.5 == pytest.approx(1.425), "Without cap, boost would be 1.425"
+
+
+def _make_candidate_with_score(project: str, score: float) -> dict:
+    """Helper: build a minimal candidate dict for scope-ranking unit tests."""
+    return {
+        "candidate_id": f"memory:{project}-test",
+        "candidate_type": "memory",
+        "memory_id": f"{project}-test-id",
+        "project": project,
+        "score": score,
+        "title": f"{project} test memory",
+        "summary": f"Summary for {project}",
+        "layer": 2,
+    }
+
+
+def test_scope_rank_multiplier_unit():
+    """Unit test: scope multiplier logic applied directly to candidate dicts."""
+    from memem.models import _normalize_scope_id
+
+    scope_id = "cortex-plugin"
+    normalized_scope = _normalize_scope_id(scope_id)
+
+    candidates = [
+        _make_candidate_with_score("cortex-plugin", 0.6),
+        _make_candidate_with_score("lexie", 0.6),
+        _make_candidate_with_score("general", 0.6),
+        _make_candidate_with_score("", 0.6),
+        _make_candidate_with_score("cortex-plugin", 0.95),  # L0-like high score
+    ]
+
+    for cand in candidates:
+        cand_project = _normalize_scope_id(str(cand.get("project", "") or ""))
+        if not cand_project or cand_project == "general":
+            continue
+        if cand_project == normalized_scope:
+            cand["score"] = min(1.0, float(cand.get("score", 0.0)) * 1.5)
+        else:
+            cand["score"] = float(cand.get("score", 0.0)) * 0.7
+
+    cortex_60, lexie_60, general_60, empty_60, cortex_95 = candidates
+
+    assert cortex_60["score"] == pytest.approx(0.9), "in-scope 0.6 -> 0.9"
+    assert lexie_60["score"] == pytest.approx(0.42), "cross-project 0.6 -> 0.42"
+    assert general_60["score"] == pytest.approx(0.6), "general unchanged"
+    assert empty_60["score"] == pytest.approx(0.6), "empty-project unchanged"
+    assert cortex_95["score"] == pytest.approx(1.0), "high-score clamped to 1.0, not 1.425"

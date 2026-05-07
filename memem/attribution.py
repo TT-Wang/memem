@@ -43,13 +43,21 @@ def embedding_similarity(memory_essence: str, response_text: str) -> float:
         return 0.0
 
 
-def citation_match(memory_id: str, memory_title: str, response_text: str) -> bool:
+def citation_match(
+    memory_id: str,
+    memory_title: str,
+    response_text: str,
+    memory_essence: str = "",
+    semantic_threshold: float = 0.6,
+) -> bool:
     """True if the response appears to cite or quote this memory.
 
-    Heuristics:
+    Heuristics (any one is sufficient):
       - The 8-char id prefix appears as a token in the response
       - The first 5 words of the title appear consecutively in the response
-      (lowercased, punctuation-tolerant)
+        (lowercased, punctuation-tolerant)
+      - Embedding similarity between memory_essence and response_text exceeds
+        semantic_threshold (only when memory_essence is non-empty)
     """
     if not response_text:
         return False
@@ -63,6 +71,9 @@ def citation_match(memory_id: str, memory_title: str, response_text: str) -> boo
             phrase = " ".join(words)
             if phrase in re.sub(r"\s+", " ", response_text.lower()):
                 return True
+    if memory_essence:
+        if embedding_similarity(memory_essence, response_text) > semantic_threshold:
+            return True
     return False
 
 

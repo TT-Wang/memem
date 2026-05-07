@@ -130,6 +130,51 @@ try:
 except Exception:
     # never break — this is best-effort
     pass
+
+# 4. Update working memory with current_task + last_3_actions from transcript.
+# Walk the transcript lines again to collect user messages.
+try:
+    user_messages = []
+    lines = Path(transcript_path).read_text(encoding="utf-8", errors="ignore").splitlines()
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get("type") != "user":
+            continue
+        msg = event.get("message", {})
+        content = msg.get("content", [])
+        chunks = []
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    chunks.append(block.get("text", ""))
+        elif isinstance(content, str):
+            chunks.append(content)
+        text_val = "\n".join(chunks).strip()
+        if text_val:
+            user_messages.append(text_val)
+
+    if user_messages:
+        from memem.working_memory import update_section
+
+        # current_task: last user message, truncated to 200 chars
+        last_user = user_messages[-1]
+        current_task = last_user[:200] if len(last_user) > 200 else last_user
+        update_section("current_task", current_task)
+
+        # last_3_actions: 3 most recent user message snippets as bullet list
+        recent = user_messages[-3:]
+        bullets = "\n".join(
+            f"- {m[:100].replace(chr(10), ' ')}" for m in recent
+        )
+        update_section("last_3_actions", bullets)
+except Exception:
+    # never break — this is best-effort
+    pass
 HOOKPY
 
 exit 0

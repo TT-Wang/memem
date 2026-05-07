@@ -82,6 +82,7 @@ def _parse_state_line(line: str) -> dict | None:
         "updated_at": str(state.get("updated_at", "")),
         "message": str(state.get("message", "")),
         "attempts": int(state.get("attempts", 0)),
+        "offset_bytes": int(state.get("offset_bytes", 0)),
     }
 
 
@@ -118,11 +119,11 @@ def save_mined_session_state(states: dict[str, dict]) -> None:
     session_state_db.save_mined_session_state(states, db_path=_db_path())
 
 
-def update_session_state(path: Path, status: str, message: str = "", attempts: int = 0) -> dict:
+def update_session_state(path: Path, status: str, message: str = "", attempts: int = 0, offset_bytes: int = 0) -> dict:
     from memem import session_state_db  # noqa: PLC0415
 
     return session_state_db.update_session_state(
-        path, status, message=message, attempts=attempts, db_path=_db_path()
+        path, status, message=message, attempts=attempts, offset_bytes=offset_bytes, db_path=_db_path()
     )
 
 
@@ -163,13 +164,33 @@ def session_is_terminal(path: Path, state: dict | None) -> bool:
         return False
 
     # Hard retry cap: a FAILED session that has been attempted ≥ HARD_RETRY_CAP
-    # times stays terminal regardless of content changes. Protects against
-    # pathological sessions (e.g. an actively-growing JSONL where each retry
-    # times out, file grows, mtime changes, retry re-included, ad infinitum).
+    # times stays terminal UNLESS new content has appeared past the stored
+    # offset_bytes. In that case, allow re-entry for incremental mining of the
+    # new delta only. This preserves the original protection (never re-mines
+    # the same content that already failed) while unlocking the productive case
+    # where a long-lived session gets new content appended after the cap fires.
     if (
         state.get("status") == STATUS_FAILED
         and int(state.get("attempts", 0) or 0) >= HARD_RETRY_CAP
     ):
+        # Check if new content has appeared past the stored offset.
+        #
+        # Migration safety: pre-v1.4.0 capped rows have offset_bytes=0 from the
+        # ALTER TABLE default. Without the size-fallback below, ANY non-empty
+        # JSONL would satisfy `size > 0` and re-enter the queue forever (the
+        # bug v1.2.2's HARD_RETRY_CAP was designed to prevent). Treat
+        # offset_bytes=0 on a row that has a stored fingerprint size as
+        # "fully mined through that size" — equivalent semantics to v1.2.2.
+        stored_offset = int(state.get("offset_bytes") or 0)
+        if stored_offset == 0 and state.get("size"):
+            stored_offset = int(state.get("size") or 0)
+        try:
+            fingerprint = session_fingerprint(path)
+        except OSError:
+            return True  # Can't stat → stay terminal
+        if fingerprint["size"] > stored_offset:
+            # New content available past the offset — re-enter for incremental mine
+            return False
         return True
 
     try:

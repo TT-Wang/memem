@@ -215,6 +215,17 @@ def generate_candidates(
     except Exception as exc:
         log.debug("lesson exclusion failed: %s", exc)
 
+    # Project-scope precision re-ranking: boost in-scope memories, penalize
+    # cross-project memories. General/empty-project memories are unchanged.
+    for cand in memory_candidates:
+        cand_project = _normalize_scope_id(str(cand.get("project", "") or ""))
+        if not cand_project or cand_project == "general":
+            continue  # cross-project default scope, no penalty
+        if cand_project == normalized_scope:
+            cand["score"] = min(1.0, float(cand.get("score", 0.0)) * 1.5)
+        else:
+            cand["score"] = float(cand.get("score", 0.0)) * 0.7
+
     graph_candidates = _graph_candidates(memory_candidates)
     playbook = _playbook_candidate(normalized_scope)
     transcript_setting = env.get("include_transcripts", os.environ.get("MEMEM_ACTIVE_SLICE_TRANSCRIPTS", "0"))
@@ -596,7 +607,7 @@ def record_slice_attribution(slice_data: dict, response_text: str) -> None:
         essence = item.get("content", "") or item.get("summary", "") or ""
 
         emb = embedding_similarity(essence, response_text)
-        cite = citation_match(mem_id, title, response_text)
+        cite = citation_match(mem_id, title, response_text, memory_essence=essence)
         judge = judge_score(essence, response_text, slice_data.get("query", "")) if should_run_judge() else None
         agg = aggregate_signals(emb, cite, judge)
 

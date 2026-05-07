@@ -167,3 +167,75 @@ def test_record_slice_attribution_iterates_all_memory_items(tmp_cortex_dir):
     assert mock_log.call_count == 3
     called_ids = {call.args[1] for call in mock_log.call_args_list}
     assert called_ids == {"mem00001", "mem00002", "mem00003"}
+
+
+# ---------------------------------------------------------------------------
+# citation_match — semantic branch (m5)
+# ---------------------------------------------------------------------------
+
+def test_citation_match_returns_true_on_semantic_paraphrase(monkeypatch):
+    """Paraphrase with no id/title overlap → True when embedding sim is high."""
+    import numpy as np
+    from memem.attribution import citation_match
+
+    # Two orthogonal-ish but high-similarity vectors for memory vs response
+    vec_a = np.array([1.0, 0.0, 0.0, 0.0], dtype="float32").tolist()
+    vec_b = np.array([0.9, 0.44, 0.0, 0.0], dtype="float32").tolist()  # cos ~0.9
+
+    with patch("memem.embedding_index._embed_text", side_effect=[vec_a, vec_b]):
+        result = citation_match(
+            "zzzzzzzz",           # no id overlap
+            "Irrelevant heading",  # no title overlap
+            "Completely different phrasing in the response text",
+            memory_essence="The actual memory essence content",
+        )
+    assert result is True
+
+
+def test_citation_match_falls_through_when_essence_empty(monkeypatch):
+    """When memory_essence is empty, semantic branch is skipped → False."""
+    import numpy as np
+    from memem.attribution import citation_match
+
+    vec_a = np.array([1.0, 0.0, 0.0, 0.0], dtype="float32").tolist()
+    vec_b = np.array([0.9, 0.44, 0.0, 0.0], dtype="float32").tolist()
+
+    with patch("memem.embedding_index._embed_text", side_effect=[vec_a, vec_b]):
+        result = citation_match(
+            "zzzzzzzz",
+            "Irrelevant heading",
+            "Completely different phrasing in the response text",
+            memory_essence="",   # empty → skip semantic branch
+        )
+    assert result is False
+
+
+def test_citation_match_threshold_honored(monkeypatch):
+    """Similarity 0.5 with default threshold 0.6 → False; with threshold 0.4 → True."""
+    import numpy as np
+    from memem.attribution import citation_match
+
+    # cos(vec_a, vec_b) ≈ 0.5: vec_b at 60 degrees from vec_a
+    vec_a = np.array([1.0, 0.0], dtype="float32").tolist()
+    vec_b = np.array([0.5, 0.866], dtype="float32").tolist()  # cos(60°) = 0.5
+
+    # Default threshold 0.6 → False (0.5 is not > 0.6)
+    with patch("memem.embedding_index._embed_text", side_effect=[vec_a, vec_b]):
+        result_default = citation_match(
+            "zzzzzzzz",
+            "Irrelevant heading",
+            "No overlap response text here",
+            memory_essence="Some essence text",
+        )
+    assert result_default is False
+
+    # Lowered threshold 0.4 → True (0.5 > 0.4)
+    with patch("memem.embedding_index._embed_text", side_effect=[vec_a, vec_b]):
+        result_lowered = citation_match(
+            "zzzzzzzz",
+            "Irrelevant heading",
+            "No overlap response text here",
+            memory_essence="Some essence text",
+            semantic_threshold=0.4,
+        )
+    assert result_lowered is True

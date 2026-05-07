@@ -10,6 +10,96 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
 
+## [1.4.0] - 2026-05-07
+
+### Added — six-module batch closing the recall→action gap
+
+After honest self-assessment of where memem helped vs. didn't across a 9-day,
+40-turn debug arc, six modules ship together to attack the gaps:
+
+**Tier 1 — directly attacks observed gaps:**
+
+- **m1: Working-memory surface (live state, not encyclopedia).** New file
+  `memem/working_memory.py` plus `~/.memem/working_memory.md` — a 5-section
+  scratchpad (`current_task`, `active_hypothesis`, `last_3_actions`,
+  `stuck_on`, `decided_this_session`). Stop hook updates `current_task` and
+  `last_3_actions` from transcript user messages on every assistant turn.
+  UserPromptSubmit prepends working memory BEFORE the static slice in
+  `additionalContext`. Different shape, different purpose: the slice is an
+  encyclopedia; working memory is a scratchpad.
+
+- **m2: Incremental session mining.** Track `offset_bytes` per session in
+  state. Each mining attempt reads from offset to EOF, sends to Haiku,
+  advances offset only on success. Active sessions get mined incrementally
+  without ever processing >100KB at once — the paradox where the most-needed
+  session was the one most-rejected by the mining timeout is resolved.
+  HARD_RETRY_CAP × incremental mining: capped sessions can re-enter when
+  new content has appeared past the stored offset, but never re-mine the
+  same content that already failed. Migration safety: pre-v1.4.0 capped
+  rows have `offset_bytes=0`; the size-fallback in `session_is_terminal`
+  treats those as "fully mined through stored size" (preserves v1.2.2's
+  cap protection through the upgrade path).
+
+- **m3: Slice de-duplication across turns.** SHA256 the assembled slice
+  body; per-session hash files at `~/.memem/.last-slice-hashes/<sid>.hash`.
+  Identical slice across turns → emit `[Active Memory Slice unchanged from
+  previous turn — see slice above]` placeholder instead of the full
+  ~3-4K body. Working memory is appended on every emit (state changes
+  even when slice doesn't); dedup hash is keyed on slice body alone so
+  working memory doesn't bust the cache. ~70% token reduction on
+  stable-topic sessions.
+
+**Tier 2 — closes loops we built but lie dormant:**
+
+- **m4: Cluster summarization (real, not stub).** `find_cluster_summaries`
+  in `memem/dreamer.py` now does the work: cosine-cluster L2 memories by
+  project, threshold 0.7 (was 0.85), min cluster size 5 (was 3). For
+  qualifying clusters, one Sonnet call synthesizes a single pattern memory.
+  Dry-run by default; `apply_diff(dry_run=False)` materializes patterns.
+  Constituent memories get a `clustered_into` pointer (in-memory only for
+  v1.4.0; persistence to Obsidian frontmatter is v1.5.0 scope).
+
+- **m5: Semantic citation, not just regex.** `citation_match` now has a
+  third OR-branch: `embedding_similarity(memory_essence, response_text) >
+  0.6`. Catches semantic citations ("the auto-save constraint" without
+  literal title match) that the literal-id/title heuristic missed.
+  Backwards compatible: existing 3-arg callers unchanged; `memory_essence`
+  is an optional 4th arg.
+
+- **m6: Project-scope precision in candidate ranking.** When a candidate's
+  `project` matches the active scope, score × 1.5 (capped at 1.0). When
+  it doesn't match (and project is not `general` or empty), score × 0.7.
+  L0 anchors and cross-cutting `general` memories unchanged. Less noise
+  per slice, signal density up.
+
+### Fixed — final-review catches before ship
+
+- **HARD_RETRY_CAP migration regression** — pre-v1.4.0 capped sessions had
+  `offset_bytes=0` after the m2 ALTER TABLE migration, which would have
+  re-entered them all into the very retry loop v1.2.2's cap was designed
+  to prevent. `session_is_terminal` now treats `offset_bytes=0` on a row
+  with stored `size` as "fully mined through size", preserving cap
+  protection through the upgrade path.
+- **Cluster Sonnet subprocess** — added `start_new_session=True` for
+  signal isolation, matching the contradiction-judgment subprocess
+  pattern (a SIGTERM to the dreamer no longer reaches the Sonnet call).
+
+### Stats
+
+- 14 new tests added (5 m3 + 7 m1 + 7 m2 + 3 m5 + 3 m6 + 8 m4 + 1 migration guard)
+- 85 tests pass across the 6 module-specific files
+- mypy clean across 48 source files
+- Both hooks shell-syntax-clean
+
+### Wire compatibility
+
+- `MEMEM_MINER_HARD_RETRY_CAP` and `MEMEM_MINER_SETTLE_SECONDS` env vars
+  unchanged from v1.2.2
+- Eval-replay capture (v1.3.0) keeps capturing through these new modules
+- Existing `~/.memem/.last-slice-hash` (singular) is untouched; m3 uses
+  `.last-slice-hashes/` directory side-by-side
+- `clustered_into` field is in-memory only; existing callers unaffected
+
 ## [1.3.0] - 2026-05-07
 
 ### Added — eval-replay regression-test loop

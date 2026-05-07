@@ -1,3 +1,4 @@
+import io
 import json
 import logging
 import os
@@ -35,9 +36,60 @@ from memem.session_state import (
     update_session_state,
 )
 from memem.telemetry import _log_event
-from memem.transcripts import _extract_conversation
+from memem.transcripts import _extract_conversation, _extract_text_only, _strip_system_noise
 
 log = logging.getLogger("memem-miner")
+
+# Minimum number of new bytes required to attempt incremental mining.
+# Below this threshold the "new content" is likely just a trailing newline
+# or whitespace and is not worth a Haiku call.
+_MIN_DELTA_BYTES = 100
+
+
+def _extract_conversation_from_offset(
+    jsonl_path: str, offset_bytes: int
+) -> tuple[list[str], int]:
+    """Extract conversation messages starting at ``offset_bytes`` in the JSONL.
+
+    Opens the file, seeks to ``offset_bytes``, reads to EOF, then parses the
+    resulting lines exactly as ``_extract_conversation`` does.
+
+    Returns:
+        (messages, file_size_at_read) where ``file_size_at_read`` is the file
+        position after reading to EOF (i.e., the total file size at the moment
+        of the read). The caller should persist this as the new offset on
+        success so the next mine starts from where this one ended.
+    """
+    messages: list[str] = []
+    with open(jsonl_path, "rb") as fh:
+        fh.seek(offset_bytes)
+        raw = fh.read()
+        file_size_at_read = offset_bytes + len(raw)
+
+    text_lines = raw.decode("utf-8", errors="ignore").splitlines()
+    for line in text_lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        msg_type = obj.get("type")
+        if msg_type not in ("user", "assistant"):
+            continue
+        content = obj.get("message", {}).get("content", "")
+        text = _extract_text_only(content)
+        if not text:
+            continue
+        if msg_type == "user":
+            cleaned = _strip_system_noise(text)
+            if cleaned:
+                messages.append(f"User: {cleaned}")
+        else:
+            messages.append(f"Assistant: {text}")
+
+    return messages, file_size_at_read
 
 
 _L0_STRUCTURAL_TAGS = {
@@ -194,8 +246,8 @@ def _merge_memories(existing_content: str, new_content: str) -> str:
     return merged[:2000]
 
 
-def _mark_session(path: Path, status: str, message: str = "") -> None:
-    update_session_state(path, status=status, message=message)
+def _mark_session(path: Path, status: str, message: str = "", attempts: int = 0, offset_bytes: int = 0) -> None:
+    update_session_state(path, status=status, message=message, attempts=attempts, offset_bytes=offset_bytes)
 
 
 # Per-Haiku-call char budget. Haiku 4.5 has a 200k-token input window
@@ -688,14 +740,33 @@ def mine_session(jsonl_path: str) -> dict:
         return {"skipped": True, "reason": "file not found"}
 
     session_id = path.stem
-    if session_is_complete(path, load_mined_session_state().get(path.stem)):
+    states = load_mined_session_state()
+    current_state = states.get(path.stem)
+
+    if session_is_complete(path, current_state):
         return {"skipped": True, "reason": "already mined"}
 
-    _mark_session(path, STATUS_IN_PROGRESS)
+    # Load current offset and attempts from persisted state
+    stored_offset = int((current_state or {}).get("offset_bytes", 0) or 0)
+    stored_attempts = int((current_state or {}).get("attempts", 0) or 0)
+
+    # Incremental read: seek to where the last successful mine ended
     try:
-        messages = _extract_conversation(jsonl_path)
+        messages, file_size_at_read = _extract_conversation_from_offset(jsonl_path, stored_offset)
+    except OSError:
+        return {"skipped": True, "reason": "file not readable"}
+
+    delta_bytes = file_size_at_read - stored_offset
+
+    # Not enough new content to warrant a Haiku call
+    if delta_bytes < _MIN_DELTA_BYTES:
+        return {"skipped": True, "reason": f"delta too small ({delta_bytes} bytes)"}
+
+    _mark_session(path, STATUS_IN_PROGRESS, offset_bytes=stored_offset)
+    try:
         if not messages:
-            _mark_session(path, STATUS_COMPLETE, "no human messages")
+            _mark_session(path, STATUS_COMPLETE, "no human messages",
+                          attempts=stored_attempts, offset_bytes=file_size_at_read)
             return {
                 "session_id": session_id,
                 "memories_saved": 0,
@@ -704,7 +775,8 @@ def mine_session(jsonl_path: str) -> dict:
             }
 
         if _is_agent_session(messages):
-            _mark_session(path, STATUS_COMPLETE, "agent/module session — skipped")
+            _mark_session(path, STATUS_COMPLETE, "agent/module session — skipped",
+                          attempts=stored_attempts, offset_bytes=file_size_at_read)
             return {
                 "session_id": session_id,
                 "memories_saved": 0,
@@ -714,7 +786,8 @@ def mine_session(jsonl_path: str) -> dict:
 
         insights = _summarize_session_haiku(messages)
         if not insights:
-            _mark_session(path, STATUS_COMPLETE, "nothing worth saving")
+            _mark_session(path, STATUS_COMPLETE, "nothing worth saving",
+                          attempts=stored_attempts, offset_bytes=file_size_at_read)
             return {
                 "session_id": session_id,
                 "memories_saved": 0,
@@ -826,10 +899,14 @@ def mine_session(jsonl_path: str) -> dict:
         except Exception as exc:
             log.warning("Relevance feedback failed (non-fatal): %s", exc)
 
+        # On success: advance offset to where we finished reading.
+        # This ensures the next mine of this session only processes new content.
         _mark_session(
             path,
             STATUS_COMPLETE,
             f"saved={memories_saved} merged={memories_merged} skipped={duplicates_skipped} deleted={memories_deleted} version={MINER_STATE_VERSION}",
+            attempts=stored_attempts,
+            offset_bytes=file_size_at_read,
         )
         return {
             "session_id": session_id,
@@ -841,10 +918,12 @@ def mine_session(jsonl_path: str) -> dict:
             "status": STATUS_COMPLETE,
         }
     except MiningError as exc:
-        _mark_session(path, STATUS_FAILED, str(exc))
+        # On failure: leave offset_bytes unchanged so the next attempt
+        # re-tries the same delta (the content that caused the failure).
+        _mark_session(path, STATUS_FAILED, str(exc), attempts=stored_attempts + 1, offset_bytes=stored_offset)
         raise
     except Exception as exc:
-        _mark_session(path, STATUS_FAILED, str(exc))
+        _mark_session(path, STATUS_FAILED, str(exc), attempts=stored_attempts + 1, offset_bytes=stored_offset)
         raise FatalMiningError(f"unexpected mining failure: {exc}") from exc
 
 

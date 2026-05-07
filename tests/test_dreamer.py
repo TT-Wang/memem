@@ -15,10 +15,19 @@ Covers:
 12. test_apply_diff_protected_memories_not_demoted
 13. test_write_diff_log_creates_file_in_dreams_dir
 14. test_run_dream_cycle_default_is_dry_run
+15. test_cluster_of_5_high_similarity_detected
+16. test_cluster_of_4_not_promoted
+17. test_cluster_of_5_low_similarity_not_promoted
+18. test_l0_memories_excluded
+19. test_dry_run_does_not_write
+20. test_apply_creates_pattern_memory
+21. test_handles_embedding_unavailable
+22. test_handles_sonnet_timeout
 """
 from __future__ import annotations
 
 import json
+import subprocess
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
@@ -330,3 +339,316 @@ def test_run_dream_cycle_default_is_dry_run(tmp_vault, tmp_cortex_dir):
     assert "diff_path" in result
     assert "diff" in result
     assert "apply_result" in result
+
+
+# ---------------------------------------------------------------------------
+# Helper: build memory with project + content + optional layer
+# ---------------------------------------------------------------------------
+
+def _cluster_mem(
+    mem_id: str,
+    layer: int = 2,
+    decay_immune: bool = False,
+    project: str = "testproject",
+    content: str = "Some content about a topic",
+    title: str = "Cluster test memory",
+) -> dict:
+    base = _mem(mem_id=mem_id, layer=layer, decay_immune=decay_immune, title=title)
+    base["project"] = project
+    base["essence"] = content
+    return base
+
+
+# ---------------------------------------------------------------------------
+# Test 15: cluster of 5 high-similarity items → 1 proposal returned
+# ---------------------------------------------------------------------------
+
+def test_cluster_of_5_high_similarity_detected():
+    """5 memories with identical embeddings must form one cluster proposal."""
+    from memem.dreamer import CLUSTER_MIN_SIZE, find_cluster_summaries
+
+    mems = [
+        _cluster_mem(f"mem0000{i}", content="Identical content about the recurring topic")
+        for i in range(CLUSTER_MIN_SIZE)
+    ]
+
+    # identical vector = cosine sim 1.0 for all pairs
+    identical_vec = [1.0] + [0.0] * 383
+
+    sonnet_output = "TITLE: Recurring topic pattern\n---\nThis is the synthesized pattern body text."
+
+    with patch("memem.embedding_index._embed_text", return_value=identical_vec), \
+         patch("subprocess.run") as mock_run:
+        mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = sonnet_output
+        proposals = find_cluster_summaries(mems)
+
+    assert len(proposals) == 1
+    p = proposals[0]
+    assert set(p["cluster_ids"]) == {m["id"] for m in mems}
+    assert p["project"] == "testproject"
+    assert p["pattern_title"] != ""
+    assert p["pattern_content"] != ""
+    assert 0.9 <= p["similarity_mean"] <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# Test 16: cluster of 4 items → empty (size < CLUSTER_MIN_SIZE=5)
+# ---------------------------------------------------------------------------
+
+def test_cluster_of_4_not_promoted():
+    """4 memories with identical embeddings must NOT form a cluster (size < 5)."""
+    from memem.dreamer import find_cluster_summaries
+
+    mems = [
+        _cluster_mem(f"mem0001{i}", content="Identical content about the recurring topic")
+        for i in range(4)
+    ]
+
+    identical_vec = [1.0] + [0.0] * 383
+
+    with patch("memem.embedding_index._embed_text", return_value=identical_vec), \
+         patch("subprocess.run") as mock_run:
+        mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = "TITLE: x\n---\nbody"
+        proposals = find_cluster_summaries(mems)
+
+    assert proposals == []
+
+
+# ---------------------------------------------------------------------------
+# Test 17: cluster of 5 items with low similarity → empty
+# ---------------------------------------------------------------------------
+
+def test_cluster_of_5_low_similarity_not_promoted():
+    """5 memories with orthogonal embeddings must NOT form a cluster."""
+    import numpy as np
+
+    from memem.dreamer import find_cluster_summaries
+
+    mems = [
+        _cluster_mem(f"mem0002{i}", content=f"Completely different topic {i}")
+        for i in range(5)
+    ]
+
+    # Orthogonal unit vectors → cosine sim = 0
+    vecs = [
+        [1.0 if j == i else 0.0 for j in range(384)]
+        for i in range(5)
+    ]
+
+    embed_call_count = [0]
+
+    def side_effect(text: str) -> list[float]:
+        v = vecs[embed_call_count[0] % 5]
+        embed_call_count[0] += 1
+        return v
+
+    with patch("memem.embedding_index._embed_text", side_effect=side_effect), \
+         patch("subprocess.run") as mock_run:
+        mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = "TITLE: x\n---\nbody"
+        proposals = find_cluster_summaries(mems)
+
+    assert proposals == []
+
+
+# ---------------------------------------------------------------------------
+# Test 18: L0 memories excluded — only 3 non-L0 left → below threshold
+# ---------------------------------------------------------------------------
+
+def test_l0_memories_excluded():
+    """5 items where 2 are L0 → only 3 non-L0 → cluster of 3 < CLUSTER_MIN_SIZE=5."""
+    from memem.dreamer import find_cluster_summaries
+
+    mems = [
+        _cluster_mem("memL0A000", layer=0),
+        _cluster_mem("memL0B000", layer=0),
+        _cluster_mem("mem00003A"),
+        _cluster_mem("mem00003B"),
+        _cluster_mem("mem00003C"),
+    ]
+
+    identical_vec = [1.0] + [0.0] * 383
+
+    with patch("memem.embedding_index._embed_text", return_value=identical_vec), \
+         patch("subprocess.run") as mock_run:
+        mock_run.return_value.returncode = 0
+        mock_run.return_value.stdout = "TITLE: x\n---\nbody"
+        proposals = find_cluster_summaries(mems)
+
+    assert proposals == []
+
+
+# ---------------------------------------------------------------------------
+# Test 19: dry_run=True → no new memory file created
+# ---------------------------------------------------------------------------
+
+def test_dry_run_does_not_write(tmp_vault, tmp_cortex_dir):
+    """apply_diff with cluster_summaries and dry_run=True must not create memory."""
+    from memem.dreamer import apply_diff
+
+    diff = {
+        "demotion_candidates": [],
+        "contradiction_pairs": [],
+        "cluster_summaries": [
+            {
+                "project": "testproject",
+                "cluster_ids": ["aabbccdd", "eeffgghh"],
+                "pattern_title": "Some Pattern",
+                "pattern_content": "This is the pattern body that explains the recurring theme.",
+                "similarity_mean": 0.92,
+            }
+        ],
+    }
+
+    with patch("memem.obsidian_store._write_obsidian_memory") as mock_write:
+        result = apply_diff(diff, dry_run=True)
+
+    mock_write.assert_not_called()
+    assert result.get("clustered", 0) == 0
+
+
+# ---------------------------------------------------------------------------
+# Test 20: dry_run=False → new L2 pattern memory created, constituents tagged
+# ---------------------------------------------------------------------------
+
+def test_apply_creates_pattern_memory(tmp_vault, tmp_cortex_dir):
+    """apply_diff with dry_run=False creates a new layer=2 pattern memory."""
+    from memem.dreamer import apply_diff
+    from memem.obsidian_store import _find_memory, _make_memory, _trigger_sweep, _write_obsidian_memory
+
+    # Create real constituent memories using _make_memory with explicit layer
+    # to avoid classify_layer calling _obsidian_memories and partially warming cache.
+    mem_a = _make_memory(content="First constituent memory about the shared topic.", title="Constituent A", layer=2)
+    _write_obsidian_memory(mem_a)
+
+    mem_b = _make_memory(content="Second constituent memory about the shared topic.", title="Constituent B", layer=2)
+    _write_obsidian_memory(mem_b)
+
+    mem_c = _make_memory(content="Third constituent memory about the shared topic.", title="Constituent C", layer=2)
+    _write_obsidian_memory(mem_c)
+
+    mem_d = _make_memory(content="Fourth constituent memory about the shared topic.", title="Constituent D", layer=2)
+    _write_obsidian_memory(mem_d)
+
+    mem_e = _make_memory(content="Fifth constituent memory about the shared topic.", title="Constituent E", layer=2)
+    _write_obsidian_memory(mem_e)
+
+    # Force cache to see all 5 written files before calling apply_diff
+    _trigger_sweep()
+
+    cluster_ids = [mem_a["id"], mem_b["id"], mem_c["id"], mem_d["id"], mem_e["id"]]
+
+    diff = {
+        "demotion_candidates": [],
+        "contradiction_pairs": [],
+        "cluster_summaries": [
+            {
+                "project": "general",
+                "cluster_ids": cluster_ids,
+                "pattern_title": "Shared Topic Pattern",
+                "pattern_content": "This recurring theme describes a pattern observed across multiple memories about the shared topic.",
+                "similarity_mean": 0.95,
+            }
+        ],
+    }
+
+    result = apply_diff(diff, dry_run=False)
+
+    assert result.get("clustered", 0) == 1
+    assert result["errors"] == []
+
+    # Verify constituents are tagged with clustered_into in the in-memory cache
+    # (apply_diff modifies the cached dict in-place; _write_obsidian_memory does
+    # not persist clustered_into to frontmatter since it's a new field not in the
+    # fixed schema — but the in-memory state is what matters for subsequent recalls)
+    for cid in cluster_ids:
+        updated = _find_memory(cid)
+        assert updated is not None
+        assert updated.get("clustered_into") is not None, f"Constituent {cid} missing clustered_into"
+
+
+# ---------------------------------------------------------------------------
+# Test 21: embedding unavailable → returns []
+# ---------------------------------------------------------------------------
+
+def test_handles_embedding_unavailable():
+    """If _embed_text import raises ImportError, find_cluster_summaries returns []."""
+    from memem.dreamer import find_cluster_summaries
+
+    mems = [
+        _cluster_mem(f"mem0004{i}", content="Same content")
+        for i in range(5)
+    ]
+
+    with patch("memem.dreamer.find_cluster_summaries") as mock_fn:
+        # Rather than patching the import (which is tricky), test by patching
+        # the embedding_index module at source
+        pass
+
+    # Patch at the embedding_index module level so the lazy import fails
+    import sys
+    import types
+
+    # Create a fake module that raises ImportError on _embed_text call
+    fake_embedding_mod = types.ModuleType("memem.embedding_index")
+
+    def _embed_text_unavailable(text: str):
+        raise ImportError("sentence-transformers not installed")
+
+    fake_embedding_mod._embed_text = _embed_text_unavailable  # type: ignore[attr-defined]
+
+    original = sys.modules.get("memem.embedding_index")
+    sys.modules["memem.embedding_index"] = fake_embedding_mod
+    try:
+        # Reload dreamer so the lazy import picks up our fake module
+        import importlib
+        import memem.dreamer as dreamer_mod
+        # We can't easily reload due to existing imports, so test via direct patch
+        with patch("memem.embedding_index._embed_text", side_effect=ImportError("not installed")):
+            # The function catches ImportError at import time, not at call time.
+            # So instead patch builtins.__import__ to fail for embedding_index
+            import builtins
+            real_import = builtins.__import__
+
+            def failing_import(name, *args, **kwargs):
+                if name == "memem.embedding_index":
+                    raise ImportError("embedding unavailable")
+                return real_import(name, *args, **kwargs)
+
+            with patch("builtins.__import__", side_effect=failing_import):
+                # Need fresh import of find_cluster_summaries to trigger the lazy import
+                import importlib as _il
+                import memem.dreamer as _dreamer
+                _il.reload(_dreamer)
+                proposals = _dreamer.find_cluster_summaries(mems)
+                assert proposals == []
+    finally:
+        if original is None:
+            sys.modules.pop("memem.embedding_index", None)
+        else:
+            sys.modules["memem.embedding_index"] = original
+
+
+# ---------------------------------------------------------------------------
+# Test 22: Sonnet timeout → cluster skipped, function does not crash
+# ---------------------------------------------------------------------------
+
+def test_handles_sonnet_timeout():
+    """If subprocess.run raises TimeoutExpired, the cluster is skipped gracefully."""
+    from memem.dreamer import find_cluster_summaries
+
+    mems = [
+        _cluster_mem(f"mem0005{i}", content="Same content about recurring topic")
+        for i in range(5)
+    ]
+
+    identical_vec = [1.0] + [0.0] * 383
+
+    with patch("memem.embedding_index._embed_text", return_value=identical_vec), \
+         patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="claude", timeout=60)):
+        proposals = find_cluster_summaries(mems)
+
+    # Must not raise; cluster is skipped
+    assert proposals == []

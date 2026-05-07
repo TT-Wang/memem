@@ -36,7 +36,7 @@ LAST_BRIEF="${MEMEM_DIR}/.last-brief.json"
 TOPIC_LOG="${MEMEM_DIR}/topic-shifts.log"
 
 "${MEMEM_PYTHON:-python3}" - "$PLUGIN_ROOT" "$INPUT_FILE" "$LAST_BRIEF" "$TOPIC_LOG" "$MEMEM_DIR" << 'HOOKPY'
-import sys, json, os, subprocess, re
+import sys, json, os, subprocess, re, hashlib
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -69,6 +69,42 @@ def tokenize(text: str) -> set:
 def emit_empty():
     print(EMPTY_RESPONSE)
     sys.exit(0)
+
+SLICE_UNCHANGED_PLACEHOLDER = "[Active Memory Slice unchanged from previous turn — see slice above]"
+
+def _session_hash_path(memem_dir: Path, session_id: str) -> Path:
+    hash_dir = memem_dir / ".last-slice-hashes"
+    if not session_id:
+        return memem_dir / ".last-slice-hash"
+    safe_name = hashlib.sha256(session_id.encode()).hexdigest()
+    return hash_dir / f"{safe_name}.hash"
+
+def read_prior_hash(memem_dir: Path, session_id: str) -> str:
+    try:
+        p = _session_hash_path(memem_dir, session_id)
+        if p.exists():
+            return p.read_text().strip()
+    except OSError:
+        pass
+    return ""
+
+def write_current_hash(memem_dir: Path, session_id: str, current_hash: str) -> None:
+    try:
+        p = _session_hash_path(memem_dir, session_id)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(current_hash)
+        tmp.replace(p)
+    except OSError:
+        pass
+
+def dedup_assembled(assembled: str, memem_dir: Path, session_id: str) -> str:
+    current_hash = hashlib.sha256(assembled.encode()).hexdigest()
+    prior_hash = read_prior_hash(memem_dir, session_id)
+    if current_hash == prior_hash:
+        return SLICE_UNCHANGED_PLACEHOLDER
+    write_current_hash(memem_dir, session_id, current_hash)
+    return assembled
 
 def detect_scope(hook: dict) -> str:
     cwd = hook.get("cwd") or os.environ.get("PWD") or os.getcwd()
@@ -231,10 +267,31 @@ try:
 except Exception:
     pass
 
+# Dedup is computed on the ORIGINAL assembled body (without working memory) so
+# that working-memory changes do NOT bust the slice cache. Only slice content
+# changes should trigger a full re-emit.
+output_context = dedup_assembled(assembled, memem_dir, session_id)
+
+# Load working memory and prepend to the output context if present.
+# This runs AFTER the dedup hash is committed so working-memory updates
+# are always included in the emit (even on the dedup-placeholder turn),
+# while the dedup hash itself stays keyed on slice content only.
+working_block = ""
+working_md_path = memem_dir / "working_memory.md"
+if working_md_path.exists():
+    try:
+        wm_text = working_md_path.read_text(encoding="utf-8").strip()
+        if wm_text:
+            working_block = "## Working Memory\n\n" + wm_text + "\n\n---\n\n"
+    except OSError:
+        pass
+
+final_context = working_block + output_context
+
 print(json.dumps({
     "hookSpecificOutput": {
         "hookEventName": "UserPromptSubmit",
-        "additionalContext": assembled,
+        "additionalContext": final_context,
     }
 }))
 HOOKPY
