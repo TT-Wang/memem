@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
 from memem.activation import judge_activation_heuristically, judge_activation_with_llm
@@ -35,7 +34,7 @@ from memem.environment_context import (
     environment_candidates_from_environment,
     normalize_runtime_environment,
 )
-from memem.models import LAYER_L0, LAYER_L3, _normalize_scope_id
+from memem.models import LAYER_L0, LAYER_L3, _normalize_scope_id, parse_iso_dt
 from memem.slice_history import annotate_slice_continuity, load_slice_history, persist_slice_history
 
 log = logging.getLogger("memem-active-slice")
@@ -791,12 +790,13 @@ def _render_decisions_block(normalized_scope: str) -> str:
     decision_mems: list[dict[str, Any]] = []
     for mem in all_mems:
         tags = mem.get("domain_tags") or []
-        has_decision = "decision" in tags or "kind:decision" in tags
+        # canonical: bare "decision" tag; "kind:<value>" tag prefix is reserved for compaction-checkpoint and similar
+        has_decision = "decision" in tags
         if not has_decision:
             continue
         # Check recency: parse created_at
         created_str = mem.get("created_at", "") or ""
-        created_dt = _parse_iso_dt(created_str)
+        created_dt = parse_iso_dt(created_str)
         if created_dt is not None and created_dt < cutoff:
             continue
         decision_mems.append(mem)
@@ -894,7 +894,7 @@ def _render_checkpoint_block(normalized_scope: str, session_id: str) -> str:
             continue
         # Check recency
         created_str = mem.get("created_at", "") or ""
-        created_dt = _parse_iso_dt(created_str)
+        created_dt = parse_iso_dt(created_str)
         if created_dt is not None and created_dt < cutoff:
             continue
         checkpoints.append(mem)
@@ -909,20 +909,6 @@ def _render_checkpoint_block(normalized_scope: str, session_id: str) -> str:
     title = latest.get("title", "Compaction checkpoint")
     essence = (latest.get("essence") or latest.get("full_record", ""))[:600]
     return f"## Compaction checkpoint\n\n**{title}**\n\n{essence}"
-
-
-def _parse_iso_dt(ts: str) -> datetime | None:
-    """Parse ISO datetime string, returning None on failure."""
-    if not ts:
-        return None
-    try:
-        normalized = ts.replace("Z", "+00:00")
-        dt = datetime.fromisoformat(normalized)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=UTC)
-        return dt
-    except (ValueError, TypeError):
-        return None
 
 
 def active_slice_response(

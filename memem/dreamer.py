@@ -31,7 +31,7 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
-from memem.models import DEFAULT_LAYER, LAYER_L0, MEMEM_DIR
+from memem.models import DEFAULT_LAYER, LAYER_L0, MEMEM_DIR, now_iso
 
 log = logging.getLogger("memem-dreamer")
 
@@ -40,10 +40,6 @@ LOW_ATTRIBUTION_THRESHOLD = 0.2
 CLUSTER_SIMILARITY_THRESHOLD = 0.7
 CLUSTER_MIN_SIZE = 5
 SONNET_MODEL = "claude-sonnet-4-7"  # strong offline model
-
-
-def _now_iso() -> str:
-    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _is_protected(memory: dict) -> bool:
@@ -330,7 +326,7 @@ def find_cluster_summaries(memories: list[dict]) -> list[dict]:
 def build_diff(memories: list[dict]) -> dict:
     """Build the full proposed-changes diff for a vault snapshot."""
     return {
-        "generated_at": _now_iso(),
+        "generated_at": now_iso(),
         "vault_size": len(memories),
         "demotion_candidates": find_demotion_candidates(memories),
         "contradiction_pairs": find_contradiction_pairs(memories),

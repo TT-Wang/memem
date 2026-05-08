@@ -18,7 +18,7 @@ from __future__ import annotations
 import math
 from datetime import UTC, datetime
 
-from memem.models import DEFAULT_LAYER, LAYER_L0
+from memem.models import DEFAULT_LAYER, LAYER_L0, parse_iso_dt
 
 # Tunables — keep conservative; the dreamer (m4) will rarely act on borderline scores
 DECAY_HALF_LIFE_DAYS = 30.0     # base — a memory accessed once and then ignored loses half its strength in 30 days
@@ -28,24 +28,11 @@ PHI_DAMPING_KNEE = 5            # access_count beyond which phi damping kicks in
 LOG_DAMPING_KNEE = 20           # access_count beyond which log damping dominates
 
 
-def _parse_iso(ts: str) -> datetime | None:
-    if not ts:
-        return None
-    try:
-        # Strip trailing Z if present, normalize
-        ts = ts.replace("Z", "+00:00")
-        return datetime.fromisoformat(ts)
-    except (ValueError, TypeError):
-        return None
-
-
 def _hours_since(ts: str, now: datetime | None = None) -> float:
-    parsed = _parse_iso(ts)
+    parsed = parse_iso_dt(ts)
     if not parsed:
         return 0.0
     now = now or datetime.now(UTC)
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
     delta = (now - parsed).total_seconds() / 3600.0
     return max(0.0, delta)
 

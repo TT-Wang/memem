@@ -1,5 +1,6 @@
 import json
 import re
+from pathlib import Path
 
 from memem.session_state import SESSIONS_DIRS
 
@@ -17,43 +18,6 @@ def _strip_system_noise(text: str) -> str:
     text = _SYSTEM_REMINDER_RE.sub("", text)
     text = _COMMAND_TAGS_RE.sub("", text)
     return text.strip()
-
-
-def _extract_conversation(jsonl_path: str) -> list[str]:
-    """Extract human messages and assistant prose from a session, stripped of noise.
-
-    Returns a list of lines like "User: ..." and "Assistant: ..." with tool
-    calls, tool results, and system reminders stripped out.
-    """
-    lines = []
-
-    with open(jsonl_path) as handle:
-        for line in handle:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-            msg_type = obj.get("type")
-            if msg_type not in ("user", "assistant"):
-                continue
-
-            content = obj.get("message", {}).get("content", "")
-            text = _extract_text_only(content)
-            if not text:
-                continue
-
-            if msg_type == "user":
-                cleaned = _strip_system_noise(text)
-                if cleaned:
-                    lines.append(f"User: {cleaned}")
-            else:
-                lines.append(f"Assistant: {text}")
-
-    return lines
 
 
 def _extract_text_only(content) -> str:
@@ -74,8 +38,111 @@ def _extract_text_only(content) -> str:
     return "\n".join(parts)
 
 
-def _parse_jsonl_session(jsonl_path: str) -> list[dict]:
-    """Parse JSONL session into user/assistant exchange pairs."""
+def _extract_tool_use_summary(content) -> str | None:
+    """Extract a compact summary of tool_use blocks, or None if none present."""
+    if not isinstance(content, list):
+        return None
+    parts = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "tool_use":
+            name = block.get("name", "")
+            tool_input = block.get("input", {})
+            if name in ("Read", "Glob", "Grep"):
+                parts.append(f"[Tool: {name} {tool_input.get('file_path', tool_input.get('pattern', ''))}]")
+            elif name in ("Edit", "Write"):
+                parts.append(f"[Tool: {name} {tool_input.get('file_path', '')}]")
+            elif name == "Bash":
+                parts.append(f"[Tool: Bash] {tool_input.get('command', '')[:200]}")
+            else:
+                parts.append(f"[Tool: {name}]")
+    return "\n".join(parts) if parts else None
+
+
+def parse_jsonl_session(
+    path: str | Path,
+    start_offset: int = 0,
+) -> list[dict]:
+    """Canonical JSONL session parser.
+
+    Parses a Claude Code session JSONL file and returns a list of message dicts.
+    Each dict has:
+      - "role": "user" | "assistant" | "system"
+      - "text": str (text content of the message, empty string if none)
+      - "ts":   str | None (timestamp from the record, if present)
+      - "tool_use": str | None (compact summary of tool_use blocks, if any)
+
+    Args:
+        path:         Path to the JSONL file.
+        start_offset: Byte offset to seek to before reading (for incremental
+                      mining). Lines before the offset are skipped. Defaults to 0
+                      (read from the beginning).
+
+    Returns:
+        List of message dicts. Messages with empty text AND no tool_use are
+        omitted. Role values other than "user", "assistant", and "system" are
+        dropped.
+
+    Divergence note:
+        Earlier per-module parsers only kept "user" and "assistant" roles and
+        dropped "system". This canonical adds "system" to the kept set because
+        the schema spec explicitly lists it. Callers that previously filtered to
+        user+assistant can filter on role=="system" themselves.
+    """
+    messages: list[dict] = []
+
+    try:
+        with open(path, "rb") as fh:
+            if start_offset:
+                fh.seek(start_offset)
+            raw = fh.read()
+    except OSError:
+        return messages
+
+    text_lines = raw.decode("utf-8", errors="ignore").splitlines()
+    for line in text_lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        role = obj.get("type", "")
+        if role not in ("user", "assistant", "system"):
+            continue
+
+        content = obj.get("message", {}).get("content", "")
+        text = _extract_text_only(content)
+        tool_use = _extract_tool_use_summary(content)
+        ts: str | None = obj.get("timestamp") or obj.get("ts") or None
+
+        if not text and not tool_use:
+            continue
+
+        messages.append({
+            "role": role,
+            "text": text,
+            "ts": ts,
+            "tool_use": tool_use,
+        })
+
+    return messages
+
+
+# ---------------------------------------------------------------------------
+# Internal alias for backward-compatibility (callers inside this package used
+# the old pair-returning _parse_jsonl_session; they've been updated below).
+# ---------------------------------------------------------------------------
+
+def _parse_jsonl_session_pairs(jsonl_path: str) -> list[dict]:
+    """Parse JSONL session into user/assistant exchange pairs.
+
+    LEGACY: used only by transcript_search. Thin wrapper over parse_jsonl_session
+    that assembles the old {"user_text", "assistant_text"} pair structure.
+    """
     user_texts: list[str] = []
     assistant_texts: list[str] = []
     pairs: list[dict] = []
@@ -161,6 +228,27 @@ def _parse_jsonl_session(jsonl_path: str) -> list[dict]:
     return pairs
 
 
+def _extract_conversation(jsonl_path: str) -> list[str]:
+    """Extract human messages and assistant prose from a session, stripped of noise.
+
+    Returns a list of lines like "User: ..." and "Assistant: ..." with tool
+    calls, tool results, and system reminders stripped out.
+    """
+    lines = []
+    msgs = parse_jsonl_session(jsonl_path)
+    for msg in msgs:
+        role = msg["role"]
+        text = msg["text"]
+        if role == "user":
+            cleaned = _strip_system_noise(text)
+            if cleaned:
+                lines.append(f"User: {cleaned}")
+        elif role == "assistant":
+            if text:
+                lines.append(f"Assistant: {text}")
+    return lines
+
+
 def transcript_search(query: str, limit: int = 5) -> str:
     query_words = set(query.lower().split())
     if not query_words:
@@ -176,7 +264,7 @@ def transcript_search(query: str, limit: int = 5) -> str:
             try:
                 if jsonl_path.stat().st_size < 5000:
                     continue
-                pairs = _parse_jsonl_session(str(jsonl_path))
+                pairs = _parse_jsonl_session_pairs(str(jsonl_path))
             except Exception:
                 continue
             for pair in pairs:

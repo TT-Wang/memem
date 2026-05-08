@@ -195,7 +195,8 @@ def _load_decision_memories(session_id: str) -> list[dict[str, Any]]:
     decision_mems: list[dict[str, Any]] = []
     for mem in all_mems:
         tags = mem.get("domain_tags") or []
-        has_decision_tag = "decision" in tags or "kind:decision" in tags
+        # canonical: bare "decision" tag; "kind:<value>" tag prefix is reserved for compaction-checkpoint and similar
+        has_decision_tag = "decision" in tags
         if not has_decision_tag:
             continue
         # Session filter: if session_id provided, prefer same-session but

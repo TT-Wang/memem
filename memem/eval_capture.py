@@ -23,7 +23,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from memem.models import MEMEM_DIR
+from memem.models import MEMEM_DIR, now_iso
 
 EVAL_CAPTURE_FILE = MEMEM_DIR / "eval_captures.jsonl"
 SCHEMA_VERSION = 1
@@ -122,10 +122,6 @@ def is_enabled() -> bool:
     return os.environ.get("MEMEM_EVAL_CAPTURE", "").strip() in ("1", "true", "yes")
 
 
-def _now_iso() -> str:
-    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-
-
 def capture(
     *,
     query: str,
@@ -145,7 +141,7 @@ def capture(
         EVAL_CAPTURE_FILE.parent.mkdir(parents=True, exist_ok=True)
         record = {
             "schema_version": SCHEMA_VERSION,
-            "ts": _now_iso(),
+            "ts": now_iso(),
             "mode": mode,
             "scope_id": scope_id,
             "query": scrub_pii(query),

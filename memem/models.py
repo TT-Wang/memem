@@ -148,5 +148,27 @@ def now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def parse_iso_dt(s: str) -> datetime | None:
+    """Parse an ISO 8601 datetime string to a timezone-aware datetime.
+
+    Handles:
+      - Trailing 'Z' suffix (treated as UTC)
+      - Explicit '+HH:MM' offsets
+      - Naive strings (treated as UTC)
+
+    Returns None on empty input or parse failure.
+    """
+    if not s:
+        return None
+    try:
+        normalized = s.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(normalized)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return dt
+    except (ValueError, TypeError):
+        return None
+
+
 # Backward-compat alias
 _now = now_iso

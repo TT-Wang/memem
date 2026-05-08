@@ -9,7 +9,7 @@ from memem.active_slice import (
     _stable_id,
     render_slice_markdown,
 )
-from memem.models import DEFAULT_LAYER, LAST_BRIEF_PATH, now_iso
+from memem.models import DEFAULT_LAYER, LAST_BRIEF_PATH, now_iso, parse_iso_dt
 from memem.obsidian_store import (
     _find_memory,
     _obsidian_memories,
@@ -37,12 +37,8 @@ def _get_current_session_id() -> str:
 
 def _parse_ts(ts: str) -> float:
     """Parse an ISO-8601 timestamp to a float for sorting. Returns 0 on failure."""
-    if not ts:
-        return 0.0
-    try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
-    except (ValueError, TypeError):
-        return 0.0
+    dt = parse_iso_dt(ts)
+    return dt.timestamp() if dt is not None else 0.0
 
 
 def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 10, rerank_model: str | None = None) -> list[dict]:

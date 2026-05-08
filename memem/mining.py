@@ -35,7 +35,7 @@ from memem.session_state import (
     update_session_state,
 )
 from memem.telemetry import _log_event
-from memem.transcripts import _extract_text_only, _strip_system_noise
+from memem.transcripts import _strip_system_noise, parse_jsonl_session
 
 log = logging.getLogger("memem-miner")
 
@@ -50,43 +50,39 @@ def _extract_conversation_from_offset(
 ) -> tuple[list[str], int]:
     """Extract conversation messages starting at ``offset_bytes`` in the JSONL.
 
-    Opens the file, seeks to ``offset_bytes``, reads to EOF, then parses the
-    resulting lines exactly as ``_extract_conversation`` does.
+    Thin wrapper over the canonical ``parse_jsonl_session`` that:
+      1. Seeks to ``offset_bytes`` (preserved incremental-mining semantics).
+      2. Reformats messages as "User: ..." / "Assistant: ..." strings for Haiku.
+      3. Returns the file size at read time so the caller can advance the offset.
 
     Returns:
-        (messages, file_size_at_read) where ``file_size_at_read`` is the file
-        position after reading to EOF (i.e., the total file size at the moment
-        of the read). The caller should persist this as the new offset on
-        success so the next mine starts from where this one ended.
+        (messages, file_size_at_read) where ``file_size_at_read`` is the total
+        file size at the moment of the read. The caller persists this as the new
+        offset so the next mine starts from where this one ended.
     """
-    messages: list[str] = []
-    with open(jsonl_path, "rb") as fh:
-        fh.seek(offset_bytes)
-        raw = fh.read()
-        file_size_at_read = offset_bytes + len(raw)
+    # Measure file size first (before seek) to compute file_size_at_read.
+    try:
+        with open(jsonl_path, "rb") as fh:
+            fh.seek(0, 2)  # seek to end
+            total_size = fh.tell()
+    except OSError:
+        return [], 0
 
-    text_lines = raw.decode("utf-8", errors="ignore").splitlines()
-    for line in text_lines:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        msg_type = obj.get("type")
-        if msg_type not in ("user", "assistant"):
-            continue
-        content = obj.get("message", {}).get("content", "")
-        text = _extract_text_only(content)
-        if not text:
-            continue
-        if msg_type == "user":
+    # parse_jsonl_session handles seek to start_offset internally.
+    raw_msgs = parse_jsonl_session(jsonl_path, start_offset=offset_bytes)
+    file_size_at_read = total_size  # file size measured before parse (race-safe approximation)
+
+    messages: list[str] = []
+    for msg in raw_msgs:
+        role = msg["role"]
+        text = msg["text"]
+        if role == "user":
             cleaned = _strip_system_noise(text)
             if cleaned:
                 messages.append(f"User: {cleaned}")
-        else:
-            messages.append(f"Assistant: {text}")
+        elif role == "assistant":
+            if text:
+                messages.append(f"Assistant: {text}")
 
     return messages, file_size_at_read
 

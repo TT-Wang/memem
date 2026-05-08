@@ -27,10 +27,9 @@ from __future__ import annotations
 import logging
 import re
 import uuid
-from datetime import UTC, datetime
 from pathlib import Path
 
-from memem.models import OBSIDIAN_VAULT
+from memem.models import OBSIDIAN_VAULT, now_iso
 
 log = logging.getLogger("memem-lessons")
 
@@ -45,10 +44,6 @@ def _lessons_dir() -> Path:
 
 # Back-compat alias for callers that imported the constant directly.
 LESSONS_DIR = OBSIDIAN_VAULT / "memem" / "lessons"
-
-
-def _now_iso() -> str:
-    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _slugify(text: str, max_len: int = 40) -> str:
@@ -83,7 +78,7 @@ def record_lesson(
         f"query_class: {query_class}",
         f"anti_pattern: {anti_pattern[:200]}",
         f"evidence: {evidence[:500]}" if evidence else "evidence: ",
-        f"created_at: {_now_iso()}",
+        f"created_at: {now_iso()}",
         f"source: {source}",
         "---",
         "",
