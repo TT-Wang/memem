@@ -200,13 +200,17 @@ except Exception:
             # Failures are logged but never crash the hook.
             mkdir -p "$_STOP_MARKER_DIR"
             mkdir -p "$HOME/.memem/logs"
-            timeout "${MEMEM_MINE_TIMEOUT}" "${MEMEM_PYTHON:-python3}" -c "
-import sys
-sys.path.insert(0, '$PLUGIN_ROOT')
+            # Pass session_id via env to avoid shell injection if the value
+            # ever contains characters that would break a Python string literal.
+            MEMEM_STOP_SESSION_ID="$_STOP_SESSION_ID" \
+            MEMEM_PLUGIN_ROOT="$PLUGIN_ROOT" \
+            timeout "${MEMEM_MINE_TIMEOUT}" "${MEMEM_PYTHON:-python3}" -c '
+import os, sys
+sys.path.insert(0, os.environ["MEMEM_PLUGIN_ROOT"])
 from memem.mining import mine_session_delta
-result = mine_session_delta('$_STOP_SESSION_ID')
+result = mine_session_delta(os.environ["MEMEM_STOP_SESSION_ID"])
 print(result)
-" >> "$HOME/.memem/logs/mine-on-stop.log" 2>&1 || true
+' >> "$HOME/.memem/logs/mine-on-stop.log" 2>&1 || true
             touch "$_STOP_MARKER"
         fi
     fi
