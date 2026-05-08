@@ -8,13 +8,10 @@ so the tests are self-contained and do not require a real vault or
 sentence-transformer model.
 """
 
-import hashlib
 import json
 import os
 import subprocess
 from pathlib import Path
-
-import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 HOOK = REPO / "hooks" / "auto-recall.sh"

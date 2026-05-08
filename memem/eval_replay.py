@@ -107,7 +107,7 @@ def replay(
         jaccards.append(j)
         if top_1_stable(baseline_ids, current_ids):
             top1_hits += 1
-        if isinstance(baseline_latency, (int, float)):
+        if isinstance(baseline_latency, int | float):
             latency_deltas.append(current_latency - float(baseline_latency))
         per_query.append({
             "query": row.get("query", ""),

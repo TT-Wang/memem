@@ -19,7 +19,7 @@ import json
 import os
 import re
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -123,7 +123,7 @@ def is_enabled() -> bool:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
 def capture(
@@ -184,7 +184,7 @@ def load_captures(
         return []
     cutoff = None
     if since_seconds is not None:
-        cutoff = datetime.now(timezone.utc).timestamp() - since_seconds
+        cutoff = datetime.now(UTC).timestamp() - since_seconds
     rows: list[dict[str, Any]] = []
     with open(target, encoding="utf-8") as fh:
         for line in fh:

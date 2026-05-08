@@ -245,10 +245,7 @@ def find_cluster_summaries(memories: list[dict]) -> list[dict]:
             idx = np.array(similar_indices)
             sub_sim = sim_matrix[np.ix_(idx, idx)]
             mask = 1 - np.eye(len(idx))
-            if mask.sum() > 0:
-                similarity_mean = float((sub_sim * mask).sum() / mask.sum())
-            else:
-                similarity_mean = 1.0
+            similarity_mean = float((sub_sim * mask).sum() / mask.sum()) if mask.sum() > 0 else 1.0
 
             # Generate synthesis via Sonnet
             n_cluster = len(cluster_mems)

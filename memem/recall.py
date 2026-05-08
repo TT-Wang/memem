@@ -539,6 +539,7 @@ def memory_search(query: str, limit: int = 10, scope_id: str = "default") -> str
     FIRST to narrow candidates, then drill into specific IDs via memory_get.
     """
     import time
+
     from memem.eval_capture import capture as _eval_capture
     _t0 = time.monotonic()
     memories = _search_memories(
@@ -714,6 +715,7 @@ def _format_memory_as_bullet(mem: dict) -> str:
 
 def memory_recall(query: str, scope_id: str = "default", limit: int = 10, rerank_model: str | None = None) -> str:
     import time
+
     from memem.eval_capture import capture as _eval_capture
     _t0 = time.monotonic()
     memories = _search_memories(query, scope_id=scope_id, limit=limit, rerank_model=rerank_model)

@@ -378,7 +378,7 @@ def test_scope_match_caps_at_1():
     score = 0.95
     boosted = min(1.0, float(score) * 1.5)
     assert boosted == 1.0, f"Expected 1.0 (clamped), got {boosted}"
-    assert 0.95 * 1.5 == pytest.approx(1.425), "Without cap, boost would be 1.425"
+    assert pytest.approx(1.425) == 0.95 * 1.5, "Without cap, boost would be 1.425"
 
 
 def _make_candidate_with_score(project: str, score: float) -> dict:

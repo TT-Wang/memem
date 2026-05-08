@@ -1,4 +1,3 @@
-import io
 import json
 import logging
 import os
@@ -36,7 +35,7 @@ from memem.session_state import (
     update_session_state,
 )
 from memem.telemetry import _log_event
-from memem.transcripts import _extract_conversation, _extract_text_only, _strip_system_noise
+from memem.transcripts import _extract_text_only, _strip_system_noise
 
 log = logging.getLogger("memem-miner")
 

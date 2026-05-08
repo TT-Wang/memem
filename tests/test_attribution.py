@@ -175,7 +175,8 @@ def test_record_slice_attribution_iterates_all_memory_items(tmp_cortex_dir):
 
 def test_citation_match_returns_true_on_semantic_paraphrase(monkeypatch):
     """Paraphrase with no id/title overlap → True when embedding sim is high."""
-    import numpy as np
+    np = pytest.importorskip("numpy")
+
     from memem.attribution import citation_match
 
     # Two orthogonal-ish but high-similarity vectors for memory vs response
@@ -194,7 +195,8 @@ def test_citation_match_returns_true_on_semantic_paraphrase(monkeypatch):
 
 def test_citation_match_falls_through_when_essence_empty(monkeypatch):
     """When memory_essence is empty, semantic branch is skipped → False."""
-    import numpy as np
+    np = pytest.importorskip("numpy")
+
     from memem.attribution import citation_match
 
     vec_a = np.array([1.0, 0.0, 0.0, 0.0], dtype="float32").tolist()
@@ -212,7 +214,8 @@ def test_citation_match_falls_through_when_essence_empty(monkeypatch):
 
 def test_citation_match_threshold_honored(monkeypatch):
     """Similarity 0.5 with default threshold 0.6 → False; with threshold 0.4 → True."""
-    import numpy as np
+    np = pytest.importorskip("numpy")
+
     from memem.attribution import citation_match
 
     # cos(vec_a, vec_b) ≈ 0.5: vec_b at 60 degrees from vec_a

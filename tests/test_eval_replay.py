@@ -9,11 +9,6 @@ from __future__ import annotations
 
 import importlib
 import json
-import os
-from pathlib import Path
-
-import pytest
-
 
 # ---------------------------------------------------------------------------
 # PII scrubbing
@@ -284,4 +279,4 @@ def test_memory_search_writes_capture_when_enabled(tmp_cortex_dir, tmp_vault, mo
     assert last["mode"] == "search"
     assert "nonexistent query xyzzy" in last["query"]
     assert isinstance(last["memory_ids"], list)
-    assert isinstance(last["latency_ms"], (int, float))
+    assert isinstance(last["latency_ms"], int | float)

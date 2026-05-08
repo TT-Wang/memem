@@ -31,6 +31,8 @@ import subprocess
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
+import pytest
+
 # ---------------------------------------------------------------------------
 # Helper: build minimal memory dicts
 # ---------------------------------------------------------------------------
@@ -365,6 +367,7 @@ def _cluster_mem(
 
 def test_cluster_of_5_high_similarity_detected():
     """5 memories with identical embeddings must form one cluster proposal."""
+    pytest.importorskip("numpy")  # cluster code requires numpy; not in CI deps
     from memem.dreamer import CLUSTER_MIN_SIZE, find_cluster_summaries
 
     mems = [
@@ -397,6 +400,7 @@ def test_cluster_of_5_high_similarity_detected():
 # ---------------------------------------------------------------------------
 
 def test_cluster_of_4_not_promoted():
+    pytest.importorskip("numpy")  # cluster code requires numpy
     """4 memories with identical embeddings must NOT form a cluster (size < 5)."""
     from memem.dreamer import find_cluster_summaries
 
@@ -421,8 +425,8 @@ def test_cluster_of_4_not_promoted():
 # ---------------------------------------------------------------------------
 
 def test_cluster_of_5_low_similarity_not_promoted():
+    pytest.importorskip("numpy")  # cluster code requires numpy
     """5 memories with orthogonal embeddings must NOT form a cluster."""
-    import numpy as np
 
     from memem.dreamer import find_cluster_summaries
 
@@ -514,6 +518,7 @@ def test_dry_run_does_not_write(tmp_vault, tmp_cortex_dir):
 # ---------------------------------------------------------------------------
 
 def test_apply_creates_pattern_memory(tmp_vault, tmp_cortex_dir):
+    pytest.importorskip("numpy")  # cluster code requires numpy
     """apply_diff with dry_run=False creates a new layer=2 pattern memory."""
     from memem.dreamer import apply_diff
     from memem.obsidian_store import _find_memory, _make_memory, _trigger_sweep, _write_obsidian_memory
@@ -575,17 +580,14 @@ def test_apply_creates_pattern_memory(tmp_vault, tmp_cortex_dir):
 
 def test_handles_embedding_unavailable():
     """If _embed_text import raises ImportError, find_cluster_summaries returns []."""
-    from memem.dreamer import find_cluster_summaries
 
     mems = [
         _cluster_mem(f"mem0004{i}", content="Same content")
         for i in range(5)
     ]
 
-    with patch("memem.dreamer.find_cluster_summaries") as mock_fn:
-        # Rather than patching the import (which is tricky), test by patching
-        # the embedding_index module at source
-        pass
+    # NOTE: Rather than patching the import (which is tricky for lazy imports),
+    # we patch the embedding_index module at sys.modules level below.
 
     # Patch at the embedding_index module level so the lazy import fails
     import sys
@@ -603,8 +605,6 @@ def test_handles_embedding_unavailable():
     sys.modules["memem.embedding_index"] = fake_embedding_mod
     try:
         # Reload dreamer so the lazy import picks up our fake module
-        import importlib
-        import memem.dreamer as dreamer_mod
         # We can't easily reload due to existing imports, so test via direct patch
         with patch("memem.embedding_index._embed_text", side_effect=ImportError("not installed")):
             # The function catches ImportError at import time, not at call time.
@@ -620,6 +620,7 @@ def test_handles_embedding_unavailable():
             with patch("builtins.__import__", side_effect=failing_import):
                 # Need fresh import of find_cluster_summaries to trigger the lazy import
                 import importlib as _il
+
                 import memem.dreamer as _dreamer
                 _il.reload(_dreamer)
                 proposals = _dreamer.find_cluster_summaries(mems)

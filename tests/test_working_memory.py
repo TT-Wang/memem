@@ -23,7 +23,6 @@ HOOK = REPO / "hooks" / "post-stop-attribution.sh"
 
 def _wm_module(tmp_path: Path):
     """Return working_memory module with WORKING_MEMORY_FILE pointing to tmp_path."""
-    import importlib
     import memem.working_memory as wm_mod
 
     # Patch the module-level constants to use tmp_path.
@@ -146,9 +145,9 @@ def test_invalid_section_rejected(tmp_path):
     import memem.working_memory as wm_mod
 
     wm_file = tmp_path / "working_memory.md"
-    with mock.patch.object(wm_mod, "WORKING_MEMORY_FILE", wm_file):
-        with pytest.raises(ValueError, match="Invalid section"):
-            wm_mod.update_section("not_a_section", "some body")
+    with mock.patch.object(wm_mod, "WORKING_MEMORY_FILE", wm_file), \
+         pytest.raises(ValueError, match="Invalid section"):
+        wm_mod.update_section("not_a_section", "some body")
 
 
 # ===========================================================================

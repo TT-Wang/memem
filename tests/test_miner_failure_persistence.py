@@ -433,7 +433,7 @@ def test_offset_bytes_persisted_on_first_mine(tmp_cortex_dir, tmp_vault, monkeyp
 def test_subsequent_mining_reads_only_delta(tmp_cortex_dir, tmp_vault, monkeypatch):
     """File grows from 50KB to 80KB; second mine reads only the trailing 30KB (seek check)."""
     import importlib
-    from unittest.mock import MagicMock, call, patch
+    from unittest.mock import patch
 
     from memem import mining, session_state
     importlib.reload(session_state)
