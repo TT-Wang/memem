@@ -761,7 +761,10 @@ def mine_session(jsonl_path: str) -> dict:
     if delta_bytes < _MIN_DELTA_BYTES:
         return {"skipped": True, "reason": f"delta too small ({delta_bytes} bytes)"}
 
-    _mark_session(path, STATUS_IN_PROGRESS, offset_bytes=stored_offset)
+    # M-9: increment attempts NOW (before the Haiku call) so a SIGKILL between
+    # the status-write and the Haiku response doesn't leave attempts un-incremented,
+    # which would let the session re-queue indefinitely and burn Haiku quota.
+    _mark_session(path, STATUS_IN_PROGRESS, attempts=stored_attempts + 1, offset_bytes=stored_offset)
     try:
         if not messages:
             _mark_session(path, STATUS_COMPLETE, "no human messages",

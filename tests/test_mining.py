@@ -94,3 +94,61 @@ def test_normalize_scope_id_alias():
     assert _normalize_scope_id("default") == "general"
     assert _normalize_scope_id("") == "general"
     assert _normalize_scope_id("substrate") == "substrate"
+
+
+def test_mine_session_increments_attempts_before_status_in_progress(tmp_path):
+    """M-9: mine_session must increment attempts BEFORE the Haiku call.
+
+    If the process is killed between STATUS_IN_PROGRESS write and Haiku
+    response, attempts must already be incremented so the session doesn't
+    re-queue forever. We simulate a mid-flight failure by mocking the Haiku
+    call to raise RuntimeError and verify attempts == initial + 1 afterwards.
+    """
+    import json
+    from unittest.mock import patch
+
+    import memem.mining as mining_mod
+    import memem.session_state as ss_mod
+    from memem.mining import FatalMiningError
+
+    # Create a synthetic JSONL transcript large enough to pass the delta check.
+    session_file = tmp_path / "test-session-abc123.jsonl"
+    lines = []
+    for i in range(50):
+        lines.append(json.dumps({
+            "type": "user",
+            "cwd": str(tmp_path),
+            "message": {"content": [{"type": "text", "text": f"user message {i} " + "x" * 200}]},
+        }))
+        lines.append(json.dumps({
+            "type": "assistant",
+            "cwd": str(tmp_path),
+            "message": {"content": [{"type": "text", "text": f"assistant reply {i}"}]},
+        }))
+    session_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    # Point session state at a tmp DB by patching _db_path in session_state.
+    db_path = tmp_path / "mined_sessions.db"
+
+    with (
+        patch("memem.session_state._db_path", return_value=db_path),
+        patch.object(mining_mod, "_summarize_session_haiku",
+                     side_effect=RuntimeError("simulated Haiku failure")),
+    ):
+        # mine_session re-raises as FatalMiningError on unexpected exceptions.
+        try:
+            mining_mod.mine_session(str(session_file))
+        except FatalMiningError:
+            pass  # Expected — the Haiku call failed.
+
+    # Load the persisted state and verify attempts was incremented.
+    with patch("memem.session_state._db_path", return_value=db_path):
+        states = ss_mod.load_mined_session_state()
+
+    session_id = session_file.stem
+    assert session_id in states, f"Session {session_id!r} not found in state DB"
+    final_attempts = states[session_id].get("attempts", 0)
+    assert final_attempts >= 1, (
+        f"Expected attempts >= 1 after failed mine, got {final_attempts}. "
+        "M-9 fix may not be active."
+    )

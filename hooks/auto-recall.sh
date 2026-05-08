@@ -316,6 +316,25 @@ def _save_compaction_timestamps(ts_data: dict) -> None:
         pass
 
 
+def _update_compaction_timestamps(session_id: str, new_ts: str) -> None:
+    """M-8: atomic read-modify-write of compaction timestamps via flock.
+
+    Prevents two concurrent UserPromptSubmit hooks from both reading the old
+    value, both seeing no recent checkpoint, and both writing snapshots.
+    """
+    import fcntl as _fcntl
+    lock_path = COMPACTION_TIMESTAMPS_FILE.parent / ".compaction-timestamps.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a+") as lockf:
+        _fcntl.flock(lockf.fileno(), _fcntl.LOCK_EX)
+        try:
+            ts_data = _load_compaction_timestamps()
+            ts_data[session_id] = new_ts
+            _save_compaction_timestamps(ts_data)
+        finally:
+            _fcntl.flock(lockf.fileno(), _fcntl.LOCK_UN)
+
+
 def _find_transcript_path(session_id: str) -> str:
     """Try to find the JSONL transcript file for the current session."""
     if not session_id:
@@ -382,9 +401,10 @@ def maybe_save_compaction_checkpoint():
         )
         project_id = scope or "general"
         save_compaction_checkpoint(snapshot, session_id, project_id)
-        # Update the timestamp for this session.
-        ts_data[session_id] = _dt.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        _save_compaction_timestamps(ts_data)
+        # M-8: update the timestamp atomically via flock to avoid TOCTOU with
+        # concurrent UserPromptSubmit hooks running in parallel windows.
+        new_ts = _dt.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        _update_compaction_timestamps(session_id, new_ts)
     except Exception:
         pass  # Checkpoint failure must never break slice injection.
 

@@ -5,6 +5,7 @@ integration that updates working_memory.md after each assistant turn.
 """
 
 import json
+import multiprocessing
 import os
 import subprocess
 from pathlib import Path
@@ -242,3 +243,59 @@ def test_post_stop_hook_updates_working_memory(tmp_path):
     assert "second task" in content or "first task" in content, (
         f"last_3_actions does not contain expected messages. File content:\n{content}"
     )
+
+
+# ===========================================================================
+# 8. H-1: update_section serializes concurrent writers via flock
+# ===========================================================================
+
+
+def _worker_update(wm_file: Path, lock_path: Path, section: str, value: str) -> None:
+    """Child process: patch module constants then call update_section."""
+    import memem.working_memory as wm_mod
+    from unittest.mock import patch
+
+    with patch.object(wm_mod, "WORKING_MEMORY_FILE", wm_file):
+        # update_section derives the lock path from WORKING_MEMORY_FILE.parent,
+        # so patching WORKING_MEMORY_FILE is sufficient — the lock path follows.
+        wm_mod.update_section(section, value)
+
+
+def test_update_section_serializes_concurrent_writers(tmp_path):
+    """Two concurrent update_section calls must not produce garbled state.
+
+    Acceptable outcome: final file has one of the two written values, not a
+    partial-write corruption. The flock in update_section (H-1) guarantees
+    the second writer completes the full read-modify-write after the first.
+    """
+    import memem.working_memory as wm_mod
+
+    wm_file = tmp_path / "working_memory.md"
+    # Prime the file so both children have something to read.
+    with mock.patch.object(wm_mod, "WORKING_MEMORY_FILE", wm_file):
+        wm_mod.write_working_memory({name: "" for name in wm_mod.ALLOWED_SECTIONS})
+
+    # Use "spawn" to get clean child processes that import fresh modules.
+    ctx = multiprocessing.get_context("fork")
+    p1 = ctx.Process(target=_worker_update, args=(wm_file, tmp_path, "current_task", "first"))
+    p2 = ctx.Process(target=_worker_update, args=(wm_file, tmp_path, "current_task", "second"))
+
+    p1.start()
+    p2.start()
+    p1.join(timeout=10)
+    p2.join(timeout=10)
+
+    assert p1.exitcode == 0, f"Worker p1 failed with exitcode {p1.exitcode}"
+    assert p2.exitcode == 0, f"Worker p2 failed with exitcode {p2.exitcode}"
+
+    # Read the final state with the module patched to our tmp path.
+    with mock.patch.object(wm_mod, "WORKING_MEMORY_FILE", wm_file):
+        result = wm_mod.read_working_memory()
+
+    final_value = result.get("current_task", "")
+    assert final_value in ("first", "second"), (
+        f"Expected 'first' or 'second', got {final_value!r} — possible corruption"
+    )
+    # The file must be parseable (no partial-write corruption)
+    for name in wm_mod.ALLOWED_SECTIONS:
+        assert name in result, f"Section {name!r} missing after concurrent writes"

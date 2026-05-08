@@ -8,25 +8,16 @@ The working_memory.md is completely separate from the static slice — it tracks
 what's happening *right now* in the session, not what memories are relevant.
 """
 
+import fcntl
 import os
 import tempfile
 from pathlib import Path
 
+from memem.models import MEMEM_DIR  # M-6: use canonical MEMEM_DIR
+
 # ---------------------------------------------------------------------------
 # Path constants
 # ---------------------------------------------------------------------------
-
-_state_env = os.environ.get("MEMEM_DIR") or os.environ.get("CORTEX_DIR") or ""
-if _state_env:
-    MEMEM_DIR = Path(_state_env)
-else:
-    _new_default = Path.home() / ".memem"
-    _legacy_default = Path.home() / ".cortex"
-    MEMEM_DIR = (
-        _legacy_default
-        if (_legacy_default.exists() and not _new_default.exists())
-        else _new_default
-    )
 
 WORKING_MEMORY_FILE = MEMEM_DIR / "working_memory.md"
 
@@ -124,14 +115,25 @@ def update_section(section: str, body: str) -> None:
     """Read, update one section, write atomically.
 
     Section must be one of the 5 ALLOWED_SECTIONS. Raises ValueError otherwise.
+
+    H-1: wraps the read-modify-write in an exclusive flock on a sidecar
+    lockfile so concurrent post-stop hooks (multiple Claude Code windows
+    finishing simultaneously) don't silently overwrite each other's updates.
     """
     if section not in ALLOWED_SECTIONS:
         raise ValueError(
             f"Invalid section {section!r}. Must be one of: {', '.join(ALLOWED_SECTIONS)}"
         )
-    current = read_working_memory()
-    # Ensure all sections are present (read may return {} if file missing)
-    for name in ALLOWED_SECTIONS:
-        current.setdefault(name, "")
-    current[section] = body
-    write_working_memory(current)
+    lock_path = WORKING_MEMORY_FILE.parent / ".working-memory.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a+") as lockf:
+        fcntl.flock(lockf.fileno(), fcntl.LOCK_EX)
+        try:
+            current = read_working_memory()
+            # Ensure all sections are present (read may return {} if file missing)
+            for name in ALLOWED_SECTIONS:
+                current.setdefault(name, "")
+            current[section] = body
+            write_working_memory(current)
+        finally:
+            fcntl.flock(lockf.fileno(), fcntl.LOCK_UN)
