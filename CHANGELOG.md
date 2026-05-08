@@ -10,6 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
 
+## [1.5.1] - 2026-05-08
+
+Patch release applying the four warnings from v1.5.0's final release review.
+See the "Post-release (v1.5.1) — final-review followups" section under v1.5.0
+below for the changes.
+
 ## [1.5.0] - 2026-05-08
 
 ### Added — boundary-crossing batch (m1 m2 m3 m4)
@@ -48,11 +54,23 @@ that crosses vault registries, and mining that starts the moment a session ends.
 ### Fixed — post-merge hardening
 
 - **Hook shell-interpolation surface:** session_id now passed via env var
-  (`MEMEM_SESSION_ID`) rather than shell-interpolated in `python3 -c`,
+  (`MEMEM_STOP_SESSION_ID`) rather than shell-interpolated in `python3 -c`,
   eliminating any injection surface from session path characters.
 - **m1 budget enforcement:** join separator cost is now accounted for when
   enforcing `MEMEM_SESSION_START_BUDGET`, preventing off-by-one overruns on
   dense briefing sections.
+
+### Post-release (v1.5.1) — final-review followups
+
+- **Stop hook timeout:** raised from 35s to 100s to give `mine_session_delta`
+  room to finish its Haiku call on cold hosts (35s was cutting mining short
+  before it could report success). Mine-on-stop now reliably finishes
+  per-session instead of falling back to the daemon's next poll.
+- **Budget env-var alias:** `generate_session_start_slice` now honors the
+  legacy `MEMEM_SESSION_START_PROMPT_BUDGET` env var as a fallback for
+  `MEMEM_SESSION_START_BUDGET`, so pre-m1 configs keep working.
+- **Daemon log path:** `start_daemon` failure message now points at the real
+  `~/.memem/miner.log` instead of the stale pre-rename `~/.cortex/miner.log`.
 
 ### Stats
 

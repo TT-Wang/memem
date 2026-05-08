@@ -708,8 +708,16 @@ def generate_session_start_slice(
 
 
 def _parse_session_start_budget() -> int:
-    """Return char budget for session-start slice from env var (default 2000)."""
-    raw = os.environ.get("MEMEM_SESSION_START_BUDGET", "2000").strip()
+    """Return char budget for session-start slice from env var (default 2000).
+
+    MEMEM_SESSION_START_BUDGET is preferred. MEMEM_SESSION_START_PROMPT_BUDGET
+    is honored as a legacy alias so configs from the pre-m1 hook keep working.
+    """
+    raw = (
+        os.environ.get("MEMEM_SESSION_START_BUDGET")
+        or os.environ.get("MEMEM_SESSION_START_PROMPT_BUDGET")
+        or "2000"
+    ).strip()
     try:
         val = int(raw)
         return max(100, val)

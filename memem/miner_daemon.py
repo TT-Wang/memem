@@ -285,7 +285,7 @@ def start_daemon():
         if child_pid:
             print(f"Miner daemon started (PID {child_pid})")
         else:
-            print("Failed to start daemon — check ~/.cortex/miner.log")
+            print(f"Failed to start daemon — check {LOG_FILE}")
         return
 
     os.setsid()
