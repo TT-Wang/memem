@@ -252,8 +252,9 @@ def test_post_stop_hook_updates_working_memory(tmp_path):
 
 def _worker_update(wm_file: Path, lock_path: Path, section: str, value: str) -> None:
     """Child process: patch module constants then call update_section."""
-    import memem.working_memory as wm_mod
     from unittest.mock import patch
+
+    import memem.working_memory as wm_mod
 
     with patch.object(wm_mod, "WORKING_MEMORY_FILE", wm_file):
         # update_section derives the lock path from WORKING_MEMORY_FILE.parent,

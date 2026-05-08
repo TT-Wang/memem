@@ -1,5 +1,5 @@
 """Tests for now_iso() and parse_iso_dt() in memem/models.py."""
-from datetime import UTC, datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 
 
 def test_now_iso_round_trips_to_datetime():

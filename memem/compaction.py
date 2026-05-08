@@ -181,9 +181,10 @@ def _build_code_changes(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _load_decision_memories(session_id: str) -> list[dict[str, Any]]:
     """Return last 5 decision memories for the given session_id.
 
-    Filters _obsidian_memories() by kind:decision tag OR kind='decision'.
-    Since the current schema stores kind in tags, we check for the 'decision'
-    tag.  session_id match is checked via source_session field.
+    Filters _obsidian_memories() by the bare 'decision' tag (canonical
+    encoding per M-15 cleanup — the 'kind:<value>' prefix is reserved
+    for compaction-checkpoint and similar).
+    session_id match is checked via source_session field.
     """
     try:
         from memem.obsidian_store import _obsidian_memories
