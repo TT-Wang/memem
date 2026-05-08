@@ -106,15 +106,27 @@ environment = {
 }
 
 try:
-    from memem.active_slice_engine import generate_prompt_context
+    from memem.active_slice_engine import generate_session_start_slice
 
-    content = generate_prompt_context(
-        query,
+    content = generate_session_start_slice(
         scope_id=scope,
-        environment=environment,
-        use_llm=False,
-        mode="slice",
+        session_id=session_id,
+        memem_dir=str(memem_dir),
     )
+except ImportError:
+    # Fallback: generate_session_start_slice not available — use legacy function
+    try:
+        from memem.active_slice_engine import generate_prompt_context
+
+        content = generate_prompt_context(
+            query,
+            scope_id=scope,
+            environment=environment,
+            use_llm=False,
+            mode="slice",
+        )
+    except Exception:
+        content = ""
 except Exception:
     content = ""
 

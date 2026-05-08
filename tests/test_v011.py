@@ -201,8 +201,18 @@ def test_session_start_hook_uses_slice_projection(tmp_path):
 
     payload = json.loads(result.stdout)
     ctx = payload["hookSpecificOutput"]["additionalContext"]
-    assert "# Active Memory Slice" in ctx
-    assert "## Goals" in ctx
+    # v1.5.0: SessionStart now calls generate_session_start_slice() which
+    # produces session-start section headers instead of the old slice format.
+    session_start_markers = [
+        "L0 anchors",
+        "Prior working memory",
+        "Recent decisions",
+        "Active arcs",
+        "Compaction checkpoint",
+    ]
+    assert any(marker in ctx for marker in session_start_markers), (
+        f"Expected session-start section headers in ctx. Got:\n{ctx!r}"
+    )
 
 
 @skip_on_ci

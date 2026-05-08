@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
 from memem.activation import judge_activation_heuristically, judge_activation_with_llm
@@ -612,6 +613,304 @@ def record_slice_attribution(slice_data: dict, response_text: str) -> None:
         agg = aggregate_signals(emb, cite, judge)
 
         log_slice_attribution(slice_id, mem_id, emb, cite, judge, agg)
+
+
+def generate_session_start_slice(
+    scope_id: str,
+    session_id: str,
+    memem_dir: str | None = None,
+) -> str:
+    """Generate a structured 'where we left off' briefing for SessionStart hook injection.
+
+    Sections (in priority order):
+      1. Prior working memory  — highest priority; trimmed to ~600 chars/section
+      2. Recent decisions       — top 3 with kind='decision' or tag 'decision', last 7 days
+      3. Active arcs            — memories with arc_id set and not closed
+      4. L0 anchors             — always included via _gather_l0_anchors
+      5. Compaction checkpoint  — most recent in last 24h (tagged kind:compaction-checkpoint)
+
+    Char budget: MEMEM_SESSION_START_BUDGET env var, default 2000.
+    """
+    from pathlib import Path as _Path
+
+    from memem.models import _normalize_scope_id
+
+    budget = _parse_session_start_budget()
+    normalized_scope = _normalize_scope_id(scope_id)
+    memem_dir_path = _Path(memem_dir) if memem_dir else None
+
+    # -------------------------------------------------------------------
+    # Section 1: Prior working memory
+    # -------------------------------------------------------------------
+    wm_sections = _read_working_memory_for_slice(memem_dir_path)
+    wm_block = _render_working_memory_block(wm_sections)
+
+    # -------------------------------------------------------------------
+    # Section 2: Recent decisions (last 7 days, top 3 by strength)
+    # -------------------------------------------------------------------
+    decisions_block = _render_decisions_block(normalized_scope)
+
+    # -------------------------------------------------------------------
+    # Section 3: Active arcs
+    # -------------------------------------------------------------------
+    arcs_block = _render_active_arcs_block(normalized_scope)
+
+    # -------------------------------------------------------------------
+    # Section 4: L0 anchors
+    # -------------------------------------------------------------------
+    l0_block = _render_l0_block(normalized_scope)
+
+    # -------------------------------------------------------------------
+    # Section 5: Compaction checkpoint
+    # -------------------------------------------------------------------
+    checkpoint_block = _render_checkpoint_block(normalized_scope, session_id)
+
+    # -------------------------------------------------------------------
+    # Budget enforcement: working_memory is highest priority
+    # -------------------------------------------------------------------
+    parts = [
+        ("working_memory", wm_block),
+        ("decisions", decisions_block),
+        ("arcs", arcs_block),
+        ("l0_anchors", l0_block),
+        ("checkpoint", checkpoint_block),
+    ]
+
+    output_parts: list[str] = []
+    chars_used = 0
+
+    for section_name, block in parts:
+        if not block:
+            continue
+        block_len = len(block)
+        remaining = budget - chars_used
+        if section_name == "working_memory":
+            # working_memory is never cut unless it alone exceeds budget
+            if block_len > budget:
+                block = block[:budget]
+                block_len = budget
+            output_parts.append(block)
+            chars_used += block_len
+        else:
+            if remaining <= 0:
+                break
+            if block_len > remaining:
+                block = block[:remaining]
+                block_len = remaining
+            output_parts.append(block)
+            chars_used += block_len
+
+    return "\n\n".join(p for p in output_parts if p)
+
+
+def _parse_session_start_budget() -> int:
+    """Return char budget for session-start slice from env var (default 2000)."""
+    raw = os.environ.get("MEMEM_SESSION_START_BUDGET", "2000").strip()
+    try:
+        val = int(raw)
+        return max(100, val)
+    except ValueError:
+        return 2000
+
+
+def _read_working_memory_for_slice(memem_dir: Any | None) -> dict[str, str]:
+    """Read working memory, optionally overriding MEMEM_DIR for test isolation."""
+    try:
+        import memem.working_memory as wm_mod
+
+        if memem_dir is not None:
+            from pathlib import Path as _Path
+            wm_file = _Path(memem_dir) / "working_memory.md"
+            # Read directly without relying on module-level WORKING_MEMORY_FILE
+            if not wm_file.exists():
+                return {}
+            try:
+                text = wm_file.read_text(encoding="utf-8")
+                return wm_mod.parse_from_md(text)
+            except OSError:
+                return {}
+        else:
+            return wm_mod.read_working_memory()
+    except Exception:
+        return {}
+
+
+_WM_SECTION_LABELS = {
+    "current_task": "Current task",
+    "active_hypothesis": "Active hypothesis",
+    "last_3_actions": "Last 3 actions",
+    "stuck_on": "Stuck on",
+    "decided_this_session": "Decided this session",
+}
+
+_WM_SECTION_CAP = 600
+
+
+def _render_working_memory_block(sections: dict[str, str]) -> str:
+    """Render non-empty working memory sections, each capped at _WM_SECTION_CAP chars."""
+    if not sections:
+        return ""
+    parts = ["## Prior working memory"]
+    for key, label in _WM_SECTION_LABELS.items():
+        body = sections.get(key, "").strip()
+        if body:
+            if len(body) > _WM_SECTION_CAP:
+                body = body[:_WM_SECTION_CAP]
+            parts.append(f"**{label}:** {body}")
+    if len(parts) == 1:
+        return ""
+    return "\n\n".join(parts)
+
+
+def _render_decisions_block(normalized_scope: str) -> str:
+    """Render top-3 decision memories from the last 7 days, ranked by decay strength."""
+    from datetime import UTC, datetime, timedelta
+
+    try:
+        from memem import decay as _decay_mod
+        from memem.obsidian_store import _obsidian_memories
+    except Exception:
+        return ""
+
+    now = datetime.now(UTC)
+    cutoff = now - timedelta(days=7)
+
+    all_mems = _obsidian_memories()
+    decision_mems: list[dict[str, Any]] = []
+    for mem in all_mems:
+        tags = mem.get("domain_tags") or []
+        has_decision = "decision" in tags or "kind:decision" in tags
+        if not has_decision:
+            continue
+        # Check recency: parse created_at
+        created_str = mem.get("created_at", "") or ""
+        created_dt = _parse_iso_dt(created_str)
+        if created_dt is not None and created_dt < cutoff:
+            continue
+        decision_mems.append(mem)
+
+    # Rank by compute_strength (access_count * recency_decay)
+    def _score(mem: dict) -> float:
+        try:
+            return _decay_mod.compute_strength(mem, now=now)
+        except Exception:
+            return 0.0
+
+    decision_mems.sort(key=_score, reverse=True)
+    top3 = decision_mems[:3]
+
+    if not top3:
+        return ""
+
+    lines = ["## Recent decisions"]
+    for mem in top3:
+        title = mem.get("title", "Untitled")
+        essence = (mem.get("essence") or mem.get("full_record", ""))[:300]
+        lines.append(f"- **{title}**: {essence}")
+    return "\n\n".join(lines[:1]) + "\n" + "\n".join(lines[1:])
+
+
+def _render_active_arcs_block(normalized_scope: str) -> str:
+    """Render memories with arc_id set and not closed (no 'closed' tag, no closed=True field)."""
+    try:
+        from memem.obsidian_store import _obsidian_memories
+    except Exception:
+        return ""
+
+    all_mems = _obsidian_memories()
+    arc_mems: list[dict[str, Any]] = []
+    for mem in all_mems:
+        arc_id = mem.get("arc_id") or ""
+        if not arc_id:
+            continue
+        # Skip if closed
+        tags = mem.get("domain_tags") or []
+        if "closed" in tags:
+            continue
+        if mem.get("closed") is True or str(mem.get("closed", "")).lower() == "true":
+            continue
+        arc_mems.append(mem)
+
+    if not arc_mems:
+        return ""
+
+    lines = ["## Active arcs"]
+    for mem in arc_mems:
+        title = mem.get("title", "Untitled")
+        content = (mem.get("essence") or mem.get("full_record", ""))[:200]
+        arc_id = mem.get("arc_id", "")
+        lines.append(f"- **[arc:{arc_id}] {title}**: {content}")
+    return "\n\n".join(lines[:1]) + "\n" + "\n".join(lines[1:])
+
+
+def _render_l0_block(normalized_scope: str) -> str:
+    """Render L0 anchor memories for the given scope."""
+    anchors = _gather_l0_anchors(normalized_scope)
+    if not anchors:
+        return "## L0 anchors\n\n(none for scope)"
+
+    lines = ["## L0 anchors"]
+    for anchor in anchors:
+        title = anchor.get("title", "Untitled")
+        content = (anchor.get("content", "") or "")[:200]
+        lines.append(f"- **{title}**: {content}")
+    return "\n\n".join(lines[:1]) + "\n" + "\n".join(lines[1:])
+
+
+def _render_checkpoint_block(normalized_scope: str, session_id: str) -> str:
+    """Render the most recent compaction checkpoint from the last 24h."""
+    from datetime import UTC, datetime, timedelta
+
+    try:
+        from memem.obsidian_store import _obsidian_memories
+    except Exception:
+        return ""
+
+    now = datetime.now(UTC)
+    cutoff = now - timedelta(hours=24)
+
+    all_mems = _obsidian_memories()
+    checkpoints: list[dict[str, Any]] = []
+    for mem in all_mems:
+        tags = mem.get("domain_tags") or []
+        if "kind:compaction-checkpoint" not in tags:
+            continue
+        # Check project matches
+        from memem.models import _normalize_scope_id as _nsi
+        mem_project = _nsi(str(mem.get("project", "general") or "general"))
+        if mem_project != normalized_scope and normalized_scope != "general":
+            continue
+        # Check recency
+        created_str = mem.get("created_at", "") or ""
+        created_dt = _parse_iso_dt(created_str)
+        if created_dt is not None and created_dt < cutoff:
+            continue
+        checkpoints.append(mem)
+
+    if not checkpoints:
+        return ""
+
+    # Sort by created_at descending, take most recent
+    checkpoints.sort(key=lambda m: m.get("created_at", "") or "", reverse=True)
+    latest = checkpoints[0]
+
+    title = latest.get("title", "Compaction checkpoint")
+    essence = (latest.get("essence") or latest.get("full_record", ""))[:600]
+    return f"## Compaction checkpoint\n\n**{title}**\n\n{essence}"
+
+
+def _parse_iso_dt(ts: str) -> datetime | None:
+    """Parse ISO datetime string, returning None on failure."""
+    if not ts:
+        return None
+    try:
+        normalized = ts.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(normalized)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=UTC)
+        return dt
+    except (ValueError, TypeError):
+        return None
 
 
 def active_slice_response(
