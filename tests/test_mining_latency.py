@@ -11,13 +11,9 @@ Covers:
 
 import importlib
 import json
-import os
-from pathlib import Path
-from unittest import mock
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -182,10 +178,9 @@ def test_mine_session_delta_respects_offset_bytes(tmp_path, monkeypatch):
 
     # Patch Haiku to return empty memories so mine_session completes quickly.
     # Also patch _generate_index to avoid Obsidian vault setup.
-    with patch("memem.mining._summarize_session_haiku", return_value=[]):
-        with patch("memem.mining._generate_index"):
-            from memem.mining import mine_session_delta
-            result1 = mine_session_delta(session_id)
+    with patch("memem.mining._summarize_session_haiku", return_value=[]), patch("memem.mining._generate_index"):
+        from memem.mining import mine_session_delta
+        result1 = mine_session_delta(session_id)
 
     # First call: not skipped with "session not found" — must have found it
     assert result1.get("reason") != "session not found", (
@@ -272,7 +267,7 @@ def test_has_retryable_mixed():
 
 def test_compute_sleep_cap_with_retryable(monkeypatch):
     """With retryable sessions present, sleep_seconds cannot exceed 900."""
-    from memem.miner_daemon import compute_sleep_cap, BACKOFF_MAX_SECONDS
+    from memem.miner_daemon import BACKOFF_MAX_SECONDS, compute_sleep_cap
     from memem.miner_protocol import STATUS_FAILED
 
     assert BACKOFF_MAX_SECONDS == 1800  # sanity check
@@ -288,7 +283,7 @@ def test_compute_sleep_cap_with_retryable(monkeypatch):
 
 def test_compute_sleep_cap_all_terminal():
     """With all terminal sessions, sleep_seconds can reach 1800."""
-    from memem.miner_daemon import compute_sleep_cap, BACKOFF_MAX_SECONDS
+    from memem.miner_daemon import BACKOFF_MAX_SECONDS, compute_sleep_cap
     from memem.miner_protocol import STATUS_COMPLETE
 
     states = {
@@ -301,7 +296,7 @@ def test_compute_sleep_cap_all_terminal():
 
 def test_compute_sleep_cap_no_sessions():
     """Empty states dict → no retryable sessions → full cap allowed."""
-    from memem.miner_daemon import compute_sleep_cap, BACKOFF_MAX_SECONDS
+    from memem.miner_daemon import BACKOFF_MAX_SECONDS, compute_sleep_cap
 
     result = compute_sleep_cap(1800, {})
     assert result == BACKOFF_MAX_SECONDS

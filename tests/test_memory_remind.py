@@ -10,10 +10,8 @@ Covers:
 
 from __future__ import annotations
 
-import importlib
 import re
 from pathlib import Path
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -24,7 +22,7 @@ def _write_memory_md(memories_dir: Path, filename: str, title: str, content: str
     """Write a minimal valid memory markdown file for testing."""
     import uuid
     mem_id = str(uuid.uuid4())
-    slug = filename.replace(".md", "")
+    _slug = filename.replace(".md", "")
     md = f"""---
 id: {mem_id}
 title: "{title}"

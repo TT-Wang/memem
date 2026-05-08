@@ -11,12 +11,10 @@ Tests:
 
 import importlib
 import json
-import os
 import sys
 from pathlib import Path
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -176,7 +174,6 @@ def test_build_compaction_snapshot_all_sections(tmp_path, tmp_cortex_dir):
         encoding="utf-8",
     )
 
-    from memem.working_memory import WORKING_MEMORY_FILE
     # Patch the working memory path if needed via monkeypatch is not available here
     # but working_memory reads from MEMEM_DIR which is set by tmp_cortex_dir fixture.
     importlib.reload(importlib.import_module("memem.working_memory"))
@@ -344,7 +341,7 @@ def test_kind_survives_normalization_roundtrip(tmp_path, tmp_vault, tmp_cortex_d
         memem_dir=tmp_cortex_dir,
     )
 
-    memory_id = save_compaction_checkpoint(
+    _ = save_compaction_checkpoint(
         snapshot=snapshot,
         session_id="e2e-session",
         project_id="general",
@@ -361,7 +358,7 @@ def test_kind_survives_normalization_roundtrip(tmp_path, tmp_vault, tmp_cortex_d
     ]
 
     assert len(checkpoint_mems) >= 1, (
-        f"No memories with kind:compaction-checkpoint found. All mems: "
+        "No memories with kind:compaction-checkpoint found. All mems: "
         + str([(m.get("id", "")[:8], m.get("domain_tags")) for m in all_mems])
     )
 

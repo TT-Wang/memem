@@ -10,6 +10,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
 
+## [1.5.0] - 2026-05-08
+
+### Added — boundary-crossing batch (m1 m2 m3 m4)
+
+Four modules that push memem past single-session boundaries — sessions that
+know where they left off, compaction that survives context exhaustion, recall
+that crosses vault registries, and mining that starts the moment a session ends.
+
+- **m1 — SessionStart dense briefing:** new `generate_session_start_slice()`
+  produces a structured ~2K-token "where we left off" briefing: working memory
+  + recent decisions + active arcs + L0 anchors + recent compaction checkpoint.
+  Replaces the encyclopedic SessionStart dump. Configurable via
+  `MEMEM_SESSION_START_BUDGET`. ImportError-safe fallback to
+  `generate_prompt_context`.
+
+- **m2 — Compaction-survivor checkpoint:** new `memem/compaction.py` polls
+  context-usage during UserPromptSubmit; when estimated usage reaches
+  `MEMEM_COMPACTION_THRESHOLD` (default 0.80) of the 200K-token window,
+  snapshots working memory + last 5 decisions + open tensions + last 5
+  code-changes as a `kind:compaction-checkpoint` memory. 60-min per-session
+  cooldown. SessionStart slice (m1) re-injects these post-compaction.
+
+- **m3 — `memory_remind` MCP tool (cross-vault recall):** new
+  `memem/cross_vault.py` + `memem/vault_registry.py` + new
+  `memory_remind(local_context_summary, max_results=3)` MCP tool. Searches
+  across all vaults registered in `~/.memem/vaults.json` (default-on: synthetic
+  single-vault entry when no registry file exists). Each hit includes a
+  `why_relevant` rationale with similarity score.
+
+- **m4 — Mining latency on session-end:** Stop hook now triggers
+  `mine_session_delta(session_id)` immediately on first stop per session (with
+  marker-file dedup, `MEMEM_MINE_TIMEOUT` guard, 60s default). Daemon backoff
+  cap tightened to 900s when retryable sessions exist (was 1800s); falls back
+  to 1800s when all sessions are terminal.
+
+### Fixed — post-merge hardening
+
+- **Hook shell-interpolation surface:** session_id now passed via env var
+  (`MEMEM_SESSION_ID`) rather than shell-interpolated in `python3 -c`,
+  eliminating any injection surface from session path characters.
+- **m1 budget enforcement:** join separator cost is now accounted for when
+  enforcing `MEMEM_SESSION_START_BUDGET`, preventing off-by-one overruns on
+  dense briefing sections.
+
+### Stats
+
+- 4 new modules: `memem/compaction.py`, `memem/cross_vault.py`,
+  `memem/vault_registry.py`, `generate_session_start_slice()` in session-start
+- Both hooks updated (Stop hook, UserPromptSubmit hook)
+- mypy clean
+- ruff clean
+
 ## [1.4.0] - 2026-05-07
 
 ### Added — six-module batch closing the recall→action gap
@@ -1001,6 +1053,12 @@ v0.8.0 session unless `MEMEM_NO_AUTO_MINE=1` is set.
 - Keyword search with containment scoring
 - CLAUDE.md integration for LLM instructions
 
+[1.5.0]: https://github.com/TT-Wang/memem/releases/tag/v1.5.0
+[1.4.0]: https://github.com/TT-Wang/memem/releases/tag/v1.4.0
+[1.3.0]: https://github.com/TT-Wang/memem/releases/tag/v1.3.0
+[1.2.2]: https://github.com/TT-Wang/memem/releases/tag/v1.2.2
+[1.2.1]: https://github.com/TT-Wang/memem/releases/tag/v1.2.1
+[0.11.0]: https://github.com/TT-Wang/memem/releases/tag/v0.11.0
 [0.7.0]: https://github.com/TT-Wang/memem/releases/tag/v0.7.0
 [0.6.0]: https://github.com/TT-Wang/memem/releases/tag/v0.6.0
 [0.5.0]: https://github.com/TT-Wang/cortex-plugin/releases/tag/v0.5.0

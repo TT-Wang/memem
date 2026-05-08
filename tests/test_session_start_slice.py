@@ -13,14 +13,11 @@ Covers:
 from __future__ import annotations
 
 import importlib
-import os
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any
 from unittest import mock
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -123,8 +120,8 @@ def test_session_start_slice_differs_structurally(tmp_vault, tmp_cortex_dir, mon
 def test_working_memory_content_in_output(tmp_vault, tmp_cortex_dir, monkeypatch):
     """working_memory.md content appears in generate_session_start_slice output."""
     monkeypatch.setenv("MEMEM_SESSION_START_BUDGET", "8000")
-    import memem.working_memory as wm_mod
     import memem.obsidian_store as obs
+    import memem.working_memory as wm_mod
     importlib.reload(obs)
 
     wm_file = tmp_cortex_dir / "working_memory.md"
@@ -347,10 +344,9 @@ def test_char_budget_honored(tmp_vault, tmp_cortex_dir, monkeypatch):
     import memem.obsidian_store as obs
     importlib.reload(obs)
 
-    from memem.active_slice_engine import generate_session_start_slice
-
     # Write a large working memory to stress the budget
     import memem.working_memory as wm_mod
+    from memem.active_slice_engine import generate_session_start_slice
     wm_file = tmp_cortex_dir / "working_memory.md"
     big_sections = {
         "current_task": "A" * 1000,
