@@ -492,6 +492,44 @@ def _mine_session(jsonl_path: Path) -> tuple[int, bool]:
         return 0, False
 
 
+def has_retryable_sessions(states: dict) -> bool:
+    """Return True if any session can still make forward progress.
+
+    A session is "retryable" when it is not yet terminal AND it has not
+    exhausted the hard retry cap.  Terminal means STATUS_COMPLETE or
+    HARD_RETRY_CAP attempts reached.
+
+    Used by ``compute_sleep_cap`` to decide whether the daemon should
+    back off aggressively (no retryable sessions → allow up to
+    BACKOFF_MAX_SECONDS) or stay responsive (cap at half the max).
+    """
+    from memem.session_state import HARD_RETRY_CAP  # noqa: PLC0415
+
+    for state in states.values():
+        status = state.get("status", "")
+        attempts = int(state.get("attempts", 0) or 0)
+        if status != STATUS_COMPLETE and attempts < HARD_RETRY_CAP:
+            return True
+    return False
+
+
+def compute_sleep_cap(sleep_seconds: int, states: dict) -> int:
+    """Return the sleep duration capped by the retryable-session heuristic.
+
+    If any session is retryable (``has_retryable_sessions`` returns True),
+    the cap is ``BACKOFF_MAX_SECONDS // 2`` (900s) so the daemon checks
+    back sooner.  When all sessions are terminal, allow the full
+    ``BACKOFF_MAX_SECONDS`` (1800s) because there is nothing useful to do
+    sooner.
+
+    This is a pure function — no I/O, no side-effects — so it can be
+    unit-tested without spinning up the real daemon.
+    """
+    if has_retryable_sessions(states):
+        return min(sleep_seconds, BACKOFF_MAX_SECONDS // 2)
+    return min(sleep_seconds, BACKOFF_MAX_SECONDS)
+
+
 def _seed_failure_counts_from_state(states: dict) -> dict[str, int]:
     """Seed the in-memory failure counter from persisted session state.
 
@@ -642,6 +680,15 @@ def _run_loop():
             raise SystemExit(FATAL_EXIT_CODE)
         except Exception as exc:
             log.error("loop_error", error=str(exc))
+
+        # Tighten backoff when retryable sessions are present so the daemon
+        # checks back sooner rather than sleeping for the full 1800s cap.
+        # Uses a fresh state snapshot so newly-added sessions are reflected.
+        try:
+            _current_states = load_mined_session_state()
+            sleep_seconds = compute_sleep_cap(sleep_seconds, _current_states)
+        except Exception:
+            pass  # non-fatal — worst case we sleep a bit longer
 
         time.sleep(sleep_seconds)
 

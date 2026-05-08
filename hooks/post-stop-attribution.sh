@@ -26,6 +26,7 @@ set -euo pipefail
 MEMEM_DIR="${MEMEM_DIR:-${CORTEX_DIR:-$HOME/.memem}}"
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
 ATTRIBUTION_TIMEOUT="${MEMEM_ATTRIBUTION_TIMEOUT:-30}"
+MEMEM_MINE_TIMEOUT="${MEMEM_MINE_TIMEOUT:-60}"
 
 if [ -z "$PLUGIN_ROOT" ] || [ "$PLUGIN_ROOT" = '${CLAUDE_PLUGIN_ROOT}' ]; then
     # Plugin root unset — degrade silently.
@@ -176,5 +177,39 @@ except Exception:
     # never break — this is best-effort
     pass
 HOOKPY
+
+# 5. Mine-on-stop: trigger incremental mining for this session immediately
+#    instead of waiting for the daemon's next poll cycle. Uses a marker file
+#    to avoid double-mining the same session if the hook fires more than once.
+if [ -n "$PLUGIN_ROOT" ] && [ "$PLUGIN_ROOT" != '${CLAUDE_PLUGIN_ROOT}' ]; then
+    # Extract session_id from the hook input we already read above.
+    _STOP_SESSION_ID=$(python3 -c "
+import json, sys
+try:
+    data = json.loads(open('$INPUT_FILE').read() or '{}')
+    print(data.get('session_id', ''))
+except Exception:
+    print('')
+" 2>/dev/null || true)
+
+    if [ -n "$_STOP_SESSION_ID" ]; then
+        _STOP_MARKER_DIR="$HOME/.memem/.stop-timestamps"
+        _STOP_MARKER="$_STOP_MARKER_DIR/$_STOP_SESSION_ID.ts"
+        if [ ! -f "$_STOP_MARKER" ]; then
+            # Not yet mined on stop — fire mine_session_delta under a timeout.
+            # Failures are logged but never crash the hook.
+            mkdir -p "$_STOP_MARKER_DIR"
+            mkdir -p "$HOME/.memem/logs"
+            timeout "${MEMEM_MINE_TIMEOUT}" "${MEMEM_PYTHON:-python3}" -c "
+import sys
+sys.path.insert(0, '$PLUGIN_ROOT')
+from memem.mining import mine_session_delta
+result = mine_session_delta('$_STOP_SESSION_ID')
+print(result)
+" >> "$HOME/.memem/logs/mine-on-stop.log" 2>&1 || true
+            touch "$_STOP_MARKER"
+        fi
+    fi
+fi
 
 exit 0

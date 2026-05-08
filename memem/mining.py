@@ -926,6 +926,31 @@ def mine_session(jsonl_path: str) -> dict:
         raise FatalMiningError(f"unexpected mining failure: {exc}") from exc
 
 
+def mine_session_delta(session_id: str) -> dict:
+    """Thin wrapper: resolve a session_id to its JSONL path then call mine_session.
+
+    Scans SESSIONS_DIRS for a file named ``{session_id}.jsonl``.  If found,
+    delegates entirely to ``mine_session(str(path))`` — all existing logic
+    (offset_bytes, retry caps, STATUS_COMPLETE short-circuit) is preserved.
+
+    Returns the result dict from ``mine_session``, or
+    ``{"skipped": True, "reason": "session not found"}`` when no matching
+    JSONL is found.
+    """
+    from memem.session_state import SESSIONS_DIRS  # noqa: PLC0415
+
+    filename = f"{session_id}.jsonl"
+    for sessions_dir in SESSIONS_DIRS:
+        candidate = sessions_dir / filename
+        if candidate.exists():
+            return mine_session(str(candidate))
+        # Also search one level down (sessions are nested under project dirs)
+        for match in sessions_dir.rglob(filename):
+            return mine_session(str(match))
+
+    return {"skipped": True, "reason": "session not found"}
+
+
 def mine_all(bypass_gate: bool = True) -> dict:
     """Mine every settled session.
 
