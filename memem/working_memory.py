@@ -11,7 +11,6 @@ what's happening *right now* in the session, not what memories are relevant.
 import fcntl
 import os
 import tempfile
-from pathlib import Path
 
 from memem.models import MEMEM_DIR  # M-6: use canonical MEMEM_DIR
 
