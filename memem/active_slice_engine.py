@@ -609,7 +609,7 @@ def record_slice_attribution(slice_data: dict, response_text: str) -> None:
 
         emb = embedding_similarity(essence, response_text)
         cite = citation_match(mem_id, title, response_text, memory_essence=essence)
-        judge = judge_score(essence, response_text, slice_data.get("query", "")) if should_run_judge() else None
+        judge = judge_score(essence, response_text, slice_data.get("query", "")) if should_run_judge() else None  # always None — stub, see judge_score docstring
         agg = aggregate_signals(emb, cite, judge)
 
         log_slice_attribution(slice_id, mem_id, emb, cite, judge, agg)

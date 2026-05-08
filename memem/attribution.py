@@ -12,9 +12,12 @@ References:
 """
 from __future__ import annotations
 
+import logging
 import os
 import random
 import re
+
+log = logging.getLogger("memem-attribution")
 
 # 8-char id mention pattern, e.g. "[abc12345]" or "abc12345..." in plain text.
 _ID_MENTION_RE = re.compile(r"\b[a-f0-9]{8}\b")
@@ -90,13 +93,28 @@ def should_run_judge(sample_rate: float | None = None) -> bool:
     return random.random() < sample_rate
 
 
-def judge_score(memory_essence: str, response_text: str, query: str) -> float | None:
-    """LLM-judge whether the memory influenced the response. Returns None on
-    failure or skip. Returns float in [0,1] on success.
+_judge_score_stub_warned = False
 
-    For m2: returns None (skeleton) — m4 dreamer wires the actual Sonnet call.
-    Keeping the signature stable so m3+ can integrate without further changes.
+
+def judge_score(memory_essence: str, response_text: str, query: str) -> float | None:
+    """LLM-judge memory<->response attribution score.
+
+    **STUB:** This function is a permanent placeholder until the LLM-judge
+    integration ships. It always returns None, which causes the
+    aggregate_signals() pipeline to skip the LLM-judge signal and rely on
+    the embedding-similarity + citation-regex signals alone.
+
+    Callers should treat None as "judge not available" rather than "judge
+    says irrelevant" — there is no relevance information from this signal
+    until the stub is replaced.
     """
+    global _judge_score_stub_warned
+    if not _judge_score_stub_warned:
+        log.info(
+            "judge_score is a stub — LLM-judge attribution disabled; "
+            "aggregate_signals will rely on embedding + citation only"
+        )
+        _judge_score_stub_warned = True
     return None
 
 
