@@ -288,6 +288,109 @@ if working_md_path.exists():
 
 final_context = working_block + output_context
 
+# ---------------------------------------------------------------------------
+# Compaction checkpoint — polled here because Claude Code has no PreCompact hook.
+# If the transcript is at/over the risk threshold AND no checkpoint was saved
+# in the last 60 minutes for this session, save one now.
+# ---------------------------------------------------------------------------
+COMPACTION_TIMESTAMPS_FILE = memem_dir / ".compaction-checkpoint-timestamps.json"
+COMPACTION_COOLDOWN_SECONDS = 3600  # 60 minutes
+
+
+def _load_compaction_timestamps() -> dict:
+    try:
+        if COMPACTION_TIMESTAMPS_FILE.exists():
+            return json.loads(COMPACTION_TIMESTAMPS_FILE.read_text())
+    except Exception:
+        pass
+    return {}
+
+
+def _save_compaction_timestamps(ts_data: dict) -> None:
+    try:
+        COMPACTION_TIMESTAMPS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = COMPACTION_TIMESTAMPS_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(ts_data))
+        tmp.replace(COMPACTION_TIMESTAMPS_FILE)
+    except Exception:
+        pass
+
+
+def _find_transcript_path(session_id: str) -> str:
+    """Try to find the JSONL transcript file for the current session."""
+    if not session_id:
+        return ""
+    # Claude Code stores transcripts under ~/.claude/projects/ by session id.
+    home = Path.home()
+    for search_root in [home / ".claude" / "projects", home / ".config" / "claude" / "projects"]:
+        if not search_root.exists():
+            continue
+        for jsonl in search_root.rglob(f"*{session_id}*.jsonl"):
+            return str(jsonl)
+        # Also look by session prefix (first 8 chars).
+        sid8 = session_id[:8]
+        for jsonl in search_root.rglob(f"*{sid8}*.jsonl"):
+            return str(jsonl)
+    return ""
+
+
+def maybe_save_compaction_checkpoint():
+    """Save a compaction checkpoint if conditions are met (non-fatal)."""
+    if not session_id:
+        return
+
+    transcript_path = _find_transcript_path(session_id)
+    if not transcript_path:
+        return
+
+    try:
+        sys.path.insert(0, plugin_root)
+        from memem.compaction import (
+            build_compaction_snapshot,
+            detect_compaction_risk,
+            save_compaction_checkpoint,
+        )
+    except Exception:
+        return
+
+    try:
+        if not detect_compaction_risk(transcript_path):
+            return
+    except Exception:
+        return
+
+    # Check cooldown: skip if a checkpoint was saved in the last 60 min.
+    ts_data = _load_compaction_timestamps()
+    last_ts_str = ts_data.get(session_id, "")
+    if last_ts_str:
+        try:
+            from datetime import datetime as _dt, timezone as _tz
+            last_ts = _dt.fromisoformat(last_ts_str.replace("Z", "+00:00"))
+            elapsed = (_dt.now(_tz.utc) - last_ts).total_seconds()
+            if elapsed < COMPACTION_COOLDOWN_SECONDS:
+                return
+        except Exception:
+            pass
+
+    # Risk detected and no recent checkpoint — save one now.
+    try:
+        from datetime import datetime as _dt, timezone as _tz
+        snapshot = build_compaction_snapshot(
+            session_id=session_id,
+            transcript_path=transcript_path,
+            memem_dir=memem_dir,
+        )
+        project_id = scope or "general"
+        save_compaction_checkpoint(snapshot, session_id, project_id)
+        # Update the timestamp for this session.
+        ts_data[session_id] = _dt.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        _save_compaction_timestamps(ts_data)
+    except Exception:
+        pass  # Checkpoint failure must never break slice injection.
+
+
+maybe_save_compaction_checkpoint()
+
 print(json.dumps({
     "hookSpecificOutput": {
         "hookEventName": "UserPromptSubmit",
