@@ -10,6 +10,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
 
+## [1.6.0] - 2026-05-08
+
+### Cleanup release — applied audit findings (Bundles A, B, C, E, F)
+
+After v1.5.1, a 5-reviewer audit surfaced 30 findings ranked BLOCKER/HIGH/MEDIUM/LOW.
+v1.6.0 ships fixes for everything except Bundle D (test coverage for server.py /
+recall.py / operations.py — deferred to v1.7).
+
+### Fixed — Bundle A (dedup hardening)
+- **BLOCKER B-1:** `save_compaction_checkpoint` now calls `_is_duplicate()` before
+  `_save_memory()`. Two close-spaced UserPromptSubmit hooks at the compaction
+  threshold no longer both write a checkpoint memory.
+- **HIGH H-3:** `_import_file` JSON dict, JSON list, and plaintext branches now
+  call `_is_duplicate()` (markdown branch already did). Re-importing the same
+  file is now a no-op as the docstring claimed.
+- **MEDIUM M-4:** `_commit_new_memory` (delta replay path) now calls
+  `_is_duplicate()`.
+- **MEDIUM M-1:** Removed duplicate `_normalized_ids()` helper from
+  `delta_commit.py` (already importable from `delta_policy.py`).
+
+### Fixed — Bundle B (concurrency races)
+- **HIGH H-1:** `working_memory.update_section` now wraps the read-modify-write
+  in `fcntl.LOCK_EX` on a sidecar lockfile. Concurrent post-stop hooks from
+  multiple Claude Code windows no longer silently lose `current_task` /
+  `last_3_actions` updates.
+- **HIGH H-2:** `post-stop-attribution.sh` uses atomic `mkdir` as the
+  `.stop-timestamps` lock. Concurrent Stop events for the same session no
+  longer doubly invoke `mine_session_delta` (no more 2× Haiku cost).
+- **MEDIUM M-8:** `auto-recall.sh` compaction-checkpoint write now holds the
+  flock across the entire cooldown-check + save + timestamp-write window
+  (initial fix only locked the timestamp write).
+- **MEDIUM M-9:** `mine_session` now increments the `attempts` counter BEFORE
+  writing `STATUS_IN_PROGRESS` so SIGKILL-mid-mine no longer re-queues forever.
+  All STATUS_COMPLETE branches also write the bumped count for diagnostic accuracy.
+- **MEDIUM M-6:** `working_memory.py` now imports canonical `MEMEM_DIR` from
+  `memem.models` instead of re-implementing path resolution.
+
+### Changed — Bundle C (attribution stub made explicit)
+- **HIGH H-4:** `judge_score()` now logs a one-time INFO warning that the
+  LLM-judge is a stub. Behavior unchanged (still returns None) — the
+  `aggregate_signals` pipeline continues to use embedding similarity +
+  citation-regex signals. Real LLM-judge integration remains pending.
+
+### Changed — Bundle E (structural consolidation)
+- **HIGH H-5:** Canonical `parse_jsonl_session` in `memem/transcripts.py`
+  replaces 4 ad-hoc parsers in mining, compaction, and active-slice paths.
+  Role-filtering rules now live in one place.
+- **MEDIUM M-2:** `now_iso()` consolidated into `memem/models.py`. `lessons.py`,
+  `eval_capture.py`, and `dreamer.py` now import the canonical helper.
+- **MEDIUM M-3:** `parse_iso_dt()` added to `memem/models.py`. `decay.py`,
+  `active_slice_engine.py`, and `recall.py` now use the canonical parser.
+- **MEDIUM M-15:** Removed dead `kind:decision` tag-prefix branch from
+  `compaction.py` and `active_slice_engine.py` (no writer ever emitted that).
+
+### Fixed — Bundle F (quick wins)
+- **MEDIUM M-5:** `hooks/session-start.sh` now imports `OBSIDIAN_MEMORIES_DIR`
+  from `memem.models`, so legacy `CORTEX_OBSIDIAN_VAULT` users see the right
+  memory count in the session-start banner.
+- **MEDIUM M-10:** `miner_daemon.py` asserts `HARD_RETRY_CAP >= MAX_SESSION_FAILURES`
+  at module load to catch operator misconfigurations early.
+- **MEDIUM M-13:** `storage.py` user-visible warning now points at the real
+  `~/.memem/miner.log` instead of the stale `~/.cortex/miner.log`.
+- **LOW L-1:** Removed unused `TOPIC_SHIFTS_LOG` constant from `models.py`.
+- **LOW L-7:** `lessons.py` `LESSONS_DIR` now resolves via `_lessons_dir()` so
+  importlib.reload() in tests picks up monkeypatched vault paths.
+
+### Deferred — Bundle D (to v1.7)
+
+The audit also surfaced thin test coverage on three large modules:
+- `server.py` (1090 lines) — MCP dispatch layer with only an import smoke test
+- `recall.py` (775 lines) — primary query engine, no dedicated tests
+- `operations.py` (164 lines) — all import paths, no dedicated tests
+
+Test coverage for these is deferred to v1.7 as its own focused batch.
+
+### Stats
+
+- 632 tests passing (was 609 in v1.5.1, +23 net)
+- mypy clean across 51 source files
+- ruff clean
+
 ## [1.5.1] - 2026-05-08
 
 Patch release applying the four warnings from v1.5.0's final release review.
@@ -1071,6 +1152,8 @@ v0.8.0 session unless `MEMEM_NO_AUTO_MINE=1` is set.
 - Keyword search with containment scoring
 - CLAUDE.md integration for LLM instructions
 
+[1.6.0]: https://github.com/TT-Wang/memem/releases/tag/v1.6.0
+[1.5.1]: https://github.com/TT-Wang/memem/releases/tag/v1.5.1
 [1.5.0]: https://github.com/TT-Wang/memem/releases/tag/v1.5.0
 [1.4.0]: https://github.com/TT-Wang/memem/releases/tag/v1.4.0
 [1.3.0]: https://github.com/TT-Wang/memem/releases/tag/v1.3.0
