@@ -71,8 +71,12 @@ def parse_budget() -> int:
 
 
 def memory_count() -> int:
-    vault_root = Path(os.environ.get("MEMEM_OBSIDIAN_VAULT", str(Path.home() / "obsidian-brain")))
-    memories_dir = vault_root / "memem" / "memories"
+    try:
+        from memem.models import OBSIDIAN_MEMORIES_DIR
+        memories_dir = OBSIDIAN_MEMORIES_DIR
+    except ImportError:
+        vault_root = Path(os.environ.get("MEMEM_OBSIDIAN_VAULT", str(Path.home() / "obsidian-brain")))
+        memories_dir = vault_root / "memem" / "memories"
     try:
         return len(list(memories_dir.glob("*.md")))
     except OSError:

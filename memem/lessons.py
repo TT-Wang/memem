@@ -29,7 +29,7 @@ import re
 import uuid
 from pathlib import Path
 
-from memem.models import OBSIDIAN_VAULT, now_iso
+from memem.models import now_iso
 
 log = logging.getLogger("memem-lessons")
 
@@ -43,7 +43,8 @@ def _lessons_dir() -> Path:
 
 
 # Back-compat alias for callers that imported the constant directly.
-LESSONS_DIR = OBSIDIAN_VAULT / "memem" / "lessons"
+# Uses _lessons_dir() so reload() in tests picks up monkeypatched OBSIDIAN_VAULT.
+LESSONS_DIR = _lessons_dir()
 
 
 def _slugify(text: str, max_len: int = 40) -> str:

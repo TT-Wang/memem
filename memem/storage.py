@@ -118,7 +118,7 @@ def _auto_start_miner():
                 except (ValueError, OSError):
                     continue
         log.warning(
-            "auto-start-miner: daemon did not come up within 2s — check ~/.cortex/miner.log"
+            "auto-start-miner: daemon did not come up within 2s — check ~/.memem/miner.log"
         )
     except Exception:
         log.warning("auto-start-miner failed", exc_info=True)

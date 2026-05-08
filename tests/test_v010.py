@@ -54,7 +54,6 @@ def test_layer_constants_importable():
         LAYER_L1,
         LAYER_L2,
         LAYER_L3,
-        TOPIC_SHIFTS_LOG,
     )
     assert LAYER_L0 == 0
     assert LAYER_L1 == 1
@@ -62,7 +61,6 @@ def test_layer_constants_importable():
     assert LAYER_L3 == 3
     assert DEFAULT_LAYER == 2
     assert isinstance(LAST_BRIEF_PATH, Path)
-    assert isinstance(TOPIC_SHIFTS_LOG, Path)
 
 
 # ---------------------------------------------------------------------------

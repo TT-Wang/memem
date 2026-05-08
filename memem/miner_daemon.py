@@ -40,6 +40,7 @@ from memem.miner_protocol import (
 )
 from memem.models import MEMEM_DIR
 from memem.session_state import (
+    HARD_RETRY_CAP,
     MINED_SESSIONS_FILE,
     SETTLE_SECONDS,
     _ensure_installed_at,
@@ -64,6 +65,11 @@ MAX_SESSION_FAILURES = 3
 # When every session in a poll fails, ramp the next sleep up to this cap to
 # prevent a logged-out claude CLI from spawning subprocesses every 60 seconds.
 BACKOFF_MAX_SECONDS = 1800
+
+assert HARD_RETRY_CAP >= MAX_SESSION_FAILURES, (
+    f"misconfiguration: HARD_RETRY_CAP={HARD_RETRY_CAP} < MAX_SESSION_FAILURES={MAX_SESSION_FAILURES} — "
+    f"sessions will be locked before the daemon's per-run failure counter trips"
+)
 GLOBAL_LOCK_FILE = Path.home() / ".memem" / "miner.global.lock"
 _GLOBAL_LOCK_FH = None
 
