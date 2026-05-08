@@ -39,6 +39,7 @@ def _build_mcp():
     from memem.active_slice_engine import (
         generate_prompt_context as _generate_prompt_context,
     )
+    from memem.cross_vault import search_across_vaults as _search_across_vaults
     from memem.graph_index import (
         _rebuild_graph as _memory_graph_rebuild,
     )
@@ -64,6 +65,7 @@ def _build_mcp():
         memory_timeline as _memory_timeline,
     )
     from memem.transcripts import transcript_search as _transcript_search
+    from memem.vault_registry import load_vault_registry as _load_vault_registry
 
     mcp = FastMCP("memem")
 
@@ -993,6 +995,85 @@ def _build_mcp():
         """
         from memem.assembly import context_assemble as _assemble
         return _assemble(query, project)
+
+    @mcp.tool()
+    def memory_remind(
+        local_context_summary: Annotated[
+            str,
+            Field(
+                description=(
+                    "Compressed view of what's in the current context: the task, "
+                    "key entities, decisions made so far, and open questions. "
+                    "The remind engine uses this as the search query across all "
+                    "registered memory vaults to surface relevant prior knowledge. "
+                    "Aim for 1-3 sentences capturing the core topic."
+                ),
+                min_length=1,
+                max_length=2000,
+            ),
+        ],
+        max_results: Annotated[
+            int,
+            Field(
+                description="Maximum number of cross-vault hits to return (across all vaults combined).",
+                ge=1,
+                le=20,
+            ),
+        ] = 3,
+    ) -> str:
+        """Search across all registered memory vaults and return top hits with relevance rationale.
+
+        Use this at session start or on a context shift when you want to pull
+        in prior knowledge from multiple memory vaults (e.g. a personal vault
+        plus a project-specific vault). Unlike ``memory_search``, which searches
+        a single configured vault, ``memory_remind`` reads the vault registry at
+        ``~/.memem/vaults.json`` and searches all listed vaults, then merges and
+        re-ranks the results.
+
+        When no ``vaults.json`` exists (the common single-vault case), this tool
+        behaves identically to a ``memory_search`` on the default vault — no
+        configuration required, fully backward-compatible.
+
+        Each result includes a ``why_relevant`` field that explains the match in
+        plain language (e.g. ``"matches 0.74 on 'authentication retry'"``), so
+        you can quickly assess relevance without reading the full memory body.
+
+        Behaviour:
+          - Read-only. Does not modify any memory or index.
+          - No authentication required. All searches are local.
+          - Latency scales with total vault size and number of vaults.
+          - Failure modes: returns a "No cross-vault memories found" message on
+            empty result sets. Individual vault failures are logged and skipped.
+
+        Returns: Markdown-formatted listing of cross-vault hits, each with
+        vault source, title, content excerpt, and why_relevant rationale.
+
+        Example:
+            memory_remind(
+                local_context_summary="debugging the auth retry loop in the payments service",
+                max_results=5,
+            )
+            → returns up to 5 memories from any registered vault that mention
+              authentication, retry, or payments, with similarity rationale.
+        """
+        vault_registry = _load_vault_registry()
+        hits = _search_across_vaults(local_context_summary, vault_registry, max_results=max_results)
+
+        if not hits:
+            return f"No cross-vault memories found for: {local_context_summary}"
+
+        lines = [f"### Cross-vault recall — {len(hits)} hit{'s' if len(hits) != 1 else ''}"]
+        lines.append("")
+        for hit in hits:
+            lines.append(f"**[{hit['vault_id']}] {hit['title']}**")
+            lines.append(f"*{hit['why_relevant']}*")
+            body_excerpt = hit["content"][:300].strip()
+            if body_excerpt:
+                lines.append("")
+                lines.append(body_excerpt)
+            lines.append("")
+
+        return "\n".join(lines).rstrip()
 
     return mcp
 
