@@ -378,33 +378,45 @@ def maybe_save_compaction_checkpoint():
     except Exception:
         return
 
-    # Check cooldown: skip if a checkpoint was saved in the last 60 min.
-    ts_data = _load_compaction_timestamps()
-    last_ts_str = ts_data.get(session_id, "")
-    if last_ts_str:
-        try:
-            from datetime import datetime as _dt, timezone as _tz
-            last_ts = _dt.fromisoformat(last_ts_str.replace("Z", "+00:00"))
-            elapsed = (_dt.now(_tz.utc) - last_ts).total_seconds()
-            if elapsed < COMPACTION_COOLDOWN_SECONDS:
-                return
-        except Exception:
-            pass
-
-    # Risk detected and no recent checkpoint — save one now.
+    # M-8: hold the compaction-timestamps lock across the ENTIRE
+    # cooldown-check + save + timestamp-write window. The original fix only
+    # locked the timestamp write, leaving the cooldown read-then-act gap open
+    # — two concurrent UserPromptSubmit hooks could both pass the cooldown
+    # check and both save a checkpoint before either updated the timestamp.
+    import fcntl as _fcntl
+    from datetime import datetime as _dt, timezone as _tz
+    lock_path = COMPACTION_TIMESTAMPS_FILE.parent / ".compaction-timestamps.lock"
     try:
-        from datetime import datetime as _dt, timezone as _tz
-        snapshot = build_compaction_snapshot(
-            session_id=session_id,
-            transcript_path=transcript_path,
-            memem_dir=memem_dir,
-        )
-        project_id = scope or "general"
-        save_compaction_checkpoint(snapshot, session_id, project_id)
-        # M-8: update the timestamp atomically via flock to avoid TOCTOU with
-        # concurrent UserPromptSubmit hooks running in parallel windows.
-        new_ts = _dt.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-        _update_compaction_timestamps(session_id, new_ts)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return
+    try:
+        with open(lock_path, "a+") as lockf:
+            _fcntl.flock(lockf.fileno(), _fcntl.LOCK_EX)
+            try:
+                # Re-read inside the lock — another window may have just saved.
+                ts_data = _load_compaction_timestamps()
+                last_ts_str = ts_data.get(session_id, "")
+                if last_ts_str:
+                    try:
+                        last_ts = _dt.fromisoformat(last_ts_str.replace("Z", "+00:00"))
+                        elapsed = (_dt.now(_tz.utc) - last_ts).total_seconds()
+                        if elapsed < COMPACTION_COOLDOWN_SECONDS:
+                            return
+                    except Exception:
+                        pass
+                # Inside the lock — we are the sole writer for this session.
+                snapshot = build_compaction_snapshot(
+                    session_id=session_id,
+                    transcript_path=transcript_path,
+                    memem_dir=memem_dir,
+                )
+                project_id = scope or "general"
+                save_compaction_checkpoint(snapshot, session_id, project_id)
+                ts_data[session_id] = _dt.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                _save_compaction_timestamps(ts_data)
+            finally:
+                _fcntl.flock(lockf.fileno(), _fcntl.LOCK_UN)
     except Exception:
         pass  # Checkpoint failure must never break slice injection.
 

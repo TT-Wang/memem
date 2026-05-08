@@ -768,7 +768,7 @@ def mine_session(jsonl_path: str) -> dict:
     try:
         if not messages:
             _mark_session(path, STATUS_COMPLETE, "no human messages",
-                          attempts=stored_attempts, offset_bytes=file_size_at_read)
+                          attempts=stored_attempts + 1, offset_bytes=file_size_at_read)
             return {
                 "session_id": session_id,
                 "memories_saved": 0,
@@ -778,7 +778,7 @@ def mine_session(jsonl_path: str) -> dict:
 
         if _is_agent_session(messages):
             _mark_session(path, STATUS_COMPLETE, "agent/module session — skipped",
-                          attempts=stored_attempts, offset_bytes=file_size_at_read)
+                          attempts=stored_attempts + 1, offset_bytes=file_size_at_read)
             return {
                 "session_id": session_id,
                 "memories_saved": 0,
@@ -789,7 +789,7 @@ def mine_session(jsonl_path: str) -> dict:
         insights = _summarize_session_haiku(messages)
         if not insights:
             _mark_session(path, STATUS_COMPLETE, "nothing worth saving",
-                          attempts=stored_attempts, offset_bytes=file_size_at_read)
+                          attempts=stored_attempts + 1, offset_bytes=file_size_at_read)
             return {
                 "session_id": session_id,
                 "memories_saved": 0,
