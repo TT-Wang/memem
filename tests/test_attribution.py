@@ -4,15 +4,13 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
-import pytest
-
 # ---------------------------------------------------------------------------
 # embedding_similarity
 # ---------------------------------------------------------------------------
 
 def test_embedding_similarity_returns_float_0_to_1(monkeypatch):
     """Basic call returns a value in [0, 1]."""
-    np = pytest.importorskip("numpy")  # not in runtime deps; attribution.py degrades to 0.0 if missing
+    import numpy as np
 
     fake_vec = np.ones(4, dtype="float32").tolist()
 
@@ -175,7 +173,7 @@ def test_record_slice_attribution_iterates_all_memory_items(tmp_cortex_dir):
 
 def test_citation_match_returns_true_on_semantic_paraphrase(monkeypatch):
     """Paraphrase with no id/title overlap → True when embedding sim is high."""
-    np = pytest.importorskip("numpy")
+    import numpy as np
 
     from memem.attribution import citation_match
 
@@ -195,7 +193,7 @@ def test_citation_match_returns_true_on_semantic_paraphrase(monkeypatch):
 
 def test_citation_match_falls_through_when_essence_empty(monkeypatch):
     """When memory_essence is empty, semantic branch is skipped → False."""
-    np = pytest.importorskip("numpy")
+    import numpy as np
 
     from memem.attribution import citation_match
 
@@ -214,7 +212,7 @@ def test_citation_match_falls_through_when_essence_empty(monkeypatch):
 
 def test_citation_match_threshold_honored(monkeypatch):
     """Similarity 0.5 with default threshold 0.6 → False; with threshold 0.4 → True."""
-    np = pytest.importorskip("numpy")
+    import numpy as np
 
     from memem.attribution import citation_match
 

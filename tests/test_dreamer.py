@@ -31,8 +31,6 @@ import subprocess
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
-import pytest
-
 # ---------------------------------------------------------------------------
 # Helper: build minimal memory dicts
 # ---------------------------------------------------------------------------
@@ -367,7 +365,6 @@ def _cluster_mem(
 
 def test_cluster_of_5_high_similarity_detected():
     """5 memories with identical embeddings must form one cluster proposal."""
-    pytest.importorskip("numpy")  # cluster code requires numpy; not in CI deps
     from memem.dreamer import CLUSTER_MIN_SIZE, find_cluster_summaries
 
     mems = [
@@ -400,7 +397,6 @@ def test_cluster_of_5_high_similarity_detected():
 # ---------------------------------------------------------------------------
 
 def test_cluster_of_4_not_promoted():
-    pytest.importorskip("numpy")  # cluster code requires numpy
     """4 memories with identical embeddings must NOT form a cluster (size < 5)."""
     from memem.dreamer import find_cluster_summaries
 
@@ -425,7 +421,6 @@ def test_cluster_of_4_not_promoted():
 # ---------------------------------------------------------------------------
 
 def test_cluster_of_5_low_similarity_not_promoted():
-    pytest.importorskip("numpy")  # cluster code requires numpy
     """5 memories with orthogonal embeddings must NOT form a cluster."""
 
     from memem.dreamer import find_cluster_summaries
@@ -518,7 +513,6 @@ def test_dry_run_does_not_write(tmp_vault, tmp_cortex_dir):
 # ---------------------------------------------------------------------------
 
 def test_apply_creates_pattern_memory(tmp_vault, tmp_cortex_dir):
-    pytest.importorskip("numpy")  # cluster code requires numpy
     """apply_diff with dry_run=False creates a new layer=2 pattern memory."""
     from memem.dreamer import apply_diff
     from memem.obsidian_store import _find_memory, _make_memory, _trigger_sweep, _write_obsidian_memory
