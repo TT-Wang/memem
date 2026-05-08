@@ -16,12 +16,13 @@ except ImportError:  # pragma: no cover — Windows fallback
     _HAS_FCNTL = False
 
 from memem.active_slice import DeltaWritebackResult, WritebackSummary
-from memem.delta_policy import DeltaPolicyDecision, evaluate_delta_proposal
+from memem.delta_policy import DeltaPolicyDecision, _normalized_ids, evaluate_delta_proposal
 from memem.models import DELTA_AUDIT_LOG, DELTA_STATE_DIR, _normalize_scope_id, now_iso
 from memem.obsidian_store import (
     _add_related_link,
     _deprecate_memory,
     _find_memory,
+    _is_duplicate,
     _make_memory,
     _save_memory,
 )
@@ -61,20 +62,6 @@ def _approved_ids(approved_delta_ids: Collection[str] | None) -> set[str]:
     if not approved_delta_ids:
         return set()
     return {str(delta_id) for delta_id in approved_delta_ids if str(delta_id)}
-
-
-def _normalized_ids(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    seen: set[str] = set()
-    normalized: list[str] = []
-    for item in value:
-        memory_id = str(item or "").strip()
-        if not memory_id or memory_id in seen:
-            continue
-        seen.add(memory_id)
-        normalized.append(memory_id)
-    return normalized
 
 
 def _content_excerpt(content: str) -> str:
@@ -298,11 +285,18 @@ def _commit_new_memory(
     if dry_run:
         return "dry_run", preview.get("target_memory_ids", []), f"Dry run only: would create '{preview.get('title', '')}'.", []
 
+    proposed_content = str(delta.get("proposed_content", "") or "")
+    project = _project_for_delta(delta, decision)
+    existing = _is_duplicate(proposed_content, scope_id=project, return_match=True)
+    if isinstance(existing, dict):
+        existing_id = existing["id"][:8]
+        return "skipped", [existing_id], f"Duplicate of existing memory {existing_id}; skipped.", []
+
     memory = _make_memory(
-        content=str(delta.get("proposed_content", "") or ""),
+        content=proposed_content,
         title=str(delta.get("proposed_title", "") or ""),
         tags=_tags_for_delta(delta),
-        project=_project_for_delta(delta, decision),
+        project=project,
         source_type="user",
         source_session=str(delta.get("source_slice_id", "") or ""),
         importance=_importance_for_delta(delta),

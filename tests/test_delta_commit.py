@@ -521,3 +521,70 @@ def test_writeback_status_returns_dry_run_when_persistence_fails(tmp_vault, tmp_
         persistence_failed=True,
     )
     assert summary["status"] == "dry_run"
+
+
+def test_save_new_memory_delta_replay_dedup(tmp_vault, tmp_cortex_dir):
+    """Applying a save_new_memory delta twice must be a no-op on the second application.
+
+    The second call should return 'skipped' (not 'committed') and must not
+    create a duplicate memory file.  M-4 dedup regression guard.
+    """
+    _delta, delta_commit, delta_policy, _models, obsidian_store = _load_modules()
+
+    proposal = {
+        "delta_id": "delta_dedup_new_memory",
+        "delta_type": "save_new_memory",
+        "proposed_title": "Dedup guard for delta replay",
+        "proposed_content": (
+            "When a save_new_memory delta is replayed, the second application "
+            "must detect the existing memory and skip creation to avoid duplicates."
+        ),
+        "proposed_tags": ["dedup", "delta"],
+        "confidence": 0.90,
+        "source_slice_id": "slice_dedup_test",
+        "scope_id": "general",
+        "requires_user_confirmation": False,
+    }
+
+    decision = delta_policy.evaluate_delta_proposal(proposal)
+    assert decision["decision"] == "review"
+
+    # First application — approved via approved_delta_ids.
+    first_batch = delta_commit.execute_delta_writeback(
+        [proposal],
+        dry_run=False,
+        approved_delta_ids=["delta_dedup_new_memory"],
+        policy_decisions=[decision],
+    )
+    assert first_batch["results"][0]["status"] == "committed", (
+        f"First application should commit; got {first_batch['results'][0]['status']!r}"
+    )
+    first_id = first_batch["results"][0]["affected_memory_ids"][0]
+
+    # Force cache refresh so the dedup check sees the saved memory.
+    obsidian_store._reset_cache()
+
+    # Second application — same proposal; should be skipped as duplicate.
+    second_batch = delta_commit.execute_delta_writeback(
+        [proposal],
+        dry_run=False,
+        approved_delta_ids=["delta_dedup_new_memory"],
+        policy_decisions=[decision],
+    )
+    second_result = second_batch["results"][0]
+    assert second_result["status"] == "skipped", (
+        f"Second application should be skipped (dedup); got {second_result['status']!r}"
+    )
+    # The skipped result should reference the original memory id.
+    assert first_id in second_result.get("affected_memory_ids", []), (
+        f"Expected original id {first_id!r} in affected_memory_ids, "
+        f"got {second_result.get('affected_memory_ids')!r}"
+    )
+
+    # Vault must contain exactly one memory with this title.
+    obsidian_store._reset_cache()
+    all_mems = obsidian_store._obsidian_memories()
+    matching = [m for m in all_mems if m.get("title") == proposal["proposed_title"]]
+    assert len(matching) == 1, (
+        f"Expected exactly 1 memory with this title, got {len(matching)}"
+    )

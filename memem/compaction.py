@@ -335,9 +335,13 @@ def save_compaction_checkpoint(
         RuntimeError: If the Obsidian vault is not writable.
         ValueError: If content is rejected (too short, etc.).
     """
-    from memem.obsidian_store import _make_memory, _save_memory
+    from memem.obsidian_store import _is_duplicate, _make_memory, _save_memory
 
     body = _render_snapshot_markdown(snapshot, session_id, project_id)
+
+    existing = _is_duplicate(body, scope_id=project_id or "general", return_match=True)
+    if isinstance(existing, dict):
+        return existing["id"][:8]
 
     title = f"Compaction checkpoint — {session_id[:8] if session_id else 'unknown'}"
 

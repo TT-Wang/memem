@@ -86,38 +86,42 @@ def _import_file(file_path: Path, scope_id: str) -> int:
             if isinstance(data, dict):
                 # Save the whole file as one memory rather than key-by-key noise
                 text = json.dumps(data, indent=2)[:2000]
-                _save_memory(_make_memory(
-                    content=text,
-                    title=file_path.stem,
-                    tags=["imported"],
-                    project=project,
-                    source_type="import",
-                ))
-                count = 1
+                if not _is_duplicate(text, scope_id=scope_id):
+                    _save_memory(_make_memory(
+                        content=text,
+                        title=file_path.stem,
+                        tags=["imported"],
+                        project=project,
+                        source_type="import",
+                    ))
+                    count = 1
             elif isinstance(data, list):
                 for item in data[:20]:
                     text = json.dumps(item, indent=2) if not isinstance(item, str) else item
                     if len(text) <= 20:
                         continue
-                    _save_memory(_make_memory(
-                        content=text[:2000],
-                        title=str(item.get("title", file_path.stem))[:60] if isinstance(item, dict) else file_path.stem,
-                        tags=["imported"],
-                        project=project,
-                        source_type="import",
-                    ))
-                    count += 1
+                    if not _is_duplicate(text[:2000], scope_id=scope_id):
+                        _save_memory(_make_memory(
+                            content=text[:2000],
+                            title=str(item.get("title", file_path.stem))[:60] if isinstance(item, dict) else file_path.stem,
+                            tags=["imported"],
+                            project=project,
+                            source_type="import",
+                        ))
+                        count += 1
         except json.JSONDecodeError:
             pass
     elif ext in (".txt", ".text", ".rst"):
-        _save_memory(_make_memory(
-            content=content.strip()[:2000],
-            title=file_path.stem,
-            tags=["imported"],
-            project=project,
-            source_type="import",
-        ))
-        count = 1
+        body = content.strip()[:2000]
+        if not _is_duplicate(body, scope_id=scope_id):
+            _save_memory(_make_memory(
+                content=body,
+                title=file_path.stem,
+                tags=["imported"],
+                project=project,
+                source_type="import",
+            ))
+            count = 1
 
     return count
 

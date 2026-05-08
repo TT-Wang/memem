@@ -378,3 +378,50 @@ def test_detect_compaction_risk_missing_file():
     """detect_compaction_risk returns False when transcript file does not exist."""
     from memem.compaction import detect_compaction_risk
     assert detect_compaction_risk("/nonexistent/path/session.jsonl") is False
+
+
+# ---------------------------------------------------------------------------
+# Test: B-1 dedup — save_compaction_checkpoint returns existing id on repeat
+# ---------------------------------------------------------------------------
+
+def test_save_compaction_checkpoint_dedup_returns_existing_id(tmp_path, tmp_vault, tmp_cortex_dir):
+    """Second call with the same snapshot returns the same id and writes only one file."""
+    transcript = tmp_path / "session_dedup.jsonl"
+    _make_minimal_transcript(transcript)
+
+    from memem.compaction import build_compaction_snapshot, save_compaction_checkpoint
+    from memem.obsidian_store import _obsidian_memories, _reset_cache
+
+    snapshot = build_compaction_snapshot(
+        session_id="dedup-session",
+        transcript_path=str(transcript),
+        memem_dir=tmp_cortex_dir,
+    )
+
+    id_first = save_compaction_checkpoint(
+        snapshot=snapshot,
+        session_id="dedup-session",
+        project_id="test-project",
+    )
+
+    # Force cache refresh so second call sees the saved memory.
+    _reset_cache()
+
+    id_second = save_compaction_checkpoint(
+        snapshot=snapshot,
+        session_id="dedup-session",
+        project_id="test-project",
+    )
+
+    assert id_first == id_second, (
+        f"Second call should return same id as first: {id_first!r} != {id_second!r}"
+    )
+
+    _reset_cache()
+    checkpoint_mems = [
+        m for m in _obsidian_memories()
+        if "kind:compaction-checkpoint" in (m.get("domain_tags") or [])
+    ]
+    assert len(checkpoint_mems) == 1, (
+        f"Expected exactly 1 checkpoint memory, got {len(checkpoint_mems)}"
+    )
