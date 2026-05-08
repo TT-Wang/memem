@@ -678,19 +678,23 @@ def generate_session_start_slice(
 
     output_parts: list[str] = []
     chars_used = 0
+    sep_len = 2  # len("\n\n") between joined sections
 
     for section_name, block in parts:
         if not block:
             continue
+        # Reserve space for the separator that join() will add before this part
+        # (only if there's already content to join after).
+        sep_cost = sep_len if output_parts else 0
         block_len = len(block)
-        remaining = budget - chars_used
+        remaining = budget - chars_used - sep_cost
         if section_name == "working_memory":
             # working_memory is never cut unless it alone exceeds budget
             if block_len > budget:
                 block = block[:budget]
                 block_len = budget
             output_parts.append(block)
-            chars_used += block_len
+            chars_used += block_len + sep_cost
         else:
             if remaining <= 0:
                 break
@@ -698,7 +702,7 @@ def generate_session_start_slice(
                 block = block[:remaining]
                 block_len = remaining
             output_parts.append(block)
-            chars_used += block_len
+            chars_used += block_len + sep_cost
 
     return "\n\n".join(p for p in output_parts if p)
 
