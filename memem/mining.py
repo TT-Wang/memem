@@ -60,17 +60,21 @@ def _extract_conversation_from_offset(
         file size at the moment of the read. The caller persists this as the new
         offset so the next mine starts from where this one ended.
     """
-    # Measure file size first (before seek) to compute file_size_at_read.
-    try:
-        with open(jsonl_path, "rb") as fh:
-            fh.seek(0, 2)  # seek to end
-            total_size = fh.tell()
-    except OSError:
-        return [], 0
-
     # parse_jsonl_session handles seek to start_offset internally.
     raw_msgs = parse_jsonl_session(jsonl_path, start_offset=offset_bytes)
-    file_size_at_read = total_size  # file size measured before parse (race-safe approximation)
+
+    # Measure file size AFTER parse so file_size_at_read >= bytes actually
+    # parsed. If the file grew between parse end and size measurement, the
+    # extra bytes will simply be picked up by the next incremental mine
+    # (correct behavior). Measuring before parse caused stored offsets to
+    # under-count when the file grew mid-parse, causing redundant Haiku
+    # calls on the re-parsed tail.
+    try:
+        with open(jsonl_path, "rb") as fh:
+            fh.seek(0, 2)
+            file_size_at_read = fh.tell()
+    except OSError:
+        return [], 0
 
     messages: list[str] = []
     for msg in raw_msgs:

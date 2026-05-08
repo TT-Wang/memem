@@ -197,13 +197,13 @@ except Exception:
         # successfully creates the directory runs mine_session_delta; concurrent
         # Stop events for the same session_id get a non-zero exit from mkdir
         # and skip the mine call, preventing doubled Haiku cost.
-        _STOP_MARKER_DIR_BASE="$HOME/.memem/.stop-timestamps"
+        _STOP_MARKER_DIR_BASE="$MEMEM_DIR/.stop-timestamps"
         _STOP_LOCK_DIR="$_STOP_MARKER_DIR_BASE/$_STOP_SESSION_ID"
         mkdir -p "$_STOP_MARKER_DIR_BASE"
         if mkdir "$_STOP_LOCK_DIR" 2>/dev/null; then
             # We won the race — fire mine_session_delta under a timeout.
             # Failures are logged but never crash the hook.
-            mkdir -p "$HOME/.memem/logs"
+            mkdir -p "$MEMEM_DIR/logs"
             # Pass session_id via env to avoid shell injection if the value
             # ever contains characters that would break a Python string literal.
             MEMEM_STOP_SESSION_ID="$_STOP_SESSION_ID" \
@@ -214,7 +214,7 @@ sys.path.insert(0, os.environ["MEMEM_PLUGIN_ROOT"])
 from memem.mining import mine_session_delta
 result = mine_session_delta(os.environ["MEMEM_STOP_SESSION_ID"])
 print(result)
-' >> "$HOME/.memem/logs/mine-on-stop.log" 2>&1 || true
+' >> "$MEMEM_DIR/logs/mine-on-stop.log" 2>&1 || true
             # Directory stays in place as the marker; future mkdir calls fail.
         fi
     fi

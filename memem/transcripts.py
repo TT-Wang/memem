@@ -140,8 +140,12 @@ def parse_jsonl_session(
 def _parse_jsonl_session_pairs(jsonl_path: str) -> list[dict]:
     """Parse JSONL session into user/assistant exchange pairs.
 
-    LEGACY: used only by transcript_search. Thin wrapper over parse_jsonl_session
-    that assembles the old {"user_text", "assistant_text"} pair structure.
+    LEGACY: used only by transcript_search. Standalone JSONL pair-extractor
+    that includes raw content blocks (tool_result blocks in particular) needed
+    by transcript_search. Cannot be replaced by parse_jsonl_session because
+    the canonical only emits a tool_use summary string, not full content
+    blocks. If transcript_search is ever rewritten to not need tool_result
+    payloads, this can be migrated.
     """
     user_texts: list[str] = []
     assistant_texts: list[str] = []

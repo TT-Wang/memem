@@ -10,6 +10,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
 
+## [1.6.1] - 2026-05-08
+
+Patch release applying the four warnings from v1.6.0's final release review.
+
+- **Stop hook lock dir uses `$MEMEM_DIR`** instead of hardcoded `$HOME/.memem`.
+  Legacy users with `MEMEM_DIR` set elsewhere (e.g. via `CORTEX_DIR`) had
+  `.stop-timestamps` and `mine-on-stop.log` written to the wrong tree, silently
+  defeating the H-2 concurrency guard for that configuration.
+- **Removed dead `_update_compaction_timestamps` function** in `auto-recall.sh`.
+  The m2 hardening commit replaced it with a broader lock; the narrow helper
+  was orphaned and misled readers into thinking there was a two-level locking
+  strategy.
+- **Fixed misleading docstring on `_parse_jsonl_session_pairs`** in
+  `transcripts.py`. It is a standalone parser (needed for raw `tool_result`
+  blocks), not a wrapper over the canonical `parse_jsonl_session` as the prior
+  docstring claimed.
+- **Fixed two-open TOCTOU in `_extract_conversation_from_offset`.** File size
+  is now measured AFTER `parse_jsonl_session` returns, so the stored
+  `file_size_at_read` cannot under-count when the file grows mid-parse.
+  Previously caused harmless-but-redundant Haiku calls on re-parsed tails.
+
 ## [1.6.0] - 2026-05-08
 
 ### Cleanup release — applied audit findings (Bundles A, B, C, E, F)
