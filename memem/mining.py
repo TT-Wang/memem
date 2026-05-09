@@ -243,7 +243,7 @@ def _merge_memories(existing_content: str, new_content: str) -> str:
             timeout=HAIKU_TIMEOUT_SECONDS,
         )
     except Exception as exc:
-        raise TransientMiningError(str(exc))
+        raise TransientMiningError(str(exc)) from exc
 
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
@@ -517,7 +517,7 @@ def _summarize_session_haiku(messages: list[str]) -> list[dict]:
                 timeout=HAIKU_TIMEOUT_SECONDS,
             )
         except Exception as exc:
-            raise TransientMiningError(str(exc))
+            raise TransientMiningError(str(exc)) from exc
 
         if result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"

@@ -10,6 +10,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
 
+## [1.7.1] - 2026-05-09
+
+Patch release applying Phase 4.5 final-review followups from v1.7.0.
+
+- **`consolidation.py` Haiku timeout now honors `MEMEM_HAIKU_TIMEOUT`.** Was
+  hardcoded to 120s, contradicting the v1.7.0 CHANGELOG claim that all Haiku
+  calls were raised to 180s. Now imports `HAIKU_TIMEOUT_SECONDS` from
+  `memem.mining` so the env var works on `--consolidate` runs too.
+- **`mining.py` `raise TransientMiningError(str(exc)) from exc`** at lines 246
+  and 520. The earlier raises dropped `__cause__`, making the
+  `isinstance(exc.__cause__, subprocess.TimeoutExpired)` check at line 1109
+  dead code. The string-fallback path was catching timeouts in practice, but
+  the dead `isinstance` branch was a maintenance hazard. Behavior unchanged;
+  code clarity improved.
+
 ## [1.7.0] - 2026-05-09 — Book patterns + miner hardening
 
 Triggered by a real miner-death incident on 2026-05-08: the miner hit a huge

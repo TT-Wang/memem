@@ -26,6 +26,7 @@ import logging
 import subprocess
 from dataclasses import dataclass, field
 
+from memem.mining import HAIKU_TIMEOUT_SECONDS
 from memem.models import LAYER_L2
 from memem.obsidian_store import (
     _find_memory,
@@ -180,7 +181,7 @@ def _call_haiku_consolidate(cluster_memories: list[dict]) -> dict | None:
             input=prompt,
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=HAIKU_TIMEOUT_SECONDS,
         )
     except Exception as exc:
         log.warning("consolidation: Haiku subprocess failed: %s", exc)
