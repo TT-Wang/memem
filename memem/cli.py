@@ -611,6 +611,64 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         subprocess.run(["bash", wrapper, action])
         return
 
+    if cmd == "--consolidate":
+        from memem.consolidation import run_consolidation_pass
+        from memem.models import LAYER_L2
+
+        dry_run = "--dry-run" in argv
+        layer = LAYER_L2
+        min_cluster_size = 3
+        threshold = 0.85
+
+        # Parse optional overrides
+        i = 2
+        while i < len(argv):
+            arg = argv[i]
+            if arg == "--layer" and i + 1 < len(argv):
+                try:
+                    layer = int(argv[i + 1])
+                except ValueError:
+                    pass
+                i += 2
+            elif arg == "--min-cluster" and i + 1 < len(argv):
+                try:
+                    min_cluster_size = int(argv[i + 1])
+                except ValueError:
+                    pass
+                i += 2
+            elif arg == "--threshold" and i + 1 < len(argv):
+                try:
+                    threshold = float(argv[i + 1])
+                except ValueError:
+                    pass
+                i += 2
+            else:
+                i += 1
+
+        mode = "DRY-RUN" if dry_run else "LIVE"
+        print(
+            f"[memem consolidation] {mode} — layer={layer} "
+            f"min_cluster={min_cluster_size} threshold={threshold}"
+        )
+        result = run_consolidation_pass(
+            layer=layer,
+            min_cluster_size=min_cluster_size,
+            similarity_threshold=threshold,
+            dry_run=dry_run,
+        )
+        print(f"  Clusters processed:        {result.clusters_processed}")
+        print(f"  Memories consolidated:     {result.memories_consolidated}")
+        print(f"  Contradictions flagged:    {result.contradictions_flagged}")
+        print(f"  Canonical memories created:{len(result.canonical_memories_created)}")
+        print(f"  Superseded memories:       {len(result.superseded_memories)}")
+        if result.errors:
+            print(f"  Errors ({len(result.errors)}):")
+            for err in result.errors:
+                print(f"    - {err}")
+        if dry_run:
+            print("  (Pass without --dry-run to execute)")
+        return
+
     if cmd == "--dream":
         from memem.dreamer import run_dream_cycle
         apply = "--apply" in argv

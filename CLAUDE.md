@@ -93,6 +93,13 @@ Then tell the user: history mining is running in the background (log at `~/.meme
 | `context_assemble` | On-demand query-tailored briefing from all knowledge |
 | `active_memory_slice` | On-demand runtime working-state slice from active recall candidates |
 
+## Episodic consolidation (v1.7)
+
+Run `python3 -m memem.server --consolidate` to cluster near-duplicate memories by
+embedding similarity and merge them into canonical memories (flagging contradictions).
+Recommended cadence: weekly cron. The cron itself is not installed by this module —
+wire it manually if desired (e.g. `0 2 * * 0 python3 -m memem.server --consolidate`).
+
 ## Backward compatibility
 
 memem was renamed from `cortex` in v0.7.0. Existing users with data under
