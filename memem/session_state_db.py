@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS mined_sessions (
 """
 
 _ADD_OFFSET_BYTES_SQL = "ALTER TABLE mined_sessions ADD COLUMN offset_bytes INTEGER NOT NULL DEFAULT 0;"
+_ADD_TIMEOUT_FAILURES_SQL = "ALTER TABLE mined_sessions ADD COLUMN timeout_failures INTEGER NOT NULL DEFAULT 0;"
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -115,6 +116,13 @@ def _ensure_db(db_path: Path) -> None:
                 conn.execute(_ADD_OFFSET_BYTES_SQL)
             except sqlite3.OperationalError:
                 # "duplicate column name: offset_bytes" — already migrated
+                pass
+
+            # Add timeout_failures column to existing DBs that predate v1.7.
+            try:
+                conn.execute(_ADD_TIMEOUT_FAILURES_SQL)
+            except sqlite3.OperationalError:
+                # "duplicate column name: timeout_failures" — already migrated
                 pass
 
             # Check for an existing JSONL to migrate.
@@ -195,7 +203,7 @@ def load_mined_session_state(db_path: Path | None = None) -> dict[str, dict]:
         with _connect(db_path) as conn:
             rows = conn.execute(
                 "SELECT session_id, status, attempts, mtime_ns, size, version,"
-                "       updated_at, message, offset_bytes FROM mined_sessions"
+                "       updated_at, message, offset_bytes, timeout_failures FROM mined_sessions"
             ).fetchall()
     except sqlite3.Error:
         return {}
@@ -211,6 +219,7 @@ def load_mined_session_state(db_path: Path | None = None) -> dict[str, dict]:
             "updated_at": row["updated_at"],
             "message": row["message"] or "",
             "offset_bytes": int(row["offset_bytes"] or 0),
+            "timeout_failures": int(row["timeout_failures"] or 0),
         }
         for row in rows
     }
@@ -245,6 +254,7 @@ def save_mined_session_state(
                         "updated_at": str(state.get("updated_at", _now())),
                         "message": state.get("message", "")[:500],
                         "offset_bytes": int(state.get("offset_bytes", 0)),
+                        "timeout_failures": int(state.get("timeout_failures", 0)),
                     }
                 )
             if rows:
@@ -252,10 +262,12 @@ def save_mined_session_state(
                     """
                     INSERT OR REPLACE INTO mined_sessions
                         (session_id, status, attempts, last_error,
-                         mtime_ns, size, version, updated_at, message, offset_bytes)
+                         mtime_ns, size, version, updated_at, message, offset_bytes,
+                         timeout_failures)
                     VALUES
                         (:session_id, :status, :attempts, :last_error,
-                         :mtime_ns, :size, :version, :updated_at, :message, :offset_bytes)
+                         :mtime_ns, :size, :version, :updated_at, :message, :offset_bytes,
+                         :timeout_failures)
                     """,
                     rows,
                 )
@@ -269,6 +281,7 @@ def update_session_state(
     message: str = "",
     attempts: int = 0,
     offset_bytes: int = 0,
+    timeout_failures: int = 0,
     db_path: Path | None = None,
 ) -> dict:
     """Upsert a single session record and return the new state dict.
@@ -298,6 +311,7 @@ def update_session_state(
         "updated_at": now_str,
         "message": truncated_message,
         "offset_bytes": int(offset_bytes),
+        "timeout_failures": int(timeout_failures),
     }
 
     with _connect(db_path) as conn:
@@ -305,10 +319,12 @@ def update_session_state(
             """
             INSERT OR REPLACE INTO mined_sessions
                 (session_id, status, attempts, last_error,
-                 mtime_ns, size, version, updated_at, message, offset_bytes)
+                 mtime_ns, size, version, updated_at, message, offset_bytes,
+                 timeout_failures)
             VALUES
                 (:session_id, :status, :attempts, :last_error,
-                 :mtime_ns, :size, :version, :updated_at, :message, :offset_bytes)
+                 :mtime_ns, :size, :version, :updated_at, :message, :offset_bytes,
+                 :timeout_failures)
             """,
             row,
         )
@@ -323,4 +339,5 @@ def update_session_state(
         "updated_at": now_str,
         "message": truncated_message,
         "offset_bytes": int(offset_bytes),
+        "timeout_failures": int(timeout_failures),
     }

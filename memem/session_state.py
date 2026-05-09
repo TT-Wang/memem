@@ -119,11 +119,12 @@ def save_mined_session_state(states: dict[str, dict]) -> None:
     session_state_db.save_mined_session_state(states, db_path=_db_path())
 
 
-def update_session_state(path: Path, status: str, message: str = "", attempts: int = 0, offset_bytes: int = 0) -> dict:
+def update_session_state(path: Path, status: str, message: str = "", attempts: int = 0, offset_bytes: int = 0, timeout_failures: int = 0) -> dict:
     from memem import session_state_db  # noqa: PLC0415
 
     return session_state_db.update_session_state(
-        path, status, message=message, attempts=attempts, offset_bytes=offset_bytes, db_path=_db_path()
+        path, status, message=message, attempts=attempts, offset_bytes=offset_bytes,
+        timeout_failures=timeout_failures, db_path=_db_path()
     )
 
 

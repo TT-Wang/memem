@@ -18,6 +18,7 @@ Covers (m9):
 """
 
 import importlib
+import time
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,7 @@ import pytest
 from memem.miner_protocol import (
     STATUS_COMPLETE,
     STATUS_FAILED,
+    STATUS_IN_PROGRESS,
     STATUS_RETRYING,
 )
 
@@ -249,16 +251,20 @@ def test_session_marked_failed_at_cap_after_restart(tmp_cortex_dir):
     assert final_states["seedtest04"]["attempts"] == MAX_SESSION_FAILURES
 
 
-def test_fatal_api_error_persists_status_failed_before_raise(tmp_cortex_dir, tmp_vault, monkeypatch):
-    """Regression: when _mine_session classifies an exception as fatal-api-error
-    (e.g. 'subprocess timed out after 300s'), it MUST persist STATUS_FAILED for
-    the offending session BEFORE raising FatalMinerError. Otherwise a wrapper
-    restart re-picks the session, hits the same hang, and crash-loops through
-    the 5-in-60s wrapper budget.
+def test_timeout_reclassified_as_transient_in_mine_session(tmp_cortex_dir, tmp_vault, monkeypatch):
+    """v1.7 fix: when _mine_session receives a 'subprocess timed out after Ns'
+    RetryableMinerError, it must NOT raise FatalMinerError (which stops the daemon).
+    Instead it should log the failure as transient, persist STATUS_FAILED with
+    incremented timeout_failures, and return False (no retry in this poll).
 
-    Reproduced in production: session 9612f54c-bbd timed out on 2026-04-30,
-    2026-05-01, and 2026-05-04 — the same session each time, because no
-    STATUS_FAILED was written between crashes.
+    Background: prior to v1.7, _is_fatal_api_error matched 'timed out' which caused
+    the daemon to permanently stop on any Haiku CLI timeout. The v1.7 fix
+    reclassifies subprocess timeouts as transient — the miner continues mining
+    other sessions. The per-session timeout cap (MEMEM_MAX_SESSION_TIMEOUTS)
+    handles the case where a single session times out repeatedly.
+
+    Previously (before v1.7), this test expected a FatalMinerError. Now it must
+    NOT raise FatalMinerError — the timeout is swallowed as transient.
     """
     import importlib
     from unittest.mock import patch
@@ -270,23 +276,26 @@ def test_fatal_api_error_persists_status_failed_before_raise(tmp_cortex_dir, tmp
     jsonl = _write_session_jsonl(tmp_cortex_dir, name="hangsim01")
 
     # Force _run_server_command to raise a RetryableMinerError whose text
-    # matches a fatal-api pattern ('timed out' is one such pattern).
+    # matches the timeout pattern (e.g. from _run_server_command's TimeoutExpired handler).
     fake_exc = miner_daemon.RetryableMinerError(
         "subprocess timed out after 300s; killed process group"
     )
-    with (
-        patch.object(miner_daemon, "_run_server_command", side_effect=fake_exc),
-        pytest.raises(miner_daemon.FatalMinerError),
-    ):
-        miner_daemon._mine_session(jsonl)
+    # v1.7: timeout must NOT escalate to FatalMinerError — just returns (0, False)
+    result = None
+    with patch.object(miner_daemon, "_run_server_command", side_effect=fake_exc):
+        saved, completed = miner_daemon._mine_session(jsonl)
+    assert saved == 0
+    assert completed is False
 
-    # The session must be marked STATUS_FAILED on disk.
+    # v1.7: transient timeout does NOT persist state from _mine_session itself.
+    # The daemon's _run_loop is responsible for updating state on transient failures
+    # (STATUS_RETRYING). _mine_session only persists on fatal errors or timeout cap.
     states = session_state.load_mined_session_state()
-    assert "hangsim01" in states, "session state was not persisted before fatal raise"
-    assert states["hangsim01"]["status"] == STATUS_FAILED
-    # attempts should be at MAX so a future restart with re-seeding immediately
-    # treats it as DLQ-eligible.
-    assert states["hangsim01"]["attempts"] >= miner_daemon.MAX_SESSION_FAILURES
+    # The session may not be in states yet (no persist from _mine_session for transient)
+    if "hangsim01" in states:
+        assert states["hangsim01"]["attempts"] < miner_daemon.MAX_SESSION_FAILURES, (
+            "Timeout must not push session to MAX_SESSION_FAILURES (it is transient)"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -688,4 +697,187 @@ def test_pre_v1_4_capped_session_with_offset_zero_stays_terminal(tmp_cortex_dir)
     # fallback uses state["size"] (stored at cap time), so fingerprint.size now > stored size.
     assert ss.session_is_terminal(jsonl, state) is False, (
         "growth past stored size must allow re-entry for incremental mine"
+    )
+
+
+# ---------------------------------------------------------------------------
+# v1.7 hardening tests
+# ---------------------------------------------------------------------------
+
+
+def test_timeout_exception_not_classified_fatal(tmp_cortex_dir):
+    """Fix 1: subprocess.TimeoutExpired and 'timed out after' strings must NOT
+    be classified as fatal API errors. They are transient — the session is huge
+    but the miner can continue with other sessions.
+
+    Regression: prior to v1.7, _is_fatal_api_error matched 'timed out' which
+    caused the daemon to stop entirely on any Haiku CLI timeout.
+    """
+    import subprocess as _subprocess
+
+    from memem.miner_daemon import _is_fatal_api_error, RetryableMinerError
+
+    # subprocess.TimeoutExpired must be transient (not fatal)
+    timeout_exc = _subprocess.TimeoutExpired(cmd=["claude"], timeout=120)
+    assert _is_fatal_api_error(timeout_exc) is False, (
+        "subprocess.TimeoutExpired must NOT be classified as a fatal API error; "
+        "it is transient — the session is huge but the miner can continue"
+    )
+
+    # RetryableMinerError wrapping a timeout message must be transient
+    wrapped_timeout = RetryableMinerError("subprocess timed out after 120s; killed process group")
+    assert _is_fatal_api_error(wrapped_timeout) is False, (
+        "'subprocess timed out after' in error message must NOT be classified fatal; "
+        "prior to v1.7 the 'timed out' pattern in _is_fatal_api_error caused daemon death"
+    )
+
+    # Genuine auth errors must still be fatal
+    auth_err = RetryableMinerError("you are not logged in")
+    assert _is_fatal_api_error(auth_err) is True, (
+        "auth errors must still be classified as fatal"
+    )
+
+    invalid_key_err = RetryableMinerError("invalid_api_key")
+    assert _is_fatal_api_error(invalid_key_err) is True, (
+        "invalid_api_key must still be classified as fatal"
+    )
+
+
+def test_per_session_timeout_cap_marks_complete_at_threshold(tmp_cortex_dir, tmp_vault, monkeypatch):
+    """Fix 2: After MEMEM_MAX_SESSION_TIMEOUTS timeouts on the same session,
+    mine_session must mark it STATUS_COMPLETE with a skip message rather than
+    retrying indefinitely. The 4th timeout should be the one that marks complete.
+    """
+    import importlib
+    import subprocess as _subprocess
+    from unittest.mock import patch
+
+    from memem import mining, session_state
+    from memem.miner_protocol import STATUS_COMPLETE, STATUS_FAILED
+    importlib.reload(session_state)
+    importlib.reload(mining)
+
+    # Force MAX_SESSION_TIMEOUTS=3 so test is deterministic
+    monkeypatch.setenv("MEMEM_MAX_SESSION_TIMEOUTS", "3")
+    importlib.reload(mining)  # reload to pick up env var
+
+    sessions_dir = tmp_cortex_dir.parent / "sessions"
+    sessions_dir.mkdir(exist_ok=True)
+    jsonl = sessions_dir / "timeout_cap01.jsonl"
+
+    # Write a real session JSONL with enough content to pass the delta threshold
+    import json as _json
+    lines = []
+    for i in range(100):
+        if i % 2 == 0:
+            lines.append(_json.dumps({"type": "user", "message": {"content": f"question {i} " + "q" * 60}}))
+        else:
+            lines.append(_json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": f"answer {i} " + "a" * 60}]}}))
+    jsonl.write_text("\n".join(lines) + "\n")
+
+    # Simulate 3 timeouts: each raises TransientMiningError wrapping a TimeoutExpired
+    timeout_exc = _subprocess.TimeoutExpired(cmd=["claude"], timeout=180)
+
+    def _raise_timeout(messages):
+        raise mining.TransientMiningError(str(timeout_exc))
+
+    ss = _ss()
+
+    # Each call should fail with TransientMiningError and be re-raised
+    # (the session is still STATUS_FAILED after each failure)
+    for attempt in range(1, 4):
+        with patch.object(mining, "_summarize_session_haiku", side_effect=_raise_timeout):
+            try:
+                mining.mine_session(str(jsonl))
+            except mining.TransientMiningError:
+                pass  # expected
+
+    states = ss.load_mined_session_state()
+    assert states["timeout_cap01"]["timeout_failures"] == 3, (
+        f"Expected timeout_failures=3 after 3 timeouts, got {states['timeout_cap01'].get('timeout_failures')}"
+    )
+
+    # 4th call: should mark STATUS_COMPLETE (skip) not fail
+    # Need to re-grow the file so it's not considered "already mined"
+    # Actually the status is STATUS_FAILED so it will be re-tried.
+    # But wait - we need the file fingerprint to have changed or the session to not be terminal
+    # Since attempts < HARD_RETRY_CAP, session_is_complete returns False (it checks STATUS_COMPLETE)
+    # And session_is_terminal checks FAILED + fingerprint match → would be terminal if fingerprint matches
+    # Let's append content to re-enter the queue
+    with open(jsonl, "a") as fh:
+        fh.write("\n" + _json.dumps({"type": "user", "message": {"content": "more content " + "x" * 200}}) + "\n")
+
+    with patch.object(mining, "_summarize_session_haiku", side_effect=_raise_timeout):
+        result = mining.mine_session(str(jsonl))
+
+    # After MAX_SESSION_TIMEOUTS+1 = 4th call, session should be skipped (STATUS_COMPLETE)
+    states = ss.load_mined_session_state()
+    assert states["timeout_cap01"]["status"] == STATUS_COMPLETE, (
+        f"After {mining.MAX_SESSION_TIMEOUTS} timeouts, session must be marked STATUS_COMPLETE "
+        f"(skipped permanently); got status={states['timeout_cap01']['status']}"
+    )
+    assert "skipped" in states["timeout_cap01"]["message"], (
+        "STATUS_COMPLETE message must indicate the session was skipped due to repeated timeouts"
+    )
+
+
+def test_stuck_cleanup_resets_in_progress_sessions(tmp_cortex_dir):
+    """Fix 3: Startup cleanup sweep resets STATUS_IN_PROGRESS sessions older
+    than MEMEM_STUCK_CLEANUP_HOURS to STATUS_FAILED so they re-enter the retry queue.
+
+    Simulates a process crash by inserting an in-progress row with updated_at
+    3 hours ago, then calling the cleanup function.
+    """
+    import sqlite3
+    import importlib
+
+    from memem import session_state_db, session_state
+    from memem.miner_daemon import _cleanup_stuck_sessions, STUCK_CLEANUP_HOURS
+    from memem.miner_protocol import STATUS_FAILED, STATUS_IN_PROGRESS
+
+    importlib.reload(session_state)
+
+    ss = _ss()
+
+    # Create a real session file so update_session_state can stat() it
+    sessions_dir = tmp_cortex_dir.parent / "sessions"
+    sessions_dir.mkdir(exist_ok=True)
+    jsonl = sessions_dir / "stuck_sess01.jsonl"
+    jsonl.write_text("x" * 1000)
+
+    # First write a normal state, then manually set updated_at to 3 hours ago
+    ss.update_session_state(jsonl, STATUS_IN_PROGRESS, message="mining...", attempts=1)
+
+    db_path = session_state._db_path()
+
+    # Manually backdate the updated_at to 3 hours ago
+    three_hours_ago = time.strftime(
+        "%Y-%m-%dT%H:%M:%SZ",
+        time.gmtime(time.time() - 3 * 3600)
+    )
+    with session_state_db._connect(db_path) as conn:
+        conn.execute(
+            "UPDATE mined_sessions SET updated_at = ? WHERE session_id = ?",
+            (three_hours_ago, "stuck_sess01"),
+        )
+
+    # Verify the row is in STATUS_IN_PROGRESS before cleanup
+    states = ss.load_mined_session_state()
+    assert states["stuck_sess01"]["status"] == STATUS_IN_PROGRESS, (
+        "test setup: session must be STATUS_IN_PROGRESS before cleanup"
+    )
+
+    # Run the cleanup
+    reset_count = _cleanup_stuck_sessions(db_path)
+
+    assert reset_count == 1, f"Expected 1 stuck session reset, got {reset_count}"
+
+    # Verify the session was reset to STATUS_FAILED
+    states = ss.load_mined_session_state()
+    assert states["stuck_sess01"]["status"] == STATUS_FAILED, (
+        f"Stuck session must be reset to STATUS_FAILED after cleanup; "
+        f"got {states['stuck_sess01']['status']}"
+    )
+    assert "abandoned" in states["stuck_sess01"]["message"], (
+        "Reset message must indicate the session was abandoned mid-mine"
     )

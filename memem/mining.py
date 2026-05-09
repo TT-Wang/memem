@@ -4,6 +4,17 @@ import os
 import subprocess
 from pathlib import Path
 
+# Timeout for individual Haiku subprocess calls. Raised from 120s (v1.6) to 180s
+# to give large sessions more headroom without timing out prematurely.
+# Env-overridable for ops tuning without code changes.
+HAIKU_TIMEOUT_SECONDS = int(os.environ.get("MEMEM_HAIKU_TIMEOUT", "180"))
+
+# After this many consecutive subprocess timeouts on a single session, mark it
+# STATUS_COMPLETE with a skip message instead of retrying indefinitely.
+# The session is permanently moved past and the miner continues normally.
+# Env-overridable for ops tuning.
+MAX_SESSION_TIMEOUTS = int(os.environ.get("MEMEM_MAX_SESSION_TIMEOUTS", "3"))
+
 from memem.assembly import _consolidate_project
 from memem.miner_protocol import (
     MINER_STATE_VERSION,
@@ -229,7 +240,7 @@ def _merge_memories(existing_content: str, new_content: str) -> str:
             input=prompt,
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=HAIKU_TIMEOUT_SECONDS,
         )
     except Exception as exc:
         raise TransientMiningError(str(exc))
@@ -245,8 +256,8 @@ def _merge_memories(existing_content: str, new_content: str) -> str:
     return merged[:2000]
 
 
-def _mark_session(path: Path, status: str, message: str = "", attempts: int = 0, offset_bytes: int = 0) -> None:
-    update_session_state(path, status=status, message=message, attempts=attempts, offset_bytes=offset_bytes)
+def _mark_session(path: Path, status: str, message: str = "", attempts: int = 0, offset_bytes: int = 0, timeout_failures: int = 0) -> None:
+    update_session_state(path, status=status, message=message, attempts=attempts, offset_bytes=offset_bytes, timeout_failures=timeout_failures)
 
 
 # Per-Haiku-call char budget. Haiku 4.5 has a 200k-token input window
@@ -503,7 +514,7 @@ def _summarize_session_haiku(messages: list[str]) -> list[dict]:
                 input=body,
                 capture_output=True,
                 text=True,
-                timeout=120,
+                timeout=HAIKU_TIMEOUT_SECONDS,
             )
         except Exception as exc:
             raise TransientMiningError(str(exc))
@@ -745,9 +756,10 @@ def mine_session(jsonl_path: str) -> dict:
     if session_is_complete(path, current_state):
         return {"skipped": True, "reason": "already mined"}
 
-    # Load current offset and attempts from persisted state
+    # Load current offset, attempts, and timeout_failures from persisted state
     stored_offset = int((current_state or {}).get("offset_bytes", 0) or 0)
     stored_attempts = int((current_state or {}).get("attempts", 0) or 0)
+    stored_timeout_failures = int((current_state or {}).get("timeout_failures", 0) or 0)
 
     # Incremental read: seek to where the last successful mine ended
     try:
@@ -764,11 +776,12 @@ def mine_session(jsonl_path: str) -> dict:
     # M-9: increment attempts NOW (before the Haiku call) so a SIGKILL between
     # the status-write and the Haiku response doesn't leave attempts un-incremented,
     # which would let the session re-queue indefinitely and burn Haiku quota.
-    _mark_session(path, STATUS_IN_PROGRESS, attempts=stored_attempts + 1, offset_bytes=stored_offset)
+    _mark_session(path, STATUS_IN_PROGRESS, attempts=stored_attempts + 1, offset_bytes=stored_offset, timeout_failures=stored_timeout_failures)
     try:
         if not messages:
             _mark_session(path, STATUS_COMPLETE, "no human messages",
-                          attempts=stored_attempts + 1, offset_bytes=file_size_at_read)
+                          attempts=stored_attempts + 1, offset_bytes=file_size_at_read,
+                          timeout_failures=stored_timeout_failures)
             return {
                 "session_id": session_id,
                 "memories_saved": 0,
@@ -778,7 +791,8 @@ def mine_session(jsonl_path: str) -> dict:
 
         if _is_agent_session(messages):
             _mark_session(path, STATUS_COMPLETE, "agent/module session — skipped",
-                          attempts=stored_attempts + 1, offset_bytes=file_size_at_read)
+                          attempts=stored_attempts + 1, offset_bytes=file_size_at_read,
+                          timeout_failures=stored_timeout_failures)
             return {
                 "session_id": session_id,
                 "memories_saved": 0,
@@ -789,7 +803,8 @@ def mine_session(jsonl_path: str) -> dict:
         insights = _summarize_session_haiku(messages)
         if not insights:
             _mark_session(path, STATUS_COMPLETE, "nothing worth saving",
-                          attempts=stored_attempts + 1, offset_bytes=file_size_at_read)
+                          attempts=stored_attempts + 1, offset_bytes=file_size_at_read,
+                          timeout_failures=stored_timeout_failures)
             return {
                 "session_id": session_id,
                 "memories_saved": 0,
@@ -909,6 +924,7 @@ def mine_session(jsonl_path: str) -> dict:
             f"saved={memories_saved} merged={memories_merged} skipped={duplicates_skipped} deleted={memories_deleted} version={MINER_STATE_VERSION}",
             attempts=stored_attempts,
             offset_bytes=file_size_at_read,
+            timeout_failures=stored_timeout_failures,
         )
         return {
             "session_id": session_id,
@@ -922,10 +938,51 @@ def mine_session(jsonl_path: str) -> dict:
     except MiningError as exc:
         # On failure: leave offset_bytes unchanged so the next attempt
         # re-tries the same delta (the content that caused the failure).
-        _mark_session(path, STATUS_FAILED, str(exc), attempts=stored_attempts + 1, offset_bytes=stored_offset)
+        # Check if this is a Haiku subprocess timeout — tracked separately from
+        # generic failures so huge sessions don't burn the generic retry cap.
+        exc_text = str(exc).lower()
+        is_timeout = (
+            isinstance(exc.__cause__, subprocess.TimeoutExpired)
+            or "timed out" in exc_text
+            or "timeoutexpired" in exc_text
+        )
+        if is_timeout:
+            new_timeout_failures = stored_timeout_failures + 1
+            if new_timeout_failures >= MAX_SESSION_TIMEOUTS:
+                # Session has timed out too many times; mark complete so the miner
+                # moves on rather than retrying indefinitely on a huge transcript.
+                log.warning(
+                    "Session %s skipped after %d Haiku CLI timeouts (MEMEM_MAX_SESSION_TIMEOUTS=%d)",
+                    session_id[:12], new_timeout_failures, MAX_SESSION_TIMEOUTS,
+                )
+                _mark_session(
+                    path,
+                    STATUS_COMPLETE,
+                    f"skipped — repeated Haiku CLI timeouts ({new_timeout_failures})",
+                    attempts=stored_attempts + 1,
+                    offset_bytes=stored_offset,
+                    timeout_failures=new_timeout_failures,
+                )
+                return {
+                    "session_id": session_id,
+                    "memories_saved": 0,
+                    "skipped": True,
+                    "reason": f"skipped — repeated Haiku CLI timeouts ({new_timeout_failures})",
+                    "status": STATUS_COMPLETE,
+                }
+            _mark_session(
+                path,
+                STATUS_FAILED,
+                str(exc),
+                attempts=stored_attempts + 1,
+                offset_bytes=stored_offset,
+                timeout_failures=new_timeout_failures,
+            )
+        else:
+            _mark_session(path, STATUS_FAILED, str(exc), attempts=stored_attempts + 1, offset_bytes=stored_offset, timeout_failures=stored_timeout_failures)
         raise
     except Exception as exc:
-        _mark_session(path, STATUS_FAILED, str(exc), attempts=stored_attempts + 1, offset_bytes=stored_offset)
+        _mark_session(path, STATUS_FAILED, str(exc), attempts=stored_attempts + 1, offset_bytes=stored_offset, timeout_failures=stored_timeout_failures)
         raise FatalMiningError(f"unexpected mining failure: {exc}") from exc
 
 

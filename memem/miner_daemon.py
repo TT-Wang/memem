@@ -17,6 +17,7 @@ import logging.handlers
 import os
 import random
 import signal
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -225,22 +226,43 @@ def _is_fatal_api_error(exc: BaseException) -> bool:
     out. Now we surface them as fatal so the daemon exits cleanly and waits
     for the user to re-authenticate.
 
-    Hung subprocess timeouts are also fatal: when _run_server_command raises
-    subprocess.TimeoutExpired the text reads "Command '...' timed out after N
-    seconds". The pattern "timed out" matches this verb form while intentionally
-    NOT matching "read timeout" or "connection timeout" (noun form), which are
-    transient API hiccups that should be retried.
+    Subprocess timeouts (subprocess.TimeoutExpired or a RetryableMinerError
+    wrapping a timeout message) are TRANSIENT — the session may be huge and
+    Haiku struggled, but the miner can continue mining other sessions. They
+    must NOT be classified as fatal (that would stop the whole miner daemon).
+    Per-session timeout accumulation is handled separately by mine_session via
+    the MEMEM_MAX_SESSION_TIMEOUTS cap.
+
+    HTTP 401/403 / auth key errors ARE fatal: no amount of retrying will fix
+    a broken API key. The miner should stop and let the user re-authenticate.
     """
+    # subprocess.TimeoutExpired → transient, never fatal
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return False
+
     text = str(exc).lower()
+
+    # Timeout patterns from _run_server_command's RetryableMinerError wrapping
+    # (e.g. "subprocess timed out after 300s; killed process group"). These are
+    # transient — the miner moves on to the next session.
+    transient_timeout_patterns = (
+        "subprocess timed out after",
+        "timed out after",
+    )
+    if any(pattern in text for pattern in transient_timeout_patterns):
+        return False
+
     fatal_patterns = (
         "hit your limit",
         "rate limit",
         "quota",
         "authentication_error",
         "invalid authentication",
+        "invalid_api_key",
+        "authentication failed",
+        "could not load credentials",
         "you are not logged in",
         "please run /login",
-        "timed out",
     )
     return any(pattern in text for pattern in fatal_patterns)
 
@@ -558,6 +580,54 @@ def _seed_failure_counts_from_state(states: dict) -> dict[str, int]:
     }
 
 
+STUCK_CLEANUP_HOURS = int(os.environ.get("MEMEM_STUCK_CLEANUP_HOURS", "2"))
+
+
+def _cleanup_stuck_sessions(db_path: "Path") -> int:
+    """Reset STATUS_IN_PROGRESS sessions older than STUCK_CLEANUP_HOURS to STATUS_FAILED.
+
+    On daemon restart, sessions left in STATUS_IN_PROGRESS indicate the process
+    died mid-mine (SIGKILL, OOM, power loss). They will never self-heal unless
+    explicitly reset. This sweep runs once at startup and moves them back to
+    STATUS_FAILED so they re-enter the normal retry queue (subject to HARD_RETRY_CAP).
+
+    Returns the number of sessions reset.
+    """
+    cutoff_dt = time.strftime(
+        "%Y-%m-%dT%H:%M:%S",
+        time.gmtime(time.time() - STUCK_CLEANUP_HOURS * 3600),
+    )
+    # Import here to avoid circular imports at module load time.
+    from memem import session_state_db  # noqa: PLC0415
+
+    try:
+        with session_state_db._connect(db_path) as conn:
+            # Count candidates first for the log line
+            rows = conn.execute(
+                "SELECT COUNT(*) FROM mined_sessions WHERE status = 'in_progress' AND updated_at < ?",
+                (cutoff_dt,),
+            ).fetchone()
+            count = rows[0] if rows else 0
+            if count > 0:
+                conn.execute(
+                    """
+                    UPDATE mined_sessions
+                       SET status = 'failed',
+                           last_error = 'abandoned in-progress (process died mid-mine)',
+                           message = 'abandoned in-progress (process died mid-mine)',
+                           attempts = attempts + 1,
+                           updated_at = ?
+                     WHERE status = 'in_progress'
+                       AND updated_at < ?
+                    """,
+                    (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), cutoff_dt),
+                )
+    except (sqlite3.Error, OSError) as exc:
+        log.error("stuck_cleanup_failed", error=str(exc))
+        return 0
+    return count
+
+
 def _run_loop():
     log.info(
         "mining_loop_started",
@@ -570,6 +640,15 @@ def _run_loop():
     # _get_installed_at is now read-only, so we have to create the marker
     # explicitly here instead of relying on lazy-creation.
     _ensure_installed_at()
+
+    # Startup stuck-session sweep: sessions left in STATUS_IN_PROGRESS from a
+    # previous daemon crash are reset to STATUS_FAILED so they re-enter the
+    # retry queue. Without this, they stay stuck forever until the file changes.
+    from memem.session_state import _db_path as _get_db_path  # noqa: PLC0415
+    db_path = _get_db_path()
+    stuck_count = _cleanup_stuck_sessions(db_path)
+    log.info("stuck_cleanup", reset_count=stuck_count, cutoff_hours=STUCK_CLEANUP_HOURS)
+    print(f"[miner] stuck-cleanup: reset {stuck_count} sessions from STATUS_IN_PROGRESS")
 
     # Seed failure_counts from persisted state so restarts don't reset the
     # counter. Without this, a flaky session could ping-pong forever between
