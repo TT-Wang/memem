@@ -219,13 +219,18 @@ def _tournament_break_ties(
         )
 
         try:
+            # Tournament cap: 30s per pairwise call (cheaper than mining's 180s).
+            # Pairwise judge is a tiny prompt, so 30s is generous; we still want
+            # to bound user-visible latency since tournament runs in the
+            # synchronous slice-generation path (max 6 calls × 30s = 180s).
+            tournament_timeout = int(os.environ.get("MEMEM_TOURNAMENT_TIMEOUT", "30"))
             result = subprocess.run(
                 ["claude", "-p", "--model", "haiku", "--tools", "", "--system-prompt",
                  "You are a memory relevance judge. Reply with exactly one character: A or B."],
                 input=prompt,
                 capture_output=True,
                 text=True,
-                timeout=30,
+                timeout=tournament_timeout,
             )
             out = result.stdout.strip().upper()
             if out.startswith("A"):
@@ -807,6 +812,11 @@ def generate_session_start_slice(
     procedural_block = _render_procedural_suggestions_block()
 
     # -------------------------------------------------------------------
+    # Section 1c: Pending contradiction flags (M-3 consolidation)
+    # -------------------------------------------------------------------
+    contradiction_block = _render_contradiction_flags_block(normalized_scope)
+
+    # -------------------------------------------------------------------
     # Section 2: Recent decisions (last 7 days, top 3 by strength)
     # -------------------------------------------------------------------
     decisions_block = _render_decisions_block(normalized_scope)
@@ -832,6 +842,7 @@ def generate_session_start_slice(
     parts = [
         ("working_memory", wm_block),
         ("procedural_suggestions", procedural_block),
+        ("contradiction_flags", contradiction_block),
         ("decisions", decisions_block),
         ("arcs", arcs_block),
         ("l0_anchors", l0_block),
@@ -1004,6 +1015,52 @@ def _render_procedural_suggestions_block() -> str:
             entry_lines.append(f'   - Current: "{current_snippet}"')
         entry_lines.append(f'   - Proposed: "{proposed_snippet}"')
         lines.append("\n".join(entry_lines))
+
+    return "\n".join(lines)
+
+
+def _render_contradiction_flags_block(normalized_scope: str) -> str:
+    """Render pending contradiction flags from M-3 consolidation pass.
+
+    Queries memories tagged ``kind:contradiction-flag`` (NOT deprecated) for
+    this scope. Surfaces up to 3 oldest-first so the user reviews and resolves
+    them. Omits the section entirely when none exist.
+    """
+    try:
+        from memem.obsidian_store import _obsidian_memories
+    except Exception:
+        return ""
+
+    all_mems = _obsidian_memories()
+    flags: list[dict[str, Any]] = []
+    for mem in all_mems:
+        tags = mem.get("domain_tags") or []
+        if "kind:contradiction-flag" not in tags:
+            continue
+        if mem.get("status") == "deprecated":
+            continue
+        # Scope filter: same project, OR project='general' (consolidation-flag is cross-cutting)
+        proj = _normalize_scope_id(str(mem.get("project", "general") or "general"))
+        if proj != normalized_scope and proj != "general":
+            continue
+        flags.append(mem)
+
+    if not flags:
+        return ""
+
+    def _sort_key(m: dict) -> str:
+        return str(m.get("created_iso") or m.get("created_at") or "")
+
+    flags.sort(key=_sort_key)
+    top3 = flags[:3]
+
+    lines = [f"## Pending contradiction review\n\n{len(flags)} unresolved contradiction(s) found by consolidation:"]
+    for idx, mem in enumerate(top3, start=1):
+        created = str(mem.get("created_iso") or mem.get("created_at") or "")
+        date_str = created[:10] if created else "unknown date"
+        title = str(mem.get("title", "") or "(untitled)")[:80]
+        essence = str(mem.get("essence") or mem.get("full_record") or "")[:200]
+        lines.append(f"\n{idx}. **{date_str}** — {title}\n   {essence}")
 
     return "\n".join(lines)
 

@@ -339,7 +339,14 @@ def run_consolidation_pass(
                     source_type="consolidated",
                     layer=layer,
                 )
-                canonical_mem["supersedes"] = [m.get("id", "") for m in cluster_mems]
+                # `supersedes` as a list isn't persisted by _write_obsidian_memory.
+                # Encode the source IDs as `supersedes:<id8>` tags so the
+                # graph_index can build supersession edges (see graph_index.py:354)
+                # AND keep the in-memory field for any direct caller.
+                source_ids = [m.get("id", "") for m in cluster_mems if m.get("id")]
+                canonical_mem["supersedes"] = source_ids
+                for sid in source_ids:
+                    canonical_mem.setdefault("domain_tags", []).append(f"supersedes:{sid[:8]}")
                 _save_memory(canonical_mem)
                 canonical_id = canonical_mem["id"]
                 result.canonical_memories_created.append(canonical_id)
@@ -362,7 +369,12 @@ def run_consolidation_pass(
             if not dry_run:
                 # Re-fetch the live memory (it may have been updated by _save_memory side effects)
                 live_mem = _find_memory(src_id) or src_mem
-                live_mem["superseded_by"] = canonical_id
+                # Use `replaced_by` — the existing bi-temporal field that
+                # _write_obsidian_memory actually persists (obsidian_store.py:529).
+                # `superseded_by` was the spec name but isn't in the schema; using
+                # it would silently lose the audit trail on disk.
+                live_mem["replaced_by"] = canonical_id
+                live_mem["superseded_by"] = canonical_id  # in-memory only; tests check both
                 live_mem["status"] = "deprecated"
                 try:
                     _write_obsidian_memory(live_mem)

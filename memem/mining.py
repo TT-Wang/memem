@@ -868,6 +868,15 @@ def _mine_procedural_suggestions(
                 f"**Proposed:**\n```\n{proposed}\n```"
             )
 
+        # Dedup: if a near-identical procedural suggestion exists already
+        # (same correction recurring across sessions), skip the save. Without
+        # this, repeated corrections inflate the SessionStart pending queue
+        # with the same suggestion 3 times until they all auto-archive at 7d.
+        existing, score = _find_best_match(body, scope_id="general")
+        if existing and score > 0.6 and "kind:procedural-suggestion" in (existing.get("domain_tags") or []):
+            log.info("Procedural suggestion dedup: skipping (matches %s @ %.2f)", existing.get("id", "")[:8], score)
+            continue
+
         title = f"Instruction suggestion: {proposed[:60]}"
         tags = ["procedural", "suggestion", "pending", "kind:procedural-suggestion"]
         mem = _make_memory(

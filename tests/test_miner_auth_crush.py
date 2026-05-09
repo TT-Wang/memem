@@ -40,9 +40,6 @@ from memem.miner_protocol import (
         "You have hit your limit for this month",
         "rate limit exceeded, retry later",
         "API quota reached",
-        "Command '['claude', '-p']' timed out after 300 seconds",
-        "subprocess timed out",
-        "mining timed out after 600.5 seconds",
     ],
 )
 def test_fatal_api_error_classifies_known_fatal_messages(message):
@@ -59,6 +56,12 @@ def test_fatal_api_error_classifies_known_fatal_messages(message):
         "subprocess exited with non-zero status",
         "json decode error at line 42",
         "",
+        # v1.7 m1: Haiku CLI subprocess timeouts are TRANSIENT (per-session
+        # cap handles repeated cases), not permanent. Previously these
+        # incorrectly killed the miner on a single huge active session.
+        "Command '['claude', '-p']' timed out after 300 seconds",
+        "subprocess timed out",
+        "mining timed out after 600.5 seconds",
     ],
 )
 def test_fatal_api_error_lets_retryable_errors_through(message):
