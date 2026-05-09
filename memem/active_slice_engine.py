@@ -802,6 +802,11 @@ def generate_session_start_slice(
     wm_block = _render_working_memory_block(wm_sections)
 
     # -------------------------------------------------------------------
+    # Section 1b: Pending instruction rewrite suggestions (M-1 procedural)
+    # -------------------------------------------------------------------
+    procedural_block = _render_procedural_suggestions_block()
+
+    # -------------------------------------------------------------------
     # Section 2: Recent decisions (last 7 days, top 3 by strength)
     # -------------------------------------------------------------------
     decisions_block = _render_decisions_block(normalized_scope)
@@ -826,6 +831,7 @@ def generate_session_start_slice(
     # -------------------------------------------------------------------
     parts = [
         ("working_memory", wm_block),
+        ("procedural_suggestions", procedural_block),
         ("decisions", decisions_block),
         ("arcs", arcs_block),
         ("l0_anchors", l0_block),
@@ -928,6 +934,78 @@ def _render_working_memory_block(sections: dict[str, str]) -> str:
     if len(parts) == 1:
         return ""
     return "\n\n".join(parts)
+
+
+def _render_procedural_suggestions_block() -> str:
+    """Render pending instruction-rewrite suggestions (kind:procedural-suggestion, status: pending_review).
+
+    Queries all memories with the ``kind:procedural-suggestion`` tag and
+    ``status: pending_review``. Sorts by ``created_iso`` ascending (oldest
+    first) and surfaces the top 3. Omits the section entirely when none exist.
+    """
+    try:
+        from memem.obsidian_store import _obsidian_memories
+    except Exception:
+        return ""
+
+    all_mems = _obsidian_memories()
+    pending: list[dict[str, Any]] = []
+    for mem in all_mems:
+        tags = mem.get("domain_tags") or []
+        if "kind:procedural-suggestion" not in tags:
+            continue
+        if mem.get("status") != "pending_review":
+            continue
+        pending.append(mem)
+
+    if not pending:
+        return ""
+
+    # Sort oldest-first by created_iso (falls back to created_at)
+    def _sort_key(m: dict) -> str:
+        return str(m.get("created_iso") or m.get("created_at") or "")
+
+    pending.sort(key=_sort_key)
+    top3 = pending[:3]
+
+    lines = [f"## Pending instruction rewrites\n\n{len(pending)} suggestion(s) await your review (oldest first):"]
+    for idx, mem in enumerate(top3, start=1):
+        created_iso = str(mem.get("created_iso") or mem.get("created_at") or "")
+        date_str = created_iso[:10] if created_iso else "unknown date"
+        reason = ""
+        essence = mem.get("essence") or mem.get("full_record") or ""
+        # Extract reason line from body
+        for line in essence.splitlines():
+            if line.startswith("**Reason:**"):
+                reason = line[len("**Reason:**"):].strip()
+                break
+        # Extract current/proposed from body
+        current_snippet = ""
+        proposed_snippet = ""
+        in_current = False
+        in_proposed = False
+        for line in essence.splitlines():
+            if line.startswith("**Current:**"):
+                in_current = True
+                in_proposed = False
+            elif line.startswith("**Proposed:**"):
+                in_current = False
+                in_proposed = True
+            elif line.strip() == "```":
+                pass
+            elif in_current and line.strip() and not current_snippet:
+                current_snippet = line.strip()[:100]
+                in_current = False
+            elif in_proposed and line.strip() and not proposed_snippet:
+                proposed_snippet = line.strip()[:100]
+                in_proposed = False
+        entry_lines = [f"\n{idx}. **From session {date_str}:** {reason}"]
+        if current_snippet:
+            entry_lines.append(f'   - Current: "{current_snippet}"')
+        entry_lines.append(f'   - Proposed: "{proposed_snippet}"')
+        lines.append("\n".join(entry_lines))
+
+    return "\n".join(lines)
 
 
 def _render_decisions_block(normalized_scope: str) -> str:

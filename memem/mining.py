@@ -744,6 +744,154 @@ def _is_agent_session(messages: list[str]) -> bool:
     )
 
 
+_HAIKU_PROCEDURAL_SYSTEM = (
+    "You are an AI assistant auditing a conversation for user corrections and preferences.\n\n"
+    "Given:\n"
+    "1. A conversation transcript\n"
+    "2. The user's current top-level instructions (from CLAUDE.md)\n\n"
+    "Identify any explicit user corrections in the session ('don't do X', 'stop doing Y', "
+    "'always Z', 'never Q'). Based on these, propose 0-3 specific instruction rewrites the "
+    "user would benefit from.\n\n"
+    "Each rewrite MUST be a JSON object with:\n"
+    '- "current_text": exact substring of the current instructions to replace, or null if brand new\n'
+    '- "proposed_text": new wording the agent should follow\n'
+    '- "reason": 1-sentence why — cite the specific user correction from this session\n\n'
+    "Output a JSON array of rewrite objects. If no rewrites are warranted, output [].\n"
+    "Output ONLY the JSON array, no other text."
+)
+
+# Env-overridable TTL for procedural suggestions before auto-archive.
+MEMEM_PROCEDURAL_TTL_DAYS = int(os.environ.get("MEMEM_PROCEDURAL_TTL_DAYS", "7"))
+
+
+def _mine_procedural_suggestions(
+    messages: list[str],
+    jsonl_path: Path,
+    session_id: str,
+) -> None:
+    """Mine user corrections from a session and queue instruction-rewrite suggestions.
+
+    Reads the project's CLAUDE.md (detected from the session's cwd). Runs a
+    focused Haiku pass to identify 0-3 potential instruction rewrites. Saves
+    each as a ``kind:procedural-suggestion`` memory with ``status: pending_review``.
+
+    Best-effort: caller must wrap in try/except.
+    Skipped if CLAUDE.md does not exist (no baseline to suggest changes to).
+    """
+    import uuid as _uuid
+    from datetime import UTC, datetime
+
+    # Detect CLAUDE.md from session cwd
+    session_cwd = _detect_session_cwd(str(jsonl_path))
+    if not session_cwd:
+        return
+    claude_md_path = Path(session_cwd) / "CLAUDE.md"
+    if not claude_md_path.exists():
+        return
+
+    try:
+        current_instructions = claude_md_path.read_text(encoding="utf-8", errors="ignore")[:4000]
+    except OSError:
+        return
+
+    if not current_instructions.strip():
+        return
+
+    # Build Haiku prompt
+    combined = "\n\n".join(messages[:200])  # cap at 200 messages for the procedural pass
+    prompt = (
+        "=== CURRENT INSTRUCTIONS (CLAUDE.md) ===\n"
+        + current_instructions
+        + "\n=== END INSTRUCTIONS ===\n\n"
+        "=== CONVERSATION TRANSCRIPT ===\n"
+        + combined
+        + "\n=== END TRANSCRIPT ===\n\n"
+        "Now propose instruction rewrites per the system instructions. "
+        "Output ONLY a JSON array. If no rewrites needed, output []."
+    )
+
+    try:
+        result = subprocess.run(
+            ["claude", "-p", "--model", "haiku", "--tools", "", "--system-prompt", _HAIKU_PROCEDURAL_SYSTEM],
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=HAIKU_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        log.warning("Procedural Haiku call failed: %s", exc)
+        return
+
+    if result.returncode != 0:
+        log.warning("Procedural Haiku non-zero exit: %s", result.stderr.strip()[:200])
+        return
+
+    json_str = _extract_json_string(result.stdout.strip())
+    if not json_str:
+        return
+
+    try:
+        rewrites = json.loads(json_str)
+    except json.JSONDecodeError:
+        repaired = _repair_json(json_str)
+        try:
+            rewrites = json.loads(repaired)
+        except json.JSONDecodeError:
+            return
+
+    if not isinstance(rewrites, list) or not rewrites:
+        return
+
+    now_str = datetime.now(UTC).isoformat()
+    saved_count = 0
+    for rewrite in rewrites[:3]:  # cap at 3
+        if not isinstance(rewrite, dict):
+            continue
+        proposed = rewrite.get("proposed_text", "").strip()
+        reason = rewrite.get("reason", "").strip()
+        current_text = rewrite.get("current_text")
+        if not proposed or not reason:
+            continue
+
+        # Build content body
+        if current_text:
+            body = (
+                f"## Instruction rewrite suggestion\n\n"
+                f"**Reason:** {reason}\n\n"
+                f"**Current:**\n```\n{current_text}\n```\n\n"
+                f"**Proposed:**\n```\n{proposed}\n```"
+            )
+        else:
+            body = (
+                f"## New instruction suggestion\n\n"
+                f"**Reason:** {reason}\n\n"
+                f"**Proposed:**\n```\n{proposed}\n```"
+            )
+
+        title = f"Instruction suggestion: {proposed[:60]}"
+        tags = ["procedural", "suggestion", "pending", "kind:procedural-suggestion"]
+        mem = _make_memory(
+            content=body,
+            title=title,
+            tags=tags,
+            project="general",
+            source_type="mined",
+            source_session=session_id[:8],
+            importance=4,
+            layer=LAYER_L1,
+        )
+        mem["id"] = str(_uuid.uuid4())
+        mem["status"] = "pending_review"
+        # Store created_iso as a custom field the slice engine can read
+        mem["created_iso"] = now_str
+        _save_memory(mem)
+        saved_count += 1
+        log.info("Procedural suggestion saved: %s", title[:60])
+
+    if saved_count:
+        log.info("[miner] procedural-suggestion: saved %d suggestion(s) from session %s", saved_count, session_id[:8])
+
+
 def mine_session(jsonl_path: str) -> dict:
     path = Path(jsonl_path)
     if not path.exists():
@@ -915,6 +1063,13 @@ def mine_session(jsonl_path: str) -> dict:
                 )
         except Exception as exc:
             log.warning("Relevance feedback failed (non-fatal): %s", exc)
+
+        # M-1 Procedural memory: mine user corrections and propose instruction
+        # rewrites. Best-effort — never breaks the main extraction path.
+        try:
+            _mine_procedural_suggestions(messages, path, session_id)
+        except Exception as exc:
+            log.warning("Procedural suggestion pass failed (non-fatal): %s", exc)
 
         # On success: advance offset to where we finished reading.
         # This ensures the next mine of this session only processes new content.

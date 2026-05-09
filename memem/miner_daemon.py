@@ -582,6 +582,9 @@ def _seed_failure_counts_from_state(states: dict) -> dict[str, int]:
 
 STUCK_CLEANUP_HOURS = int(os.environ.get("MEMEM_STUCK_CLEANUP_HOURS", "2"))
 
+# TTL in days before a pending procedural suggestion is auto-archived as expired.
+MEMEM_PROCEDURAL_TTL_DAYS = int(os.environ.get("MEMEM_PROCEDURAL_TTL_DAYS", "7"))
+
 
 def _cleanup_stuck_sessions(db_path: "Path") -> int:
     """Reset STATUS_IN_PROGRESS sessions older than STUCK_CLEANUP_HOURS to STATUS_FAILED.
@@ -628,6 +631,72 @@ def _cleanup_stuck_sessions(db_path: "Path") -> int:
     return count
 
 
+def _archive_expired_procedural_suggestions() -> int:
+    """Mark procedural-suggestion memories older than MEMEM_PROCEDURAL_TTL_DAYS as 'expired'.
+
+    Finds all memories with tag ``kind:procedural-suggestion`` AND
+    ``status: pending_review`` AND ``created_iso`` older than the TTL.
+    Updates each to ``status: expired`` to keep the audit trail without
+    cluttering the SessionStart briefing.
+
+    Returns the number of suggestions archived.
+    """
+    try:
+        from datetime import UTC, datetime, timedelta
+
+        from memem.models import now_iso, parse_iso_dt
+        from memem.obsidian_store import (
+            _cache_refresh_from_disk,
+            _find_memory,
+            _obsidian_memories,
+            _write_obsidian_memory,
+        )
+    except Exception as exc:
+        log.warning("procedural_archive_import_failed", error=str(exc))
+        return 0
+
+    try:
+        all_mems = _obsidian_memories()
+    except Exception as exc:
+        log.warning("procedural_archive_load_failed", error=str(exc))
+        return 0
+
+    now = datetime.now(UTC)
+    cutoff = now - timedelta(days=MEMEM_PROCEDURAL_TTL_DAYS)
+    archived = 0
+
+    for mem in all_mems:
+        tags = mem.get("domain_tags") or []
+        if "kind:procedural-suggestion" not in tags:
+            continue
+        if mem.get("status") != "pending_review":
+            continue
+        # Parse created_iso or fall back to created_at
+        ts_str = str(mem.get("created_iso") or mem.get("created_at") or "")
+        if not ts_str:
+            continue
+        created_dt = parse_iso_dt(ts_str)
+        if created_dt is None:
+            continue
+        if created_dt >= cutoff:
+            continue  # still within TTL
+        # Archive it: update status to expired
+        mem_id = mem.get("id", "")
+        try:
+            fresh = _find_memory(mem_id)
+            if not fresh:
+                continue
+            fresh["status"] = "expired"
+            fresh["updated_at"] = now_iso()
+            _write_obsidian_memory(fresh)
+            _cache_refresh_from_disk(mem_id)
+            archived += 1
+        except Exception as exc:
+            log.warning("procedural_archive_update_failed", memory_id=str(mem_id)[:8], error=str(exc))
+
+    return archived
+
+
 def _run_loop():
     log.info(
         "mining_loop_started",
@@ -649,6 +718,11 @@ def _run_loop():
     stuck_count = _cleanup_stuck_sessions(db_path)
     log.info("stuck_cleanup", reset_count=stuck_count, cutoff_hours=STUCK_CLEANUP_HOURS)
     print(f"[miner] stuck-cleanup: reset {stuck_count} sessions from STATUS_IN_PROGRESS")
+
+    # Startup procedural-suggestion sweep: archive suggestions older than TTL.
+    expired_count = _archive_expired_procedural_suggestions()
+    log.info("procedural_suggestion_archive", archived=expired_count, ttl_days=MEMEM_PROCEDURAL_TTL_DAYS)
+    print(f"[miner] procedural-suggestion: archived {expired_count} expired suggestions (>{MEMEM_PROCEDURAL_TTL_DAYS} days)")
 
     # Seed failure_counts from persisted state so restarts don't reset the
     # counter. Without this, a flaky session could ping-pong forever between
