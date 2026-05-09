@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import subprocess
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, Literal, cast
 
 from memem.activation import judge_activation_heuristically, judge_activation_with_llm
@@ -114,6 +118,141 @@ def _transcript_candidates(query: str) -> list[Candidate]:
         normalize_transcript_candidate(chunk, title=f"Transcript excerpt {idx + 1}", score=0.45)
         for idx, chunk in enumerate(chunks[:_MAX_TRANSCRIPT_CANDIDATES])
     ]
+
+
+def _detect_tie_zone(ranked: list[Candidate], k: int = 5, threshold: float = 0.10) -> bool:
+    """Return True if the top-k candidates' scores are within `threshold` of each other.
+
+    A 'tie zone' means the weighted-sum ranking is essentially indistinguishable —
+    relative ordering within the zone is noise. Triggers tournament tie-break.
+    """
+    if len(ranked) < 2:
+        return False
+    top_k = ranked[:k]
+    scores = [float(c.get("score", 0.0)) for c in top_k]
+    return (max(scores) - min(scores)) <= threshold
+
+
+def _tournament_break_ties(
+    query: str,
+    candidates: list[Candidate],
+    cache_dir: Path,
+) -> list[Candidate]:
+    """Run pairwise Haiku judge on tied candidates; return re-ordered by win count.
+
+    For N candidates, run min(N choose 2, 6) pairwise comparisons (cap at 6 to bound cost).
+    Cache by (query-fingerprint, candidate-set-hash) at cache_dir / '.tournament-cache.json'
+    with 24h TTL. Cache hit -> no Haiku call.
+    """
+    if not candidates:
+        return candidates
+
+    # Build fingerprint for cache lookup
+    candidate_ids = sorted(
+        c.get("memory_id") or c.get("artifact_id") or c.get("candidate_id", "")
+        for c in candidates
+    )
+    raw_key = query + "".join(candidate_ids)
+    fingerprint = hashlib.sha256(raw_key.encode()).hexdigest()[:16]
+
+    # Check cache
+    cache_file = cache_dir / ".tournament-cache.json"
+    cache: dict[str, Any] = {}
+    if cache_file.exists():
+        try:
+            cache = json.loads(cache_file.read_text())
+        except Exception:
+            cache = {}
+
+    now = datetime.now(UTC)
+    entry = cache.get(fingerprint)
+    if entry:
+        ts_str = entry.get("ts", "")
+        try:
+            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            if now - ts < timedelta(hours=24):
+                # Cache hit: reorder candidates by cached order
+                order = entry.get("order", [])
+                id_to_cand: dict[str, Candidate] = {}
+                for c in candidates:
+                    cid = c.get("memory_id") or c.get("artifact_id") or c.get("candidate_id", "")
+                    id_to_cand[cid] = c
+                reordered = [id_to_cand[oid] for oid in order if oid in id_to_cand]
+                # Append any candidates not in cached order (shouldn't happen, but safety net)
+                seen = set(order)
+                for c in candidates:
+                    cid = c.get("memory_id") or c.get("artifact_id") or c.get("candidate_id", "")
+                    if cid not in seen:
+                        reordered.append(c)
+                return reordered
+        except Exception:
+            pass
+
+    # Run pairwise tournament
+    n = len(candidates)
+    wins: dict[int, int] = {i: 0 for i in range(n)}
+
+    # Build all pairs, cap at 6
+    pairs: list[tuple[int, int]] = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            pairs.append((i, j))
+            if len(pairs) >= 6:
+                break
+        if len(pairs) >= 6:
+            break
+
+    for i, j in pairs:
+        a = candidates[i]
+        b = candidates[j]
+        title_a = a.get("title", "")
+        title_b = b.get("title", "")
+        essence_a = (a.get("content") or a.get("summary") or "")[:300]
+        essence_b = (b.get("content") or b.get("summary") or "")[:300]
+
+        prompt = (
+            f'For the query: "{query}"\n\n'
+            "Which memory is more useful as context?\n\n"
+            f"Memory A:\n{title_a}\n{essence_a}\n\n"
+            f"Memory B:\n{title_b}\n{essence_b}\n\n"
+            'Reply with exactly one character: "A" or "B".'
+        )
+
+        try:
+            result = subprocess.run(
+                ["claude", "-p", "--model", "haiku", "--tools", "", "--system-prompt",
+                 "You are a memory relevance judge. Reply with exactly one character: A or B."],
+                input=prompt,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            out = result.stdout.strip().upper()
+            if out.startswith("A"):
+                wins[i] += 1
+            elif out.startswith("B"):
+                wins[j] += 1
+            # If unclear, no point awarded (tie)
+        except Exception as exc:
+            log.debug("tournament pairwise call failed: %s", exc)
+
+    # Sort by win count descending; stable sort preserves original order on equal wins
+    indexed = sorted(range(n), key=lambda i: -wins[i])
+    reordered = [candidates[i] for i in indexed]
+
+    # Persist to cache
+    final_order = [
+        c.get("memory_id") or c.get("artifact_id") or c.get("candidate_id", "")
+        for c in reordered
+    ]
+    cache[fingerprint] = {"order": final_order, "ts": now.strftime("%Y-%m-%dT%H:%M:%SZ")}
+    try:
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_file.write_text(json.dumps(cache, indent=2))
+    except Exception as exc:
+        log.debug("tournament cache write failed: %s", exc)
+
+    return reordered
 
 
 def _graph_candidates(memory_candidates: list[Candidate]) -> list[Candidate]:
@@ -239,9 +378,27 @@ def generate_candidates(
     artifact_candidates = artifact_candidates_from_environment(env, normalized_scope)
     environment_candidates = environment_candidates_from_environment(env, normalized_scope)
 
+    # Tournament tie-break: when top-K memory candidates are within threshold, use Haiku
+    # to pairwise-rank them. Skipped when MEMEM_TOURNAMENT_ENABLED=false or no tie zone.
+    _TOURNAMENT_K = 5
+    merged_memory = _dedupe_candidates(
+        (memory_candidates + graph_candidates)[:_MAX_MEMORY_CANDIDATES + _MAX_GRAPH_CANDIDATES]
+    )
+    tournament_enabled_raw = os.environ.get("MEMEM_TOURNAMENT_ENABLED", "true").lower()
+    tournament_enabled = tournament_enabled_raw in {"1", "true", "yes", "on"}
+    if tournament_enabled and _detect_tie_zone(merged_memory, k=_TOURNAMENT_K):
+        from memem.models import MEMEM_DIR
+        tied_top = merged_memory[:_TOURNAMENT_K]
+        rest = merged_memory[_TOURNAMENT_K:]
+        try:
+            reranked_top = _tournament_break_ties(query, tied_top, cache_dir=MEMEM_DIR)
+            merged_memory = reranked_top + rest
+        except Exception as exc:
+            log.debug("tournament tie-break failed (skipping): %s", exc)
+
     return {
         "current_goal_candidates": current,
-        "memory_candidates": _dedupe_candidates((memory_candidates + graph_candidates)[:_MAX_MEMORY_CANDIDATES + _MAX_GRAPH_CANDIDATES]),
+        "memory_candidates": merged_memory,
         "playbook_candidate": playbook,
         "transcript_candidates": transcript_candidates,
         "artifact_candidates": artifact_candidates[:_MAX_ARTIFACT_CANDIDATES],

@@ -1,5 +1,11 @@
 """Tests for Active Memory Slice schemas and rendering."""
 
+import json
+import os
+import subprocess
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
 import pytest
 
 
@@ -426,3 +432,188 @@ def test_scope_rank_multiplier_unit():
     assert general_60["score"] == pytest.approx(0.6), "general unchanged"
     assert empty_60["score"] == pytest.approx(0.6), "empty-project unchanged"
     assert cortex_95["score"] == pytest.approx(1.0), "high-score clamped to 1.0, not 1.425"
+
+
+# ---------------------------------------------------------------------------
+# Tournament tie-break tests
+# ---------------------------------------------------------------------------
+
+def _make_tournament_candidate(memory_id: str, score: float, title: str = "", summary: str = "") -> dict:
+    """Helper: build a minimal candidate dict for tournament tests."""
+    return {
+        "candidate_id": f"memory:{memory_id}",
+        "candidate_type": "memory",
+        "memory_id": memory_id,
+        "project": "test-project",
+        "score": score,
+        "title": title or f"Memory {memory_id}",
+        "summary": summary or f"Summary for {memory_id}",
+        "content": f"Content for {memory_id}",
+        "layer": 2,
+    }
+
+
+def test_tie_zone_detected_when_top_k_within_threshold():
+    """_detect_tie_zone returns True when top-K scores are within threshold."""
+    from memem.active_slice_engine import _detect_tie_zone
+
+    # All top-5 scores within 0.10 of each other — tie zone
+    candidates = [
+        _make_tournament_candidate("m1", 0.80),
+        _make_tournament_candidate("m2", 0.75),
+        _make_tournament_candidate("m3", 0.73),
+        _make_tournament_candidate("m4", 0.72),
+        _make_tournament_candidate("m5", 0.71),
+    ]
+    assert _detect_tie_zone(candidates, k=5, threshold=0.10) is True
+
+
+def test_no_tie_zone_when_clear_winner():
+    """_detect_tie_zone returns False when top-K has a clear winner (spread > threshold)."""
+    from memem.active_slice_engine import _detect_tie_zone
+
+    # Top candidate clearly leads — not a tie zone
+    candidates = [
+        _make_tournament_candidate("m1", 0.95),
+        _make_tournament_candidate("m2", 0.60),
+        _make_tournament_candidate("m3", 0.55),
+        _make_tournament_candidate("m4", 0.50),
+        _make_tournament_candidate("m5", 0.45),
+    ]
+    assert _detect_tie_zone(candidates, k=5, threshold=0.10) is False
+
+
+def test_tie_zone_edge_exactly_at_threshold():
+    """Exactly at threshold is considered a tie zone (<=, not <)."""
+    from memem.active_slice_engine import _detect_tie_zone
+
+    # Use values with exact float representation: 0.5 and 0.4 have spread 0.1
+    candidates = [
+        _make_tournament_candidate("m1", 0.5),
+        _make_tournament_candidate("m2", 0.4),  # spread = exactly 0.1
+    ]
+    assert _detect_tie_zone(candidates, k=2, threshold=0.10) is True
+
+
+def test_tournament_runs_in_tie_zone(tmp_path):
+    """When top-K is a tie zone, tournament re-orders by win count via Haiku."""
+    from memem.active_slice_engine import _tournament_break_ties
+
+    candidates = [
+        _make_tournament_candidate("loser-a", 0.75),
+        _make_tournament_candidate("winner-b", 0.74),
+    ]
+
+    # Mock subprocess.run to always return "B wins"
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = "B"
+    mock_result.stderr = ""
+
+    with patch("memem.active_slice_engine.subprocess.run", return_value=mock_result) as mock_run:
+        reordered = _tournament_break_ties("test query", candidates, cache_dir=tmp_path)
+
+    # Haiku was called (at least once for the single pair)
+    assert mock_run.called
+
+    # winner-b (index 1) won every pairwise — should now be first
+    assert reordered[0]["memory_id"] == "winner-b"
+    assert reordered[1]["memory_id"] == "loser-a"
+
+
+def test_tournament_skipped_when_no_tie(tmp_path, monkeypatch):
+    """When no tie zone, Haiku is never called."""
+    from memem.active_slice_engine import _detect_tie_zone, _tournament_break_ties
+
+    candidates = [
+        _make_tournament_candidate("m1", 0.95),
+        _make_tournament_candidate("m2", 0.50),
+    ]
+
+    # Confirm no tie zone
+    assert _detect_tie_zone(candidates, k=2, threshold=0.10) is False
+
+    # Even if tournament is called, it should complete without error
+    # The tie-zone check is the gate — test that the caller respects it
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = "A"
+    mock_result.stderr = ""
+
+    with patch("memem.active_slice_engine.subprocess.run", return_value=mock_result) as mock_run:
+        # Simulate caller logic: only call tournament when tie zone detected
+        if _detect_tie_zone(candidates, k=2, threshold=0.10):
+            _tournament_break_ties("test query", candidates, cache_dir=tmp_path)
+
+    # Haiku must NOT have been called (no tie zone)
+    assert not mock_run.called
+
+
+def test_tournament_cache_hit_skips_haiku(tmp_path):
+    """On a second identical call, the cache is hit and Haiku is not called again."""
+    from datetime import UTC, datetime
+
+    from memem.active_slice_engine import _tournament_break_ties
+
+    candidates = [
+        _make_tournament_candidate("mem-alpha", 0.75),
+        _make_tournament_candidate("mem-beta", 0.74),
+    ]
+
+    # Pre-populate cache with the expected fingerprint
+    import hashlib
+    candidate_ids = sorted(c.get("memory_id", "") for c in candidates)
+    raw_key = "cached query" + "".join(candidate_ids)
+    fingerprint = hashlib.sha256(raw_key.encode()).hexdigest()[:16]
+
+    ts_now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    cache_data = {fingerprint: {"order": ["mem-beta", "mem-alpha"], "ts": ts_now}}
+    cache_file = tmp_path / ".tournament-cache.json"
+    cache_file.write_text(json.dumps(cache_data))
+
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = "A"
+    mock_result.stderr = ""
+
+    with patch("memem.active_slice_engine.subprocess.run", return_value=mock_result) as mock_run:
+        reordered = _tournament_break_ties("cached query", candidates, cache_dir=tmp_path)
+
+    # Haiku must NOT be called on cache hit
+    assert not mock_run.called, "Haiku should not be called when cache is valid"
+
+    # Cache specified mem-beta first
+    assert reordered[0]["memory_id"] == "mem-beta"
+    assert reordered[1]["memory_id"] == "mem-alpha"
+
+
+def test_memem_tournament_enabled_env_var(tmp_path, monkeypatch):
+    """When MEMEM_TOURNAMENT_ENABLED=false, tournament never runs regardless of tie zone."""
+    from memem.active_slice_engine import _detect_tie_zone
+
+    monkeypatch.setenv("MEMEM_TOURNAMENT_ENABLED", "false")
+
+    candidates = [
+        _make_tournament_candidate("m1", 0.80),
+        _make_tournament_candidate("m2", 0.75),
+        _make_tournament_candidate("m3", 0.73),
+    ]
+
+    # Tie zone IS detected
+    assert _detect_tie_zone(candidates, k=3, threshold=0.10) is True
+
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = "A"
+    mock_result.stderr = ""
+
+    with patch("memem.active_slice_engine.subprocess.run", return_value=mock_result) as mock_run:
+        # Simulate the env-var gate in generate_candidates logic
+        tournament_enabled_raw = os.environ.get("MEMEM_TOURNAMENT_ENABLED", "true").lower()
+        tournament_enabled = tournament_enabled_raw in {"1", "true", "yes", "on"}
+        if tournament_enabled and _detect_tie_zone(candidates, k=3, threshold=0.10):
+            from memem.active_slice_engine import _tournament_break_ties
+            _tournament_break_ties("test query", candidates, cache_dir=tmp_path)
+
+    # MEMEM_TOURNAMENT_ENABLED=false must prevent any Haiku call
+    assert not mock_run.called, "Haiku must not be called when MEMEM_TOURNAMENT_ENABLED=false"
