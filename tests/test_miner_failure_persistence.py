@@ -281,7 +281,6 @@ def test_timeout_reclassified_as_transient_in_mine_session(tmp_cortex_dir, tmp_v
         "subprocess timed out after 300s; killed process group"
     )
     # v1.7: timeout must NOT escalate to FatalMinerError — just returns (0, False)
-    result = None
     with patch.object(miner_daemon, "_run_server_command", side_effect=fake_exc):
         saved, completed = miner_daemon._mine_session(jsonl)
     assert saved == 0
@@ -715,7 +714,7 @@ def test_timeout_exception_not_classified_fatal(tmp_cortex_dir):
     """
     import subprocess as _subprocess
 
-    from memem.miner_daemon import _is_fatal_api_error, RetryableMinerError
+    from memem.miner_daemon import RetryableMinerError, _is_fatal_api_error
 
     # subprocess.TimeoutExpired must be transient (not fatal)
     timeout_exc = _subprocess.TimeoutExpired(cmd=["claude"], timeout=120)
@@ -753,7 +752,7 @@ def test_per_session_timeout_cap_marks_complete_at_threshold(tmp_cortex_dir, tmp
     from unittest.mock import patch
 
     from memem import mining, session_state
-    from memem.miner_protocol import STATUS_COMPLETE, STATUS_FAILED
+    from memem.miner_protocol import STATUS_COMPLETE
     importlib.reload(session_state)
     importlib.reload(mining)
 
@@ -785,7 +784,7 @@ def test_per_session_timeout_cap_marks_complete_at_threshold(tmp_cortex_dir, tmp
 
     # Each call should fail with TransientMiningError and be re-raised
     # (the session is still STATUS_FAILED after each failure)
-    for attempt in range(1, 4):
+    for _attempt in range(1, 4):
         with patch.object(mining, "_summarize_session_haiku", side_effect=_raise_timeout):
             try:
                 mining.mine_session(str(jsonl))
@@ -808,7 +807,7 @@ def test_per_session_timeout_cap_marks_complete_at_threshold(tmp_cortex_dir, tmp
         fh.write("\n" + _json.dumps({"type": "user", "message": {"content": "more content " + "x" * 200}}) + "\n")
 
     with patch.object(mining, "_summarize_session_haiku", side_effect=_raise_timeout):
-        result = mining.mine_session(str(jsonl))
+        mining.mine_session(str(jsonl))
 
     # After MAX_SESSION_TIMEOUTS+1 = 4th call, session should be skipped (STATUS_COMPLETE)
     states = ss.load_mined_session_state()
@@ -828,12 +827,11 @@ def test_stuck_cleanup_resets_in_progress_sessions(tmp_cortex_dir):
     Simulates a process crash by inserting an in-progress row with updated_at
     3 hours ago, then calling the cleanup function.
     """
-    import sqlite3
     import importlib
 
-    from memem import session_state_db, session_state
-    from memem.miner_daemon import _cleanup_stuck_sessions, STUCK_CLEANUP_HOURS
-    from memem.miner_protocol import STATUS_FAILED, STATUS_IN_PROGRESS
+    from memem import session_state, session_state_db
+    from memem.miner_daemon import _cleanup_stuck_sessions
+    from memem.miner_protocol import STATUS_FAILED
 
     importlib.reload(session_state)
 

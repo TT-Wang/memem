@@ -650,20 +650,20 @@ def dispatch_cli(argv: list[str], mcp) -> None:
             f"[memem consolidation] {mode} — layer={layer} "
             f"min_cluster={min_cluster_size} threshold={threshold}"
         )
-        result = run_consolidation_pass(
+        cons_result = run_consolidation_pass(
             layer=layer,
             min_cluster_size=min_cluster_size,
             similarity_threshold=threshold,
             dry_run=dry_run,
         )
-        print(f"  Clusters processed:        {result.clusters_processed}")
-        print(f"  Memories consolidated:     {result.memories_consolidated}")
-        print(f"  Contradictions flagged:    {result.contradictions_flagged}")
-        print(f"  Canonical memories created:{len(result.canonical_memories_created)}")
-        print(f"  Superseded memories:       {len(result.superseded_memories)}")
-        if result.errors:
-            print(f"  Errors ({len(result.errors)}):")
-            for err in result.errors:
+        print(f"  Clusters processed:        {cons_result.clusters_processed}")
+        print(f"  Memories consolidated:     {cons_result.memories_consolidated}")
+        print(f"  Contradictions flagged:    {cons_result.contradictions_flagged}")
+        print(f"  Canonical memories created:{len(cons_result.canonical_memories_created)}")
+        print(f"  Superseded memories:       {len(cons_result.superseded_memories)}")
+        if cons_result.errors:
+            print(f"  Errors ({len(cons_result.errors)}):")
+            for err in cons_result.errors:
                 print(f"    - {err}")
         if dry_run:
             print("  (Pass without --dry-run to execute)")

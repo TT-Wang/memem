@@ -75,6 +75,8 @@ ignore = [
     "SIM102", # nested-if readability preference
     "SIM105", # contextlib.suppress preference
     "SIM115", # context-handler preference
+    "SIM117", # nested-with preference (often hurts readability with long enter exprs)
+    "RET505", # else-after-return style preference
 ]
 
 [tool.ruff.lint.per-file-ignores]

@@ -3,13 +3,9 @@
 from __future__ import annotations
 
 import importlib
-import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest import mock
-
-import pytest
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -137,7 +133,7 @@ def test_mine_session_emits_procedural_suggestion(tmp_vault, tmp_cortex_dir, tmp
 
     from memem.mining import mine_session
 
-    result = mine_session(str(session_file))
+    mine_session(str(session_file))
 
     # At least one procedural-suggestion memory should be saved
     procedural_mems = [
@@ -248,9 +244,8 @@ def test_session_start_slice_surfaces_pending(tmp_vault, tmp_cortex_dir, monkeyp
     all_mems = [new_mem, old_mem, mid_mem]  # intentionally unsorted
 
     # Test _render_procedural_suggestions_block directly with patched _obsidian_memories
-    from memem.active_slice_engine import _render_procedural_suggestions_block
-
     import memem.obsidian_store as obs_mod
+    from memem.active_slice_engine import _render_procedural_suggestions_block
     original_fn = obs_mod._obsidian_memories
     try:
         obs_mod._obsidian_memories = lambda: all_mems

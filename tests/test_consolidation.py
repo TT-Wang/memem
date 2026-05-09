@@ -4,11 +4,8 @@ from __future__ import annotations
 
 import importlib
 import json
-import subprocess
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -152,17 +149,16 @@ class TestBelowThresholdLeftAlone:
         importlib.reload(obsidian_store)
         importlib.reload(consolidation)
 
-        m1 = _save_test_memory("TypeScript is preferred over JavaScript.", "TypeScript pref")
-        m2 = _save_test_memory("Use black for Python formatting.", "Python formatter")
-        m3 = _save_test_memory("Always run mypy before committing Python code.", "mypy check")
+        _save_test_memory("TypeScript is preferred over JavaScript.", "TypeScript pref")
+        _save_test_memory("Use black for Python formatting.", "Python formatter")
+        _save_test_memory("Always run mypy before committing Python code.", "mypy check")
 
         # Give all 3 different embeddings so cosine < 0.85
-        low_vecs: dict[str, list[float]] = {}
 
         def _mock_compute(memories: list[dict]):
             # Assign orthogonal-ish vectors to each memory
             vecs = []
-            for i, mem in enumerate(memories):
+            for i, _mem in enumerate(memories):
                 dim = 384
                 v = [(1.0 if j == i else 0.0) for j in range(dim)]
                 norm = sum(x * x for x in v) ** 0.5 or 1.0
@@ -321,10 +317,10 @@ class TestMinClusterSizeRespected:
         near_vec = _fake_embedding("typescript")
         far_vec = _fake_embedding_low("other topic")
 
-        m1 = _save_test_memory("TypeScript over JavaScript.", "TS pref A")
-        m2 = _save_test_memory("Use TypeScript for new code.", "TS pref B")
+        _save_test_memory("TypeScript over JavaScript.", "TS pref A")
+        _save_test_memory("Use TypeScript for new code.", "TS pref B")
         # Third memory is on a very different topic (low cosine with m1, m2)
-        m3 = _save_test_memory("Always use Docker for deployment.", "Docker deployment")
+        _save_test_memory("Always use Docker for deployment.", "Docker deployment")
 
         def _mock_compute(memories: list[dict]):
             vecs = []
