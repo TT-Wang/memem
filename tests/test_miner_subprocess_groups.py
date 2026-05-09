@@ -95,14 +95,16 @@ def test_subprocess_timeout_triggers_killpg_and_raises():
     assert "timed out" in str(exc_info.value)
 
 
-def test_subprocess_timeout_message_classified_as_fatal_by_is_fatal_api_error():
-    """The timeout RetryableMinerError message contains 'timed out', which
-    _is_fatal_api_error matches — ensuring the daemon exits instead of looping."""
+def test_subprocess_timeout_message_classified_as_transient_by_is_fatal_api_error():
+    """v1.7 m1: subprocess timeouts are TRANSIENT (retryable), NOT fatal.
+    The per-session timeout cap (MEMEM_MAX_SESSION_TIMEOUTS) handles repeated
+    cases; killing the entire daemon on a single huge session was wrong.
+    Matches the parametrize fix in test_miner_auth_crush.py."""
     timeout_exc = RetryableMinerError(
         f"subprocess timed out after {SUBPROCESS_TIMEOUT_SECONDS}s; killed process group"
     )
-    assert _is_fatal_api_error(timeout_exc) is True, (
-        "_is_fatal_api_error must return True for timeout errors to prevent spawn-storms"
+    assert _is_fatal_api_error(timeout_exc) is False, (
+        "_is_fatal_api_error must return False for timeout errors (v1.7 m1 reclassification)"
     )
 
 

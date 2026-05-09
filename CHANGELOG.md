@@ -10,6 +10,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
 
+## [1.7.0] - 2026-05-09 — Book patterns + miner hardening
+
+Triggered by a real miner-death incident on 2026-05-08: the miner hit a huge
+active dev-session JSONL, the Haiku CLI subprocess timed out at 120s, and the
+classifier marked the timeout as "permanent API/auth error" — the daemon refused
+to restart. Manual recovery was needed (skip the session, restart). v1.7 closes
+that failure mode and ships three patterns from Antonio Gulli's *Agentic Design
+Patterns* (Springer 2025).
+
+### Fixed — m1: Miner daemon hardening
+
+- **Subprocess timeouts reclassified as TRANSIENT.** `subprocess.TimeoutExpired`
+  and `"timed out after"` patterns no longer trigger the permanent-error path.
+  The miner keeps going on other sessions instead of dying entirely.
+- **Per-session timeout cap.** New `timeout_failures` column tracks per-session
+  Haiku CLI timeouts. After `MEMEM_MAX_SESSION_TIMEOUTS` (default 3), the
+  session is marked COMPLETE with a skip message and the miner moves on.
+  Prevents a single huge session from blocking the whole queue indefinitely.
+- **Startup stuck-state cleanup.** At daemon start, sessions with
+  `STATUS_IN_PROGRESS` and `updated_at` older than `MEMEM_STUCK_CLEANUP_HOURS`
+  (default 2) are reset to `STATUS_FAILED` with attempts incremented.
+  Cleans up the 938 stuck rows the triggering incident left behind.
+- **Haiku CLI timeout 120s → 180s** (configurable via `MEMEM_HAIKU_TIMEOUT`).
+  Gives huge sessions more headroom before the per-session cap fires.
+
+### Added — m2: Tournament tie-break ranking (book pp. 336-337)
+
+When the Active Memory Slice's top-K weighted-sum scores are within 10% of
+each other (a "tie zone"), the ranking is essentially noise. Tournament
+mode runs up to 6 pairwise Haiku judges to break ties on relevance to THIS
+query. Cached by (query-fingerprint, candidate-set-hash) at
+`~/.memem/.tournament-cache.json` with 24h TTL. Disabled via
+`MEMEM_TOURNAMENT_ENABLED=false`. Per-call timeout configurable via
+`MEMEM_TOURNAMENT_TIMEOUT` (default 30s).
+
+### Added — m3: Episodic consolidation + contradiction detection (book p. 149)
+
+New `memem/consolidation.py`. Run via `python3 -m memem.server --consolidate`
+(recommended weekly cron). Clusters L2 memories by embedding cosine
+similarity (threshold 0.85, min cluster size 3); for each cluster, one Haiku
+call merges into a canonical memory and flags any internal contradictions.
+Source memories are marked deprecated with `replaced_by: <canonical_id>`
+(audit trail preserved). Contradiction-flag memories surface in the
+SessionStart slice for user review.
+
+### Added — m4: Procedural memory layer (book pp. 146-147)
+
+Mining now runs a SECOND Haiku pass after knowledge extraction: given the
+session transcript + current CLAUDE.md + any user corrections, propose
+0-3 instruction rewrites. Saved as `kind:procedural-suggestion` memories
+with `status: pending_review`. SessionStart slice surfaces up to 3 oldest
+pending suggestions at the top of the briefing for user review (NOT
+auto-applied — explicit triage). Auto-archives after 7 days
+(`MEMEM_PROCEDURAL_TTL_DAYS`). Dedup'd against existing pending suggestions
+so recurring corrections don't fill the queue.
+
+### Fixed — post-tier-2 review
+
+- m3: `superseded_by` was set in memory dict but `_write_obsidian_memory`
+  never persisted that key — the audit-trail field was silently dropped.
+  Fixed by using the existing `replaced_by` schema field that IS persisted,
+  plus adding `supersedes:<id8>` tags so the graph_index can build edges.
+- m3: contradiction-flag memories were saved but never surfaced in
+  SessionStart. Added `_render_contradiction_flags_block` to the slice.
+- m1: `tests/test_miner_auth_crush.py` parametrize moved timeout entries
+  from FATAL to retryable to match the m1 reclassification.
+- m4: procedural-suggestion dedup gap — same correction across N sessions
+  filled the queue with N copies. Now skipped when score > 0.6 against an
+  existing pending suggestion.
+- m2: tournament timeout env-overridable via `MEMEM_TOURNAMENT_TIMEOUT`.
+
+### Stats
+
+- 633+ tests pass (was 633 in v1.6.1)
+- 4 new test files: `test_consolidation.py` (10 tests), `test_procedural.py` (5 tests),
+  expanded `test_miner_failure_persistence.py` and `test_active_slice.py`
+- mypy clean across 52 source files
+- ruff clean (added SIM117 + RET505 to ignore list — stylistic preference)
+- Triggering incident: miner-death on session 9612f54c-bbd5 (2026-05-08).
+  Manually skipped + restarted to recover; v1.7 prevents recurrence.
+
 ## [1.6.1] - 2026-05-08
 
 Patch release applying the four warnings from v1.6.0's final release review.
