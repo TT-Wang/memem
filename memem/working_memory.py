@@ -44,7 +44,7 @@ def serialize_to_md(sections: dict[str, str]) -> str:
 
 def parse_from_md(text: str) -> dict[str, str]:
     """Inverse of serialize_to_md. Tolerant: missing sections return empty string."""
-    result: dict[str, str] = {name: "" for name in ALLOWED_SECTIONS}
+    result: dict[str, str] = dict.fromkeys(ALLOWED_SECTIONS, "")
     current_section: str | None = None
     body_lines: list[str] = []
 

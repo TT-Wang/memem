@@ -189,10 +189,8 @@ def session_is_terminal(path: Path, state: dict | None) -> bool:
             fingerprint = session_fingerprint(path)
         except OSError:
             return True  # Can't stat → stay terminal
-        if fingerprint["size"] > stored_offset:
-            # New content available past the offset — re-enter for incremental mine
-            return False
-        return True
+        # New content past stored offset → re-enter for incremental mine; else stay terminal.
+        return fingerprint["size"] <= stored_offset
 
     try:
         fingerprint = session_fingerprint(path)

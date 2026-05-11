@@ -274,7 +274,7 @@ def test_update_section_serializes_concurrent_writers(tmp_path):
     wm_file = tmp_path / "working_memory.md"
     # Prime the file so both children have something to read.
     with mock.patch.object(wm_mod, "WORKING_MEMORY_FILE", wm_file):
-        wm_mod.write_working_memory({name: "" for name in wm_mod.ALLOWED_SECTIONS})
+        wm_mod.write_working_memory(dict.fromkeys(wm_mod.ALLOWED_SECTIONS, ""))
 
     # Use "spawn" to get clean child processes that import fresh modules.
     ctx = multiprocessing.get_context("fork")

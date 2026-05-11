@@ -190,7 +190,7 @@ def _tournament_break_ties(
 
     # Run pairwise tournament
     n = len(candidates)
-    wins: dict[int, int] = {i: 0 for i in range(n)}
+    wins: dict[int, int] = dict.fromkeys(range(n), 0)
 
     # Build all pairs, cap at 6
     pairs: list[tuple[int, int]] = []
