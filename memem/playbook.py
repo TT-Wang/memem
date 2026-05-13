@@ -14,6 +14,7 @@ staleness hash check so re-running is a no-op when nothing changed.
 
 import hashlib
 import logging
+import os
 import subprocess
 from datetime import UTC, datetime
 
@@ -138,6 +139,8 @@ def _playbook_refine(project: str, force: bool = False) -> dict:
             capture_output=True,
             text=True,
             timeout=180,
+            env={**os.environ, "MEMEM_HOOK_DISABLE": "1"},
+            start_new_session=True,
         )
     except Exception as exc:
         log.warning("Playbook refine failed for %s: %s", project, exc)

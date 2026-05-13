@@ -241,6 +241,8 @@ def _merge_memories(existing_content: str, new_content: str) -> str:
             capture_output=True,
             text=True,
             timeout=HAIKU_TIMEOUT_SECONDS,
+            env={**os.environ, "MEMEM_HOOK_DISABLE": "1"},
+            start_new_session=True,
         )
     except Exception as exc:
         raise TransientMiningError(str(exc)) from exc
@@ -515,6 +517,8 @@ def _summarize_session_haiku(messages: list[str]) -> list[dict]:
                 capture_output=True,
                 text=True,
                 timeout=HAIKU_TIMEOUT_SECONDS,
+                env={**os.environ, "MEMEM_HOOK_DISABLE": "1"},
+                start_new_session=True,
             )
         except Exception as exc:
             raise TransientMiningError(str(exc)) from exc
@@ -817,6 +821,8 @@ def _mine_procedural_suggestions(
             capture_output=True,
             text=True,
             timeout=HAIKU_TIMEOUT_SECONDS,
+            env={**os.environ, "MEMEM_HOOK_DISABLE": "1"},
+            start_new_session=True,
         )
     except Exception as exc:
         log.warning("Procedural Haiku call failed: %s", exc)

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 from dataclasses import dataclass, field
 
@@ -182,6 +183,8 @@ def _call_haiku_consolidate(cluster_memories: list[dict]) -> dict | None:
             capture_output=True,
             text=True,
             timeout=HAIKU_TIMEOUT_SECONDS,
+            env={**os.environ, "MEMEM_HOOK_DISABLE": "1"},
+            start_new_session=True,
         )
     except Exception as exc:
         log.warning("consolidation: Haiku subprocess failed: %s", exc)

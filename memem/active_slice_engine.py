@@ -231,6 +231,8 @@ def _tournament_break_ties(
                 capture_output=True,
                 text=True,
                 timeout=tournament_timeout,
+                env={**os.environ, "MEMEM_HOOK_DISABLE": "1"},
+                start_new_session=True,
             )
             out = result.stdout.strip().upper()
             if out.startswith("A"):

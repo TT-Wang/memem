@@ -10,6 +10,105 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
 
+## [1.7.2] - 2026-05-13 — Stability batch (anti-recursion, self-healing, observability)
+
+Triggered by a real production incident on this VPS: load average pegged at 15
+on a 4-core box, RAM at 5.2 GB / 7.5 GB used + 2.3 GB swap. Diagnosis surfaced
+**five operational bugs** working together to make memem unstable. v1.7.2 fixes
+each one and adds defense-in-depth.
+
+### Fixed — m12: Recursive hook fan-out (load=15 root cause)
+
+Every `claude -p --model haiku` call from memem (knowledge extractor, tournament
+judge, merge, refine, consolidate, activate) ran as a regular Claude Code session.
+That session's `UserPromptSubmit` + `Stop` hooks then fired memem's own
+`auto-recall.sh` and `post-stop-attribution.sh` — which spawned MORE
+`claude -p haiku` calls (slice tournament + extractor) — which fired hooks again,
+fan-out exponentially.
+
+- **All 10 `claude -p` call sites now set `MEMEM_HOOK_DISABLE=1`** in the
+  subprocess env: `mining.py` (3 sites), `active_slice_engine.py`, `playbook.py`,
+  `assembly.py`, `consolidation.py`, `dreamer.py` (2 sites), `activation.py`.
+- **All 3 hooks early-exit on `MEMEM_HOOK_DISABLE=1`**: `auto-recall.sh`,
+  `post-stop-attribution.sh`, `session-start.sh`. Check is right after
+  `set -euo pipefail`, before any work.
+- **All `claude -p` calls use `start_new_session=True`** so Python's
+  `subprocess.run(timeout=N)` cleanup kills the child's entire process group.
+- **Hooks use `setsid timeout --kill-after=5 N`** so when the outer hook timeout
+  fires, the whole subtree dies instead of orphaning to PPID=1.
+
+### Fixed — m3: Miner self-healing trio
+
+Three operational bugs we hit in the same hour today:
+
+- **Heartbeat went 13 hours stale while the daemon was actively mining.**
+  `_write_heartbeat()` was only called once per outer `while True:` iteration,
+  but the inner `for jsonl_path in sessions:` loop processes thousands of
+  sessions sequentially at ~150s each. With a long queue, the heartbeat stayed
+  frozen for hours while the daemon worked normally. Now also written at the
+  top of the inner loop, bounding freshness to per-session duration regardless
+  of queue depth.
+- **`miner-wrapper.sh stop` lied.** Sent SIGTERM and reported success without
+  verifying. Today's daemon survived this and required manual `kill -9`. Now
+  polls `kill -0 $PID` after SIGTERM, escalates to SIGKILL after 5s, and
+  returns nonzero if the process is still alive.
+- **Stale lock file blocked restart after abnormal exit.** When the daemon died
+  from SIGKILL/OOM/segfault, `~/.memem/miner.global.lock` lingered with the
+  dead PID; the next wrapper start saw the lock and refused. Now
+  `_acquire_global_lock` checks if the recorded PID is still alive via
+  `os.kill(pid, 0)`; if dead, removes the stale file and retries once.
+
+### Added — m5: Orphan-process reaper (defense in depth)
+
+Even with m12's guard in place, future code paths may forget. New
+`memem/reaper.py` exposes `reap_orphan_haiku_procs(min_age_seconds=120)` that
+walks `/proc`, finds `claude -p --model haiku` processes with `PPID=1` (adopted
+by init) older than 120s, and SIGKILLs them. The miner outer loop calls it once
+per iteration; logs `orphan_reaper_sweep` when reap_count > 0.
+
+Today's manual cleanup (before this code existed) reaped 14 such orphans at
+once and freed 2.8 GB of RAM. v1.7.2 prevents the accumulation rather than
+catching it after the fact.
+
+### Changed — m6: `--status` truth revamp
+
+Today's `--status` falsely reported "Daemon: running" for a zombie process and
+"Heartbeat: 145400s ago" without flagging it. New 5-section output:
+
+1. **Process tree** — wrapper vs daemon vs orphan haiku procs with ages + RSS
+2. **Heartbeat** with explicit bands: ✓ OK <60s | ⚠ WARN <300s | ✗ FAIL ≥300s
+3. **Lock file** — owner PID + ✓ alive vs ✗ STALE
+4. **Recent mining activity** — last 5 sessions with duration + memories_saved
+5. **Recursion-orphan counter** — total reaped since daemon start
+
+Backward-compatible: legacy `Daemon:`/`Heartbeat:`/`Lock:`/`Circuit breaker:`
+labels still emitted at the top so existing scripts grepping for them keep
+working. Logic extracted to new `memem/status.py` (`render_status() -> str`)
+for testability.
+
+### Changed — m4: CI dependency pinning (no more release-line CI breakage)
+
+Every release since v1.5.0 has failed CI on ruff lint rules added in newer ruff
+versions — `pyproject.toml`'s `[project.optional-dependencies].dev` declared
+`ruff>=0.6` (lower bound only) so CI pulled latest, which silently added new
+rules to already-selected families (C4, SIM). Today's caba5e2 fixed 4 such
+errors; the next ruff release will introduce more.
+
+- `ruff>=0.6` → `ruff~=0.6.0` (compatible-release: 0.6.x patches yes, 0.7+ no)
+- `mypy>=1.11` → `mypy~=1.11.0` (same rationale)
+
+### Notes
+
+- New tests: `test_subprocess_recursion_guard.py` (10 tests),
+  `test_miner_self_healing.py` (4 tests), `test_reaper.py` (8 tests),
+  `test_status_output.py` (9 tests). Total: 31 new tests, all passing.
+- 3 pre-existing tests in `test_v010_fixes.py` had `fake_run` signatures
+  that didn't accept the new `env=` and `start_new_session=` kwargs; updated
+  to `**kwargs` to be forward-compatible.
+- This release is a **safety patch**; the architectural win (persistent slice
+  daemon to eliminate ~500MB sentence-transformers cold-start per UserPromptSubmit
+  hook fire) is shipping as v1.8.0.
+
 ## [1.7.1] - 2026-05-09
 
 Patch release applying Phase 4.5 final-review followups from v1.7.0.

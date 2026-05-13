@@ -11,6 +11,7 @@ and deprecates obsolete ones.
 
 import json
 import logging
+import os
 import subprocess
 from collections.abc import Mapping
 from typing import Any
@@ -178,6 +179,8 @@ def _consolidate_project(project: str) -> dict:
             capture_output=True,
             text=True,
             timeout=120,
+            env={**os.environ, "MEMEM_HOOK_DISABLE": "1"},
+            start_new_session=True,
         )
     except Exception as exc:
         log.warning("Consolidation failed for %s: %s", project, exc)

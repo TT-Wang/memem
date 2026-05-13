@@ -585,6 +585,8 @@ def judge_activation_with_llm(
             capture_output=True,
             text=True,
             timeout=timeout,
+            env={**os.environ, "MEMEM_HOOK_DISABLE": "1"},
+            start_new_session=True,
         )
     except Exception as exc:
         fallback = judge_activation_heuristically(query, scope_id, environment, candidate_bundle)

@@ -544,7 +544,7 @@ def test_chunked_mining_small_session_fast_path(tmp_cortex_dir, monkeypatch):
 
     calls = []
 
-    def fake_run(cmd, input=None, capture_output=None, text=None, timeout=None):
+    def fake_run(cmd, input=None, capture_output=None, text=None, timeout=None, **kwargs):
         calls.append(input or "")
         return _FakeCompleted(
             returncode=0,
@@ -585,7 +585,7 @@ def test_chunked_mining_large_session_splits_chunks(tmp_cortex_dir, monkeypatch,
     # Each Haiku call returns one insight — counter so we can tell them apart.
     call_inputs: list[str] = []
 
-    def fake_run(cmd, input=None, capture_output=None, text=None, timeout=None):
+    def fake_run(cmd, input=None, capture_output=None, text=None, timeout=None, **kwargs):
         call_inputs.append(input or "")
         idx = len(call_inputs)
         return _FakeCompleted(
@@ -635,7 +635,7 @@ def test_chunked_mining_any_chunk_failure_fails_whole_session(
 
     call_count = {"n": 0}
 
-    def fake_run(cmd, input=None, capture_output=None, text=None, timeout=None):
+    def fake_run(cmd, input=None, capture_output=None, text=None, timeout=None, **kwargs):
         call_count["n"] += 1
         if call_count["n"] == 1:
             # First chunk succeeds

@@ -11,6 +11,10 @@
 
 set -euo pipefail
 
+# Anti-recursion guard: skip if invoked from a memem-spawned headless claude -p call.
+# Without this, every memem mining or tournament Haiku call recursively fires memem hooks → load explosion.
+[ -n "${MEMEM_HOOK_DISABLE:-}" ] && exit 0
+
 MEMEM_DIR="${MEMEM_DIR:-${CORTEX_DIR:-$HOME/.memem}}"
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
 

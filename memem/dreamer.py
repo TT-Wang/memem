@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -269,6 +270,7 @@ def find_cluster_summaries(memories: list[dict]) -> list[dict]:
                     input=prompt,
                     capture_output=True, text=True, timeout=60,
                     start_new_session=True,  # signal isolation; matches contradiction subprocess
+                    env={**os.environ, "MEMEM_HOOK_DISABLE": "1"},
                 )
                 if result.returncode != 0:
                     log.warning(
@@ -361,6 +363,7 @@ def _judge_contradiction_with_sonnet(pair: dict) -> dict | None:
             input=prompt,
             capture_output=True, text=True, timeout=60,
             start_new_session=True,
+            env={**os.environ, "MEMEM_HOOK_DISABLE": "1"},
         )
         if result.returncode != 0:
             return None

@@ -40,6 +40,7 @@ from memem.miner_protocol import (
     TRANSIENT_EXIT_CODE,
 )
 from memem.models import MEMEM_DIR
+from memem.reaper import reap_orphan_haiku_procs
 from memem.session_state import (
     HARD_RETRY_CAP,
     MINED_SESSIONS_FILE,
@@ -170,8 +171,14 @@ def _refuse_ephemeral_test_miner() -> bool:
     return True
 
 
-def _acquire_global_lock() -> bool:
-    """Allow only one memem miner per OS user, regardless of MEMEM_DIR."""
+def _try_acquire_lock_once() -> bool | None:
+    """Attempt one global lock acquisition cycle.
+
+    Returns:
+        True  — lock acquired successfully
+        False — lock held by a live process (genuine conflict)
+        None  — stale lock detected and removed; caller should retry
+    """
     global _GLOBAL_LOCK_FH
     GLOBAL_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
     old_umask = os.umask(0o177)  # 0o177 = restrict to owner-only (0600)
@@ -182,14 +189,60 @@ def _acquire_global_lock() -> bool:
     try:
         fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
+        # Lock is held — check if the PID in the file is still alive
+        try:
+            fh.seek(0)
+            content = fh.read().strip()
+            pid = int(content.splitlines()[0]) if content else 0
+        except (ValueError, IndexError, OSError):
+            pid = 0
         fh.close()
-        return False
+        if pid > 0:
+            try:
+                os.kill(pid, 0)  # raises OSError if process is dead
+                # Process is alive — genuine conflict
+                return False
+            except OSError:
+                # Process is dead — stale lock file, remove and signal retry
+                log.warning(
+                    "stale_global_lock_removed",
+                    stale_pid=pid,
+                    lock_file=str(GLOBAL_LOCK_FILE),
+                )
+                try:
+                    GLOBAL_LOCK_FILE.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return None  # signal: retry
+        # pid=0 means unreadable content — treat as stale
+        try:
+            GLOBAL_LOCK_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return None  # signal: retry
     fh.seek(0)
     fh.truncate()
     fh.write(f"{os.getpid()}\n")
     fh.flush()
     _GLOBAL_LOCK_FH = fh
     return True
+
+
+def _acquire_global_lock() -> bool:
+    """Allow only one memem miner per OS user, regardless of MEMEM_DIR.
+
+    If the lock file contains a stale PID (process no longer alive), removes
+    the lock file and retries acquisition once. If a live process holds the
+    lock, returns False immediately (no retry).
+    """
+    result = _try_acquire_lock_once()
+    if result is None:
+        # Stale lock was cleaned up — retry once
+        result = _try_acquire_lock_once()
+        if result is None:
+            # If still None after retry (very unlikely race), treat as conflict
+            return False
+    return bool(result)
 
 
 def _release_global_lock() -> None:
@@ -357,78 +410,8 @@ def stop_daemon():
 
 
 def status_daemon():
-    pid = _read_pid()
-    print("memem miner status")
-    print("=" * 18)
-
-    if pid:
-        print(f"Daemon:    running (PID {pid})")
-    else:
-        print("Daemon:    not running")
-
-    # Heartbeat
-    if HEARTBEAT_FILE.exists():
-        mtime = HEARTBEAT_FILE.stat().st_mtime
-        age = int(time.time() - mtime)
-        ts_iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(mtime))
-        print(f"Heartbeat: {ts_iso} ({age}s ago)")
-    else:
-        print("Heartbeat: missing (daemon never started or never wrote)")
-
-    # Lock owner
-    if GLOBAL_LOCK_FILE.exists():
-        try:
-            lock_pid = GLOBAL_LOCK_FILE.read_text().strip().splitlines()[0]
-            print(f"Lock:      held by PID {lock_pid} ({GLOBAL_LOCK_FILE})")
-        except (OSError, IndexError):
-            print(f"Lock:      file present but unreadable ({GLOBAL_LOCK_FILE})")
-    else:
-        print("Lock:      no lockfile present")
-
-    # Circuit breaker
-    # Note: _circuit_breaker is the module-level instance, which is freshly
-    # constructed (CLOSED state) in a --status invocation. It does NOT reflect
-    # the running daemon's actual breaker state because Python processes don't
-    # share in-process objects. For a cross-process view, breaker state would
-    # need to be persisted to disk — that is out of scope for m16.
-    print()
-    print("Circuit breaker:")
-    info = _circuit_breaker.state_info()
-    print(f"  state:                 {info['state']}")
-    print(f"  consecutive_failures:  {info['consecutive_failures']}")
-    print(f"  failure_threshold:     {info['failure_threshold']}")
-
-    # Per-session attempts — read DB
-    try:
-        from memem.session_state import load_mined_session_state  # noqa: PLC0415
-        all_states = load_mined_session_state()
-        in_progress = [
-            (sid, s) for sid, s in all_states.items()
-            if s.get("status") in (STATUS_RETRYING, STATUS_FAILED, STATUS_BLOCKED)
-            and int(s.get("attempts", 0)) > 0
-        ]
-        in_progress.sort(key=lambda x: int(x[1].get("attempts", 0)), reverse=True)
-        if in_progress:
-            print()
-            print("Per-session attempts (top 5 by attempts):")
-            for sid, s in in_progress[:5]:
-                msg = s.get("message", "")[:60]
-                print(f"  {sid[:12]}: status={s.get('status')} attempts={s.get('attempts')} last_error={msg!r}")
-    except Exception as exc:
-        print(f"Per-session: error reading state DB: {exc}")
-
-    # Recent log tail
-    print()
-    print("Recent log (last 20 lines):")
-    if LOG_FILE.exists():
-        try:
-            lines = LOG_FILE.read_text().splitlines()
-            for line in lines[-20:]:
-                print(f"  {line}")
-        except OSError as exc:
-            print(f"  (error reading log: {exc})")
-    else:
-        print("  (no log file)")
+    from memem.status import render_status  # noqa: PLC0415
+    print(render_status())
 
 
 def _run_server_command(args: list[str], expect_json: bool = True):
@@ -733,6 +716,9 @@ def _run_loop():
 
     while True:
         _write_heartbeat()
+        reap_count = reap_orphan_haiku_procs()
+        if reap_count > 0:
+            log.info("orphan_reaper_sweep", reaped_count=reap_count)
         if _shutdown_requested:
             log.info("shutdown_draining")
             _release_global_lock()
@@ -749,6 +735,11 @@ def _run_loop():
             attempted = 0
             failed = 0
             for jsonl_path in sessions:
+                # Inner-loop heartbeat: each _mine_session can take ~150s; with thousands of
+                # queued sessions the outer-loop heartbeat alone goes stale for hours and
+                # --status falsely reports the daemon dead. Writing here keeps freshness
+                # bounded by per-session duration regardless of queue depth (v1.7.2 m3).
+                _write_heartbeat()
                 if _circuit_breaker.is_open():
                     # Skip processing; mark blocked so it stays out of the queue
                     # until next file change.

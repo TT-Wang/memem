@@ -23,6 +23,10 @@
 
 set -euo pipefail
 
+# Anti-recursion guard: skip if invoked from a memem-spawned headless claude -p call.
+# Without this, every memem mining or tournament Haiku call recursively fires memem hooks → load explosion.
+[ -n "${MEMEM_HOOK_DISABLE:-}" ] && exit 0
+
 MEMEM_DIR="${MEMEM_DIR:-${CORTEX_DIR:-$HOME/.memem}}"
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
 ATTRIBUTION_TIMEOUT="${MEMEM_ATTRIBUTION_TIMEOUT:-30}"
@@ -39,7 +43,7 @@ trap 'rm -f "$INPUT_FILE"' EXIT
 cat > "$INPUT_FILE" || true
 
 # Bounded execution — never block the assistant turn for more than N seconds.
-timeout "$ATTRIBUTION_TIMEOUT" "${MEMEM_PYTHON:-python3}" - "$PLUGIN_ROOT" "$INPUT_FILE" "$MEMEM_DIR" << 'HOOKPY' 2>/dev/null || true
+setsid timeout --kill-after=5 "$ATTRIBUTION_TIMEOUT" "${MEMEM_PYTHON:-python3}" - "$PLUGIN_ROOT" "$INPUT_FILE" "$MEMEM_DIR" << 'HOOKPY' 2>/dev/null || true
 import json, sys, os
 from pathlib import Path
 
@@ -208,7 +212,7 @@ except Exception:
             # ever contains characters that would break a Python string literal.
             MEMEM_STOP_SESSION_ID="$_STOP_SESSION_ID" \
             MEMEM_PLUGIN_ROOT="$PLUGIN_ROOT" \
-            timeout "${MEMEM_MINE_TIMEOUT}" "${MEMEM_PYTHON:-python3}" -c '
+            setsid timeout --kill-after=5 "${MEMEM_MINE_TIMEOUT}" "${MEMEM_PYTHON:-python3}" -c '
 import os, sys
 sys.path.insert(0, os.environ["MEMEM_PLUGIN_ROOT"])
 from memem.mining import mine_session_delta
