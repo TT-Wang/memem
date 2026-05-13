@@ -52,8 +52,12 @@ start_wrapper() {
     # v1.8.1: also start the slice daemon if it isn't running. This makes
     # the warm-model path reachable for new users without a separate manual
     # step. Failures are non-fatal — hooks fall back to cold subprocess.
+    # v1.8.4 bug fix: previously this used `grep -c "running"` to detect "is
+    # it running?", but the not-running message is "Slice daemon not running"
+    # — which also matches "running" — so the check always thought it was up
+    # and never started it. Match the explicit positive output instead.
     if [ "${MEMEM_AUTO_SLICE_DAEMON:-1}" = "1" ]; then
-        SLICE_RUNNING=$(${MEMEM_PYTHON:-python3} -m memem.slice_daemon status 2>/dev/null | grep -c "running" || true)
+        SLICE_RUNNING=$(${MEMEM_PYTHON:-python3} -m memem.slice_daemon status 2>/dev/null | grep -c "Slice daemon running" || true)
         if [ "$SLICE_RUNNING" = "0" ]; then
             ${MEMEM_PYTHON:-python3} -m memem.slice_daemon start 2>/dev/null && \
                 echo "Slice daemon started alongside miner (set MEMEM_AUTO_SLICE_DAEMON=0 to skip)" || \
