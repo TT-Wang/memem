@@ -120,11 +120,16 @@ def _configure_logging() -> None:
     if any(isinstance(h, logging.handlers.RotatingFileHandler) for h in logging.getLogger("memem-miner").handlers):
         return
     MEMEM_DIR.mkdir(parents=True, exist_ok=True)
-    handler = logging.handlers.RotatingFileHandler(
-        str(LOG_FILE),
-        maxBytes=10 * 1024 * 1024,  # 10 MB
-        backupCount=5,
-    )
+    # v1.8.1: 0600 perms — log contains session IDs which correlate to private slice records.
+    old_umask = os.umask(0o177)
+    try:
+        handler = logging.handlers.RotatingFileHandler(
+            str(LOG_FILE),
+            maxBytes=10 * 1024 * 1024,  # 10 MB
+            backupCount=5,
+        )
+    finally:
+        os.umask(old_umask)
     handler.setFormatter(logging.Formatter("%(message)s"))  # structlog renders the JSON itself
     stdlib_logger = logging.getLogger("memem-miner")
     stdlib_logger.addHandler(handler)
@@ -199,10 +204,10 @@ def _try_acquire_lock_once() -> bool | None:
         fh.close()
         if pid > 0:
             try:
-                os.kill(pid, 0)  # raises OSError if process is dead
+                os.kill(pid, 0)  # raises ProcessLookupError if dead, PermissionError if foreign-owned
                 # Process is alive — genuine conflict
                 return False
-            except OSError:
+            except ProcessLookupError:
                 # Process is dead — stale lock file, remove and signal retry
                 log.warning(
                     "stale_global_lock_removed",
@@ -214,6 +219,11 @@ def _try_acquire_lock_once() -> bool | None:
                 except OSError:
                     pass
                 return None  # signal: retry
+            except PermissionError:
+                # Process is alive but owned by another user — genuine conflict
+                # (v1.8.1: previously caught as OSError and miscategorized as dead,
+                # which would let a second daemon start on multi-user systems).
+                return False
         # pid=0 means unreadable content — treat as stale
         try:
             GLOBAL_LOCK_FILE.unlink(missing_ok=True)

@@ -417,6 +417,75 @@ def _render_orphan_counter(lines: list[str]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# [6] Slice daemon health (v1.8.1)
+# ---------------------------------------------------------------------------
+
+def _render_slice_daemon(lines: list[str]) -> None:
+    """Section [6] — health of the persistent slice daemon (v1.8.0+).
+
+    Reports PID, socket, heartbeat age in OK/WARN/FAIL bands matching the
+    miner heartbeat section.
+    """
+    lines.append("[6] Slice daemon")
+
+    try:
+        from memem import slice_daemon  # noqa: PLC0415
+    except Exception as exc:
+        lines.append(f"  ✗ slice_daemon module not importable: {exc}")
+        lines.append("")
+        return
+
+    pid_file = slice_daemon.PID_FILE
+    sock_file = slice_daemon.SOCK_FILE
+    hb_file = slice_daemon.HEARTBEAT_FILE
+
+    pid: int | None = None
+    try:
+        if pid_file.exists():
+            pid = int(pid_file.read_text().strip())
+    except (OSError, ValueError):
+        pass
+
+    if not pid:
+        lines.append("  Daemon:    not running (start with `python -m memem.slice_daemon start`)")
+        lines.append("  Impact:    hooks fall back to cold-subprocess slice generation (~5-10s/prompt)")
+        lines.append("")
+        return
+
+    alive = _pid_alive(pid)
+    status_glyph = "✓" if alive else "✗ STALE PID"
+    lines.append(f"  Daemon:    {status_glyph} PID {pid}")
+
+    if sock_file.exists():
+        try:
+            mode = sock_file.stat().st_mode & 0o777
+            perm_ok = "✓" if mode == 0o600 else f"⚠ mode={oct(mode)}"
+            lines.append(f"  Socket:    {sock_file}  ({perm_ok})")
+        except OSError as exc:
+            lines.append(f"  Socket:    {sock_file}  ({exc})")
+    else:
+        lines.append(f"  Socket:    missing — {sock_file}")
+
+    if hb_file.exists():
+        try:
+            mtime = hb_file.stat().st_mtime
+            age = int(time.time() - mtime)
+            if age < 60:
+                band = "✓ OK"
+            elif age < 300:
+                band = "⚠ WARN"
+            else:
+                band = "✗ FAIL"
+            ts_iso = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(mtime))
+            lines.append(f"  Heartbeat: {ts_iso} (age {age}s)  {band}")
+        except OSError as exc:
+            lines.append(f"  Heartbeat: error reading {hb_file}: {exc}")
+    else:
+        lines.append("  Heartbeat: (no requests served yet)")
+    lines.append("")
+
+
+# ---------------------------------------------------------------------------
 # Legacy sections (preserved from original status_daemon for backward compat)
 # ---------------------------------------------------------------------------
 
@@ -537,6 +606,7 @@ def render_status() -> str:
     _render_lock_file(lines)
     _render_recent_activity(lines)
     _render_orphan_counter(lines)
+    _render_slice_daemon(lines)  # v1.8.1
 
     # --- Legacy sections (circuit breaker, per-session, log tail) ---
     _render_legacy_sections(lines)

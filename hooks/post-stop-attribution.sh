@@ -196,7 +196,11 @@ except Exception:
     print('')
 " 2>/dev/null || true)
 
-    if [ -n "$_STOP_SESSION_ID" ]; then
+    # v1.8.1: validate session_id is path-safe before using as a directory
+    # component. Hook input is normally Claude-Code-controlled, but the value
+    # is not authenticated; without this an adversarial input like "../foo"
+    # would cause `mkdir` to create directories outside the marker base.
+    if [ -n "$_STOP_SESSION_ID" ] && [[ "$_STOP_SESSION_ID" =~ ^[a-zA-Z0-9_-]+$ ]]; then
         # H-2: use atomic mkdir as the race-free guard. Only the process that
         # successfully creates the directory runs mine_session_delta; concurrent
         # Stop events for the same session_id get a non-zero exit from mkdir

@@ -135,8 +135,14 @@ def persist_slice_history(
     path = _history_path(history_file)
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_suffix(".lock")
-    fd = open(lock_path, "w")
     tmp_path = path.with_suffix(".tmp")
+    # v1.8.1: 0600 file perms — slice records contain full user query text.
+    # Without this, other local users on a shared host can read prompts.
+    old_umask = os.umask(0o177)
+    try:
+        fd = open(lock_path, "w")
+    finally:
+        os.umask(old_umask)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         records = load_slice_history(history_file=path, limit=0)
@@ -144,12 +150,16 @@ def persist_slice_history(
         if max_records > 0:
             records = records[-max_records:]
         try:
-            with open(tmp_path, "w", encoding="utf-8") as out:
-                for record in records:
-                    out.write(json.dumps(record, sort_keys=True, default=str))
-                    out.write("\n")
-                out.flush()
-                os.fsync(out.fileno())
+            old_umask = os.umask(0o177)
+            try:
+                with open(tmp_path, "w", encoding="utf-8") as out:
+                    for record in records:
+                        out.write(json.dumps(record, sort_keys=True, default=str))
+                        out.write("\n")
+                    out.flush()
+                    os.fsync(out.fileno())
+            finally:
+                os.umask(old_umask)
             os.replace(tmp_path, path)
         except Exception:
             # Clean up the orphan .tmp before another lock holder reuses

@@ -10,6 +10,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
 
+## [1.8.1] - 2026-05-13 — Privacy, daemon-reliability, observability follow-ups
+
+End-to-end code review of v1.7.2 → v1.8.0 surfaced 3 BLOCKERS and 5 HIGH issues
+across security, concurrency, correctness, and architecture passes. All fixed in
+this patch.
+
+### Fixed — Privacy (S-1, S-2)
+
+- **`active-slices.jsonl` and `topic-shifts.log` now 0600**. These files store
+  the full user query text + session IDs. Previously created under the ambient
+  umask (typically 0o022 → mode 0644), letting any local user on a shared host
+  read other users' prompt history. Wrapped file creation in `umask(0o177)`.
+- **`miner.log` and `slice-daemon.log` now 0600**. Same fix — logs contain
+  session IDs that correlate to private records.
+
+### Fixed — Path traversal (S-3)
+
+- **`post-stop-attribution.sh` validates session_id before using it as a path
+  component**. Hook input session_id was passed to `mkdir
+  "$MEMEM_DIR/.stop-timestamps/$_STOP_SESSION_ID"` without sanitization; an
+  adversarial value like `../foo` could create directories outside the marker
+  base. Now requires `^[a-zA-Z0-9_-]+$`.
+
+### Fixed — Daemon reliability (C-1, C-2, C-3)
+
+- **`slice_daemon._handle_with_timeout` no longer pins the daemon on timeout**.
+  Previously used `with ThreadPoolExecutor(max_workers=1)` which blocks
+  `__exit__` waiting for the inner thread even after `fut.result(timeout=N)`
+  fires. With `WORKER_THREADS=1`, this could monopolize the single outer
+  worker for up to 2× `REQUEST_TIMEOUT_SECONDS = 50s`. Switched to manual
+  `inner_pool.shutdown(wait=False)` — orphan thread self-cleans via its own
+  `finally`, outer worker returns immediately.
+- **`memem.slice_daemon stop` now polls + escalates to SIGKILL**. Previously
+  sent one SIGTERM and exited, racing the lock on quick `stop && start`.
+  Mirrored the `_kill_with_escalation` pattern from `miner-wrapper.sh`:
+  SIGTERM → poll for 5s → SIGKILL → poll for 2s → nonzero exit if still alive.
+- **`_try_acquire_lock_once` distinguishes `PermissionError` from
+  `ProcessLookupError`** in both `miner_daemon.py` and `slice_daemon.py`.
+  Previously both caught as `OSError` and treated as "process dead — remove
+  stale lock". On multi-user hosts, a cross-user PID check raises
+  `PermissionError`, which would let a second daemon start. Now correctly
+  treats `PermissionError` as "alive, foreign-owned — genuine conflict".
+
+### Added — Observability (OPS-2)
+
+- **`--status` now includes section `[6] Slice daemon`** with PID, socket path
+  + permission check (✓ if 0600), and heartbeat age in OK/WARN/FAIL bands
+  matching the miner section. Previously `--status` reported only the miner
+  half of the system; the slice daemon could be dead and the output would
+  still look healthy.
+
+### Added — Discoverability (OPS-1)
+
+- **`miner-wrapper.sh start` now also starts the slice daemon** (and `stop`
+  stops both). Previously the slice daemon — the headline v1.8.0 feature —
+  was opt-in via a separate undocumented `python -m memem.slice_daemon start`,
+  so new users never benefited from warm-model slice generation. Set
+  `MEMEM_AUTO_SLICE_DAEMON=0` to opt out of the auto-start.
+
+### Notes
+
+- No new tests in this patch (the fixes are small, surface-area-bounded, and
+  exercised by the existing 40 tests). v1.8.2 candidate: integration test for
+  the daemon-miss → cold-subprocess fallback path.
+- Review also surfaced 6 MEDIUM and 5 LOW findings (PID wraparound, reaper
+  cmdline re-read, empty-slice fallback, MEMEM_HOOK_DISABLE truthy parsing,
+  doc gaps) — deferred to v1.8.2.
+
 ## [1.8.0] - 2026-05-13 — Persistent slice daemon (no more cold-start)
 
 The architectural win promised in v1.7.2's notes: every UserPromptSubmit hook

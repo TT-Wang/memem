@@ -48,6 +48,18 @@ start_wrapper() {
     WRAPPER_PID=$!
     echo "$WRAPPER_PID" > "$WRAPPER_PID_FILE"
     echo "Miner wrapper started (PID $WRAPPER_PID)"
+
+    # v1.8.1: also start the slice daemon if it isn't running. This makes
+    # the warm-model path reachable for new users without a separate manual
+    # step. Failures are non-fatal — hooks fall back to cold subprocess.
+    if [ "${MEMEM_AUTO_SLICE_DAEMON:-1}" = "1" ]; then
+        SLICE_RUNNING=$(${MEMEM_PYTHON:-python3} -m memem.slice_daemon status 2>/dev/null | grep -c "running" || true)
+        if [ "$SLICE_RUNNING" = "0" ]; then
+            ${MEMEM_PYTHON:-python3} -m memem.slice_daemon start 2>/dev/null && \
+                echo "Slice daemon started alongside miner (set MEMEM_AUTO_SLICE_DAEMON=0 to skip)" || \
+                echo "Note: slice daemon start failed; hooks will fall back to cold subprocess"
+        fi
+    fi
 }
 
 _wait_for_dead() {
@@ -92,6 +104,12 @@ _kill_with_escalation() {
 
 stop_wrapper() {
     local exit_code=0
+
+    # v1.8.1: also stop the slice daemon if it was auto-started by us.
+    # Failure is non-fatal — surfaced to user via stderr only.
+    if [ "${MEMEM_AUTO_SLICE_DAEMON:-1}" = "1" ]; then
+        ${MEMEM_PYTHON:-python3} -m memem.slice_daemon stop 2>/dev/null || true
+    fi
 
     # --- Stop the daemon process ---
     # Read daemon PID from miner.pid (written by miner_daemon.py)

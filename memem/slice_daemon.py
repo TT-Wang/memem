@@ -84,11 +84,16 @@ def _configure_logging() -> None:
     if any(isinstance(h, logging.handlers.RotatingFileHandler) for h in logger.handlers):
         return
     MEMEM_DIR.mkdir(parents=True, exist_ok=True)
-    handler = logging.handlers.RotatingFileHandler(
-        str(LOG_FILE),
-        maxBytes=10 * 1024 * 1024,
-        backupCount=3,
-    )
+    # v1.8.1: 0600 perms — log contains session IDs.
+    old_umask = os.umask(0o177)
+    try:
+        handler = logging.handlers.RotatingFileHandler(
+            str(LOG_FILE),
+            maxBytes=10 * 1024 * 1024,
+            backupCount=3,
+        )
+    finally:
+        os.umask(old_umask)
     handler.setFormatter(logging.Formatter("%(message)s"))
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
@@ -141,13 +146,19 @@ def _try_acquire_lock_once() -> bool | None:
             try:
                 os.kill(pid, 0)
                 return False  # alive — genuine conflict
-            except OSError:
+            except ProcessLookupError:
+                # Dead — stale lock, remove and retry
                 log.warning("stale_slice_lock_removed", stale_pid=pid, lock_file=str(LOCK_FILE))
                 try:
                     LOCK_FILE.unlink(missing_ok=True)
                 except OSError:
                     pass
                 return None  # retry
+            except PermissionError:
+                # v1.8.1: foreign-owned PID — genuine conflict (was previously
+                # caught as OSError and treated as dead, letting two daemons
+                # start on multi-user systems).
+                return False
         try:
             LOCK_FILE.unlink(missing_ok=True)
         except OSError:
@@ -516,16 +527,23 @@ def run(
 # ---------------------------------------------------------------------------
 
 def _handle_with_timeout(conn: socket.socket, timeout: float) -> None:
-    """Run _handle_one_request in a sub-thread; kill it if it takes too long."""
+    """Run _handle_one_request in a sub-thread; reply with timeout error if it takes too long.
+
+    v1.8.1: do NOT use `with` on the inner ThreadPoolExecutor. The `with` exit
+    blocks until the inner thread finishes, which means on a timeout the OUTER
+    worker is pinned for another full `timeout` window (~50s total) — and with
+    WORKER_THREADS=1 that monopolizes the entire daemon. Use `shutdown(wait=False)`
+    so we return immediately on timeout; the inner thread continues running and
+    self-cleans via its own `finally` (which decrements `_inflight_count`).
+    """
     import concurrent.futures
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as inner_pool:
+    inner_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="slice-inner")
+    try:
         fut = inner_pool.submit(_handle_one_request, conn)
         try:
             fut.result(timeout=timeout)
         except FuturesTimeoutError:
-            # Timed out — conn was already closed inside the thread eventually,
-            # but we need to send an error. Connection may already be closed.
             log.warning("request_timeout", timeout_seconds=timeout)
             try:
                 elapsed = int(timeout * 1000)
@@ -533,8 +551,15 @@ def _handle_with_timeout(conn: socket.socket, timeout: float) -> None:
                 conn.close()
             except OSError:
                 pass
+            # Critical: do NOT wait for the inner thread. Let it self-cleanup.
+            inner_pool.shutdown(wait=False)
+            return
         except Exception as exc:
             log.error("request_error_unhandled", error=str(exc))
+    finally:
+        # Only reached on the non-timeout paths. wait=False is safe — the
+        # successful future has already returned, the thread is idle.
+        inner_pool.shutdown(wait=False)
 
 
 # ---------------------------------------------------------------------------
@@ -584,17 +609,53 @@ def start_daemon() -> None:
 
 
 def stop_daemon() -> None:
-    """Send SIGTERM to the running daemon."""
+    """Stop the running daemon: SIGTERM, poll for death, escalate to SIGKILL.
+
+    v1.8.1: previously this sent one SIGTERM and returned immediately, which
+    raced the lock on quick `stop && start` if the daemon was mid-model-load
+    or mid-request. Mirror miner-wrapper's _kill_with_escalation pattern.
+    """
     pid = _read_pid()
     if not pid:
         print("Slice daemon not running")
         return
     try:
         os.kill(pid, signal.SIGTERM)
-        print(f"Slice daemon stopped (PID {pid})")
     except ProcessLookupError:
         PID_FILE.unlink(missing_ok=True)
         print("Slice daemon was not running (stale PID file cleaned)")
+        return
+
+    # Poll up to 5s for graceful exit
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            print(f"Slice daemon stopped (PID {pid})")
+            return
+        time.sleep(0.25)
+
+    # Escalate to SIGKILL
+    print(f"Slice daemon did not stop after SIGTERM — escalating to SIGKILL (PID {pid})")
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        print(f"Slice daemon stopped (PID {pid})")
+        return
+
+    # Brief poll for SIGKILL to land
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            print(f"Slice daemon killed (PID {pid})")
+            return
+        time.sleep(0.1)
+
+    print(f"ERROR: Slice daemon (PID {pid}) still alive after SIGKILL")
+    sys.exit(1)
 
 
 def status_daemon() -> None:
