@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memem"
-version = "1.7.2"
+version = "1.7.3"
 description = "Persistent, self-evolving memory for Claude Code — local-first, browsable Obsidian vault."
 readme = "README.md"
 license = {text = "MIT"}
@@ -36,14 +36,13 @@ memem = "memem.server:main"
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
-    # ruff and mypy pinned to compatible-release (~=) rather than lower-bound (>=).
-    # Every memem release since v1.5.0 failed CI because ruff's X.Y bumps (0.6→0.7,
-    # etc.) introduce new lint rules into existing rule families (C4, SIM) that were
-    # already selected in [tool.ruff.lint]. Compatible-release allows 0.6.x patch
-    # fixes (bug fixes, rule refinements) while blocking 0.7+ which would add new
-    # rules and break CI again. Same rationale applies to mypy minor bumps.
-    "ruff~=0.6.0",
-    "mypy~=1.11.0",
+    # ruff and mypy pinned to compatible-release (~=) matching current dev environment.
+    # Every memem release since v1.5.0 failed CI because the unpinned >= bound let CI
+    # install the latest ruff/mypy on every run; new lint rules (C420, SIM103) and
+    # new mypy strictness (TypedDict literal-key) would land overnight and break CI.
+    # Pin to the X.Y the contributors actually run locally so behavior matches.
+    "ruff~=0.15.0",
+    "mypy~=1.20.0",
     "pre-commit>=3.8",
     # numpy required for cluster/embedding tests (and for the non-test embedding
     # code paths in attribution.py + dreamer.py). Production users opt into

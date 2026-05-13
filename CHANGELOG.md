@@ -10,6 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
 
+## [1.7.3] - 2026-05-13
+
+Hot-fix for v1.7.2's m4 dep pin. The original pin (`ruff~=0.6.0`, `mypy~=1.11.0`)
+matched the legacy `>=` lower bounds in the manifest, but local dev was running
+ruff 0.15.x and mypy 1.20.x. CI installed the pinned older versions which
+flagged code that the dev environment did not (TypedDict literal-key errors in
+`activation.py`, `Optional[str]` append in `consolidation.py`). Pin both to
+match local dev: `ruff~=0.15.0`, `mypy~=1.20.0`. CI now passes for v1.7.2's
+full change set.
+
 ## [1.7.2] - 2026-05-13 — Stability batch (anti-recursion, self-healing, observability)
 
 Triggered by a real production incident on this VPS: load average pegged at 15
