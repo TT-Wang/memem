@@ -110,7 +110,7 @@ def test_active_slice_engine_produces_valid_slice_when_llm_unavailable(monkeypat
     # Patch out recall and other I/O so it doesn't hit the filesystem
     monkeypatch.setattr(
         "memem.active_slice_engine.generate_candidates",
-        lambda query, scope_id, env: {
+        lambda query, scope_id, env, **kwargs: {
             "current_goal_candidates": [
                 {
                     "candidate_id": f"current_query:{query}",
