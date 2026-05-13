@@ -167,6 +167,20 @@ def infer_task_mode(hook: dict, message: str) -> str:
 
 
 def run_active_slice(query: str, scope: str, session_id: str, cwd: str, task_mode: str) -> str:
+    # Try the slice daemon first (warm, ~50-500ms) before falling back to
+    # cold subprocess (5-10s cold-load of sentence-transformers).
+    try:
+        sys.path.insert(0, plugin_root)
+        from memem.slice_client import try_slice_via_daemon
+        result = try_slice_via_daemon(
+            query, scope, session_id, cwd, task_mode,
+            use_llm=False, timeout_seconds=5.0,
+        )
+        if result is not None:
+            return result
+    except Exception:
+        pass
+    # Fallback: existing subprocess path (unchanged behavior)
     try:
         env = os.environ.copy()
         env["PYTHONPATH"] = plugin_root + os.pathsep + env.get("PYTHONPATH", "")

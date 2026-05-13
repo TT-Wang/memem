@@ -10,6 +10,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
 
+## [1.8.0] - 2026-05-13 — Persistent slice daemon (no more cold-start)
+
+The architectural win promised in v1.7.2's notes: every UserPromptSubmit hook
+fire on memem v1.7.x cold-started a Python interpreter and loaded ~500MB of
+sentence-transformers from scratch (5-10s, ~30% CPU spike). With N concurrent
+Claude Code sessions, that meant N×500MB of redundant RAM usage and 5-10s of
+extra latency on every prompt cycle. v1.8.0 makes this single-load.
+
+### Added — m7: `memem.slice_daemon` + `memem.slice_client`
+
+Long-running daemon process that holds the embedding model warm and serves
+slice-generation requests over a Unix socket at `~/.memem/slice.sock`.
+
+**Architecture:**
+- `memem.slice_daemon` — daemon process. Daemonizes via double-fork, acquires
+  `~/.memem/slice.lock` (fcntl, with stale-PID detection mirroring m3's miner
+  lock pattern), binds Unix socket at `~/.memem/slice.sock` with **0600
+  perms** (umask 0o177 around bind — privacy: requests carry full query
+  content as JSON payload).
+- `memem.slice_client` — thin client used by hooks. Single function
+  `try_slice_via_daemon(...) -> str | None`. Returns slice on success,
+  `None` on ANY failure (socket missing, refused, timeout, protocol error).
+  Never raises.
+- `hooks/auto-recall.sh` — `slice_helper()` now tries the daemon first
+  (5s timeout), falls back to the existing `python3 -m memem.server slice`
+  subprocess path on any failure. Fallback path is **bit-for-bit unchanged**
+  — daemon is purely an accelerator.
+
+**Protocol:** newline-delimited JSON, one request per connection.
+- Request: `{"query": "...", "scope": "...", "session_id": "...", "cwd": "...", "task_mode": "...", "use_llm": false}`
+- Response: `{"ok": true, "slice": "...", "elapsed_ms": 123}` or `{"ok": false, "error": "...", "elapsed_ms": 123}`
+
+**CLI:** `python -m memem.slice_daemon start | stop | status | run`. `start`
+double-forks; `run` stays foreground (for systemd / debugging).
+
+**Resource controls (Phase 4.5 hardened):**
+- Per-request timeout: 25s (enforced via `_handle_with_timeout` watcher
+  thread; not just declared — the dead-code bug from initial m7 worker
+  was caught by final review and fixed before release).
+- Concurrency cap: max 8 in-flight requests; overload returns
+  `{"ok": false, "error": "overloaded"}`.
+- **WORKER_THREADS=1 in v1.8.0.** `active_slice_engine`'s tournament-cache
+  write is not thread-safe (file r/w/clobber). Single-worker is the safe
+  ship. Still ~10x faster than the cold-start subprocess path because the
+  embedding model stays warm. v1.8.1 candidate: file-lock the cache and
+  bump workers to 4.
+
+**Anti-recursion:** daemon sets `MEMEM_HOOK_DISABLE=1` at startup so any
+subprocess it spawns inherits it. Belt-and-suspenders with v1.7.2's m12.
+
+**Sentence-transformers graceful degradation:** if the optional dep is
+unavailable, daemon starts in degraded mode (logs `model_load_degraded`
+warning) and serves the no-embedding code path. No crash on `ImportError`.
+
+**Logging:** structlog at INFO to `~/.memem/slice-daemon.log` (separate from
+`miner.log`). Logs **never include query content** (privacy). Heartbeat at
+`~/.memem/slice-daemon.heartbeat` written per successful request.
+
+**Testing:** 9 new tests in `tests/test_slice_daemon.py` covering: missing
+socket → None, connect refused → None, request/response round-trip,
+concurrent requests, request timeout enforcement, stale-socket cleanup,
+anti-recursion env var, etc. The overload-rejection test is `pytest.skip`'d
+in v1.8.0 (single-worker means it's not reachable); will re-enable in v1.8.1.
+
+### Notes
+
+- `miner_daemon.py` deliberately untouched in this release. Slice daemon and
+  miner are separate processes with separate failure modes.
+- m6 `--status` does not yet surface slice-daemon health. v1.8.1 candidate.
+- `pyproject.toml` and `.claude-plugin/plugin.json` bumped to 1.8.0.
+
 ## [1.7.3] - 2026-05-13
 
 Hot-fix for v1.7.2's m4 dep pin. The original pin (`ruff~=0.6.0`, `mypy~=1.11.0`)
