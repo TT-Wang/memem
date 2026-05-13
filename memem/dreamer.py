@@ -102,7 +102,7 @@ def find_demotion_candidates(memories: list[dict]) -> list[dict]:
         candidates.append({
             "memory_id": mem.get("id"),
             "title": mem.get("title", "")[:80],
-            "current_layer": int(mem.get("layer", 2) or 2),
+            "current_layer": int(mem["layer"]) if mem.get("layer") is not None else 2,
             "suggested_layer": suggested,
             "recent_attribution": attr,
             "reason": f"low strength + attribution={attr}",
@@ -334,7 +334,7 @@ def build_diff(memories: list[dict]) -> dict:
         "contradiction_pairs": find_contradiction_pairs(memories),
         "cluster_summaries": find_cluster_summaries(memories),
         "stats": {
-            "l0_count": sum(1 for m in memories if int(m.get("layer", 2) or 2) == 0),
+            "l0_count": sum(1 for m in memories if (m.get("layer") if m.get("layer") is not None else 2) == 0),
             "decay_immune_count": sum(1 for m in memories if m.get("decay_immune")),
         },
     }

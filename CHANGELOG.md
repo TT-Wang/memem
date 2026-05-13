@@ -10,6 +10,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
 
+## [1.8.3] - 2026-05-13 — External review fixes (layer-0 corruption, --no-llm honored)
+
+An external code review (against v1.7.1, mostly still applicable in v1.8.2)
+surfaced 6 worth-fixing findings. The biggest two were correctness bugs that
+predate this batch but are now patched.
+
+### Fixed — L1: layer 0 (L0) memories were silently reclassified as L2
+
+The pattern `int(mem.get("layer", DEFAULT_LAYER) or DEFAULT_LAYER)` evaluates
+`0 or DEFAULT_LAYER` → `DEFAULT_LAYER`, so `layer=0` (L0 — the always-loaded
+project-identity tier) got corrupted to L2 every time a memory was normalized
+for the active slice. Four sites fixed:
+
+- `memem/active_slice.py:330` (`normalize_memory_candidate`)
+- `memem/active_slice.py:467` (other normalize path)
+- `memem/dreamer.py:105` (`current_layer` for demotion candidates)
+- `memem/dreamer.py:337` (`l0_count` stat — previously always reported 0)
+
+All four switched to explicit None-checks so 0 survives.
+
+### Fixed — H2: `--no-llm` now actually suppresses tournament Haiku calls
+
+The auto-recall hook calls `python -m memem.server slice ... --no-llm`
+specifically to keep prompt latency bounded. But `active_slice_engine.py`'s
+tournament tie-break (Haiku pairwise judge) was gated only on
+`MEMEM_TOURNAMENT_ENABLED` (default true), not on the call-site `use_llm`
+flag. Result: the hook claiming `--no-llm` could still fire 6 Haiku calls in
+the synchronous prompt path. Now `generate_candidates(...,  use_llm=False)`
+skips the tournament entirely. (memem v1.7.2's `MEMEM_HOOK_DISABLE` env-var
+already prevented recursive fan-out from these calls — H2 is about latency
+and API cost, not recursion.)
+
+### Fixed — M1: `models.py` import no longer crashes on inaccessible `$HOME`
+
+Module-level `_legacy_default.exists()` checks during `import memem.models`
+could raise `PermissionError` when `$HOME` was unreadable (e.g., pytest
+running as a different uid, certain container setups). Wrapped in
+`_safe_exists()` that returns False on any `OSError`.
+
+### Fixed — M2: small-delta sessions no longer requeue forever
+
+`mine_session_delta` returned `{"skipped": "delta too small"}` without
+advancing `offset_bytes`. Next poll, `find_settled_sessions` saw
+`file_size > stored_offset`, re-queued the session, and we hit the same
+branch again — forever. Now persists the new offset to STATUS_COMPLETE on
+the small-delta path so the session drops out of the queue until the
+JSONL grows past `_MIN_DELTA_BYTES` again.
+
+### Fixed — L2: `uv.lock` was stale (memem 1.0.0)
+
+The committed lock listed memem at 1.0.0; pyproject.toml had been bumping
+through 1.x.x with each release without `uv lock` running. Regenerated.
+
+### Notes — not fixed in v1.8.3
+
+- **H1 (ambient `python3` in hooks)**: hooks default to `python3` via
+  `${MEMEM_PYTHON:-python3}`. The plugin install path sets `MEMEM_PYTHON`
+  via env if the user has a non-default venv. Real fix is auto-detection of
+  the plugin venv — deferred. Existing users with `mcp` installed under
+  ambient `python3` (the common case) are unaffected.
+- **M3 (4MB credential scan cap)**: late-session pasted secrets can bypass
+  the credential pre-scan because we only read the first 4MB. Fixing this
+  properly needs a stream-scan or a tail-window approach — deferred to v1.9.
+
 ## [1.8.2] - 2026-05-13
 
 Hot-fix for v1.8.1's privacy umask wraps. The `os.umask(0o177)` wraps around

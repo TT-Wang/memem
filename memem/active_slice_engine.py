@@ -293,8 +293,17 @@ def generate_candidates(
     scope_id: str,
     environment: dict[str, Any] | None = None,
     limit: int = 20,
+    *,
+    use_llm: bool = True,
 ) -> CandidateBundle:
-    """Generate bounded candidate pool for Active Memory Slice activation."""
+    """Generate bounded candidate pool for Active Memory Slice activation.
+
+    v1.8.3: `use_llm` now also gates the Haiku tournament tie-break. Previous
+    behaviour: the hook called with --no-llm to suppress LLM activation, but
+    the tournament fired anyway under MEMEM_TOURNAMENT_ENABLED=true (default),
+    burning Haiku latency on the synchronous hook hot-path. The whole point of
+    --no-llm is "no Haiku from this code path" — honour it everywhere.
+    """
     env = normalize_runtime_environment(environment)
     normalized_scope = _normalize_scope_id(scope_id)
     current = [current_query_candidate(query, normalized_scope)]
@@ -393,7 +402,9 @@ def generate_candidates(
     )
     tournament_enabled_raw = os.environ.get("MEMEM_TOURNAMENT_ENABLED", "true").lower()
     tournament_enabled = tournament_enabled_raw in {"1", "true", "yes", "on"}
-    if tournament_enabled and _detect_tie_zone(merged_memory, k=_TOURNAMENT_K):
+    # v1.8.3: respect use_llm — callers that asked for no-LLM (e.g. the
+    # synchronous UserPromptSubmit hook) must not pay tournament Haiku cost.
+    if use_llm and tournament_enabled and _detect_tie_zone(merged_memory, k=_TOURNAMENT_K):
         from memem.models import MEMEM_DIR
         tied_top = merged_memory[:_TOURNAMENT_K]
         rest = merged_memory[_TOURNAMENT_K:]
@@ -606,7 +617,7 @@ def _generate_active_memory_slice_internal(
     normalized_scope = _normalize_scope_id(scope_id)
     previous_slice = _load_previous_slice(env, normalized_scope)
     activation_env = _continuity_environment(env, previous_slice)
-    candidate_bundle = generate_candidates(query, normalized_scope, env)
+    candidate_bundle = generate_candidates(query, normalized_scope, env, use_llm=use_llm)
     all_candidates = flatten_candidate_bundle(candidate_bundle)
     include_history = bool(env.get("history_mode") or env.get("include_history"))
 

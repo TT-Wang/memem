@@ -27,6 +27,15 @@ def _env(*names: str, default: str = "") -> str:
 # State dir: prefer the new ~/.memem/, fall back to existing ~/.cortex/ if
 # present (so dogfooding users with real data don't lose access on upgrade).
 _state_env = _env("MEMEM_DIR", "CORTEX_DIR")
+def _safe_exists(p: Path) -> bool:
+    """Path.exists() that swallows OSError (PermissionError, etc.) — module
+    import must not crash on an unusual $HOME or unreadable mount. v1.8.3."""
+    try:
+        return p.exists()
+    except OSError:
+        return False
+
+
 if _state_env:
     MEMEM_DIR = Path(_state_env)
 else:
@@ -34,7 +43,7 @@ else:
     _legacy_default = Path.home() / ".cortex"
     # If only the legacy dir exists and the new one doesn't, use legacy until
     # migration runs. The bootstrap shim's first-run migration will move data.
-    MEMEM_DIR = _legacy_default if (_legacy_default.exists() and not _new_default.exists()) else _new_default
+    MEMEM_DIR = _legacy_default if (_safe_exists(_legacy_default) and not _safe_exists(_new_default)) else _new_default
 
 # Backward-compat alias kept for any external code reading the old name.
 CORTEX_DIR = MEMEM_DIR
@@ -68,7 +77,7 @@ OBSIDIAN_VAULT = Path(
 # read from the legacy path until migration runs.
 _new_subdir = OBSIDIAN_VAULT / "memem"
 _legacy_subdir = OBSIDIAN_VAULT / "cortex"
-_VAULT_SUBDIR = _legacy_subdir if (_legacy_subdir.exists() and not _new_subdir.exists()) else _new_subdir
+_VAULT_SUBDIR = _legacy_subdir if (_safe_exists(_legacy_subdir) and not _safe_exists(_new_subdir)) else _new_subdir
 
 OBSIDIAN_MEMORIES_DIR = _VAULT_SUBDIR / "memories"
 INDEX_PATH = _VAULT_SUBDIR / "_index.md"

@@ -932,8 +932,23 @@ def mine_session(jsonl_path: str) -> dict:
 
     delta_bytes = file_size_at_read - stored_offset
 
-    # Not enough new content to warrant a Haiku call
+    # Not enough new content to warrant a Haiku call. v1.8.3: persist the new
+    # offset anyway. Without this, find_settled_sessions sees file_size > stored_offset
+    # next poll, re-queues the same session, we hit this branch again, and the
+    # session stays in the active queue forever (cost: ~one wasted poll per cycle
+    # forever; observable as miner CPU on idle sessions).
     if delta_bytes < _MIN_DELTA_BYTES:
+        try:
+            _mark_session(
+                path,
+                STATUS_COMPLETE,
+                message=f"delta too small ({delta_bytes} bytes); skipping mine, advancing offset",
+                attempts=stored_attempts,
+                offset_bytes=file_size_at_read,
+                timeout_failures=stored_timeout_failures,
+            )
+        except OSError:
+            pass
         return {"skipped": True, "reason": f"delta too small ({delta_bytes} bytes)"}
 
     # M-9: increment attempts NOW (before the Haiku call) so a SIGKILL between

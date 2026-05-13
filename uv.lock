@@ -780,7 +780,7 @@ wheels = [
 
 [[package]]
 name = "memem"
-version = "1.0.0"
+version = "1.8.3"
 source = { editable = "." }
 dependencies = [
     { name = "mcp" },
@@ -793,6 +793,7 @@ dependencies = [
 [package.optional-dependencies]
 dev = [
     { name = "mypy" },
+    { name = "numpy" },
     { name = "pre-commit" },
     { name = "pytest" },
     { name = "pytest-cov" },
@@ -806,14 +807,15 @@ embedding = [
 [package.metadata]
 requires-dist = [
     { name = "mcp", specifier = ">=1.0" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = "~=1.20.0" },
+    { name = "numpy", marker = "extra == 'dev'", specifier = ">=1.24" },
     { name = "numpy", marker = "extra == 'embedding'", specifier = ">=1.24" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.8" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
     { name = "python-frontmatter", specifier = ">=1.0" },
     { name = "rapidfuzz", specifier = ">=3.0.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = "~=0.15.0" },
     { name = "sentence-transformers", marker = "extra == 'embedding'", specifier = ">=2.2" },
     { name = "structlog", specifier = ">=24.0" },
     { name = "tenacity", specifier = ">=8.0" },

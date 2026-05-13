@@ -327,7 +327,10 @@ def normalize_memory_candidate(
         "project": mem.get("project", "general"),
         "status": mem.get("status", "active"),
         "importance": int(mem.get("importance", 3) or 3),
-        "layer": int(mem.get("layer", DEFAULT_LAYER) or DEFAULT_LAYER),
+        # v1.8.3: layer=0 (L0) is a valid value but falsy — the old
+        # `... or DEFAULT_LAYER` reclassified L0 memories as L2. Use an
+        # explicit None check so 0 survives.
+        "layer": int(mem["layer"]) if mem.get("layer") is not None else DEFAULT_LAYER,
         "score": final_score,
         "source_score": final_score,
         "graph_distance": graph_distance,
@@ -461,7 +464,9 @@ def _item_from_candidate(cand: Candidate, role: ActiveRole, why: str = "", score
         "source_type": cand.get("source_type", cand.get("candidate_type", "candidate")),
         "project": cand.get("project", "general"),
         "importance": int(cand.get("importance", 3) or 3),
-        "layer": int(cand.get("layer", DEFAULT_LAYER) or DEFAULT_LAYER),
+        # v1.8.3: layer=0 (L0) survives the None check; old `or` fallback
+        # reclassified L0 candidates as L2.
+        "layer": int(cand["layer"]) if cand.get("layer") is not None else DEFAULT_LAYER,
         "score": float(score if score is not None else cand.get("score", 0.5) or 0.5),
         "why_activated": why or cand.get("source_reason", ""),
     }
