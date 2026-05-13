@@ -279,14 +279,16 @@ try:
     topic_log.parent.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     snippet = message[:100].replace('"', "'").replace('\n', ' ').replace('\r', '')
+    is_new_file = not topic_log.exists()
+    with topic_log.open("a") as fh:
+        mode = "primed" if last_primed and last_session == session_id else "wakeup"
+        fh.write(f'{ts} session={session_id} overlap={overlap:.2f} mode={mode} msg="{snippet}"\n')
     # v1.8.1: 0600 perms — snippet contains the first 100 chars of every user prompt.
-    old_umask = os.umask(0o177)
-    try:
-        with topic_log.open("a") as fh:
-            mode = "primed" if last_primed and last_session == session_id else "wakeup"
-            fh.write(f'{ts} session={session_id} overlap={overlap:.2f} mode={mode} msg="{snippet}"\n')
-    finally:
-        os.umask(old_umask)
+    if is_new_file:
+        try:
+            os.chmod(topic_log, 0o600)
+        except OSError:
+            pass
 except Exception:
     pass
 

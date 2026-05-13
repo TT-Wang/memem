@@ -10,6 +10,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
 
+## [1.8.2] - 2026-05-13
+
+Hot-fix for v1.8.1's privacy umask wraps. The `os.umask(0o177)` wraps around
+file creation correctly produced 0600 files in isolation, but on CI they
+collided with pytest's tmp_path session fixture creation in subtle ways
+(38 tests failed with `PermissionError` on `/tmp/pytest-of-runner/...`
+directories). The umask is process-global, not per-thread, and a concurrent
+`pytest`'s tmp_path mkdir during the wrap window inherited the restricted
+umask, yielding mode-0600 directories with no execute bit — subsequent
+mkdirs inside them then failed.
+
+Swap all `os.umask` wraps for post-creation `os.chmod`. Same end result
+(file is 0600 after creation), no process-global state change. Locations:
+
+- `memem/slice_history.py:138-145` (lock + tmp file)
+- `memem/miner_daemon.py:113` (`_configure_logging`)
+- `memem/slice_daemon.py:81` (`_configure_logging`)
+- `hooks/auto-recall.sh:283` (topic-shifts.log)
+
+Privacy guarantee unchanged.
+
 ## [1.8.1] - 2026-05-13 — Privacy, daemon-reliability, observability follow-ups
 
 End-to-end code review of v1.7.2 → v1.8.0 surfaced 3 BLOCKERS and 5 HIGH issues

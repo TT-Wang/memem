@@ -120,16 +120,18 @@ def _configure_logging() -> None:
     if any(isinstance(h, logging.handlers.RotatingFileHandler) for h in logging.getLogger("memem-miner").handlers):
         return
     MEMEM_DIR.mkdir(parents=True, exist_ok=True)
-    # v1.8.1: 0600 perms — log contains session IDs which correlate to private slice records.
-    old_umask = os.umask(0o177)
+    handler = logging.handlers.RotatingFileHandler(
+        str(LOG_FILE),
+        maxBytes=10 * 1024 * 1024,  # 10 MB
+        backupCount=5,
+    )
+    # v1.8.1: 0600 perms — log contains session IDs which correlate to private records.
+    # Post-creation chmod (rather than umask wrap) — avoids races with concurrent
+    # threads / pytest fixtures that share the process umask.
     try:
-        handler = logging.handlers.RotatingFileHandler(
-            str(LOG_FILE),
-            maxBytes=10 * 1024 * 1024,  # 10 MB
-            backupCount=5,
-        )
-    finally:
-        os.umask(old_umask)
+        os.chmod(LOG_FILE, 0o600)
+    except OSError:
+        pass
     handler.setFormatter(logging.Formatter("%(message)s"))  # structlog renders the JSON itself
     stdlib_logger = logging.getLogger("memem-miner")
     stdlib_logger.addHandler(handler)

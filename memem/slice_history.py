@@ -136,13 +136,14 @@ def persist_slice_history(
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_suffix(".lock")
     tmp_path = path.with_suffix(".tmp")
+    fd = open(lock_path, "w")
     # v1.8.1: 0600 file perms — slice records contain full user query text.
-    # Without this, other local users on a shared host can read prompts.
-    old_umask = os.umask(0o177)
+    # Use post-creation chmod instead of process-global umask to avoid races
+    # in concurrent test runs (umask is per-process, not per-thread).
     try:
-        fd = open(lock_path, "w")
-    finally:
-        os.umask(old_umask)
+        os.chmod(lock_path, 0o600)
+    except OSError:
+        pass
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
         records = load_slice_history(history_file=path, limit=0)
@@ -150,16 +151,16 @@ def persist_slice_history(
         if max_records > 0:
             records = records[-max_records:]
         try:
-            old_umask = os.umask(0o177)
+            with open(tmp_path, "w", encoding="utf-8") as out:
+                for record in records:
+                    out.write(json.dumps(record, sort_keys=True, default=str))
+                    out.write("\n")
+                out.flush()
+                os.fsync(out.fileno())
             try:
-                with open(tmp_path, "w", encoding="utf-8") as out:
-                    for record in records:
-                        out.write(json.dumps(record, sort_keys=True, default=str))
-                        out.write("\n")
-                    out.flush()
-                    os.fsync(out.fileno())
-            finally:
-                os.umask(old_umask)
+                os.chmod(tmp_path, 0o600)
+            except OSError:
+                pass
             os.replace(tmp_path, path)
         except Exception:
             # Clean up the orphan .tmp before another lock holder reuses

@@ -84,16 +84,17 @@ def _configure_logging() -> None:
     if any(isinstance(h, logging.handlers.RotatingFileHandler) for h in logger.handlers):
         return
     MEMEM_DIR.mkdir(parents=True, exist_ok=True)
-    # v1.8.1: 0600 perms — log contains session IDs.
-    old_umask = os.umask(0o177)
+    handler = logging.handlers.RotatingFileHandler(
+        str(LOG_FILE),
+        maxBytes=10 * 1024 * 1024,
+        backupCount=3,
+    )
+    # v1.8.1: 0600 perms — log contains session IDs (post-creation chmod
+    # to avoid umask races with concurrent threads/test fixtures).
     try:
-        handler = logging.handlers.RotatingFileHandler(
-            str(LOG_FILE),
-            maxBytes=10 * 1024 * 1024,
-            backupCount=3,
-        )
-    finally:
-        os.umask(old_umask)
+        os.chmod(LOG_FILE, 0o600)
+    except OSError:
+        pass
     handler.setFormatter(logging.Formatter("%(message)s"))
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
