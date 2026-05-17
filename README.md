@@ -2,6 +2,16 @@
 
 **Persistent, self-evolving memory for Claude Code.** Stop re-explaining your project every session.
 
+**Why it matters.** Today every Claude Code session starts cold. Decisions, conventions, debug context — all lost between sessions. As agents move from single-turn to long-horizon work (cross-file refactors, multi-day flows, CI-integrated delivery), this stops being friction and becomes a ceiling. memem treats memory as **substrate, not retrieval** — a local-first ledger that survives sessions, models, and tools.
+
+**Core design.**
+- **Local-first:** memories live as markdown in your Obsidian vault. No cloud, no API keys, no lock-in.
+- **Auto-mined:** a background daemon extracts durable lessons (decisions, conventions, bug fixes, preferences) from completed sessions and writes them to disk ~30 min after a session closes.
+- **Layered recall (L0–L3):** project identity always loaded, common conventions surfaced eagerly, rare archives gated behind explicit search — keeps context useful without blowing it up.
+- **SQLite FTS5 + 5-signal rerank:** keyword recall first; semantic, recency, access count, importance fold in as rerankers. Vector is a fallback, not the default.
+
+→ **In production:** 2,855 active memories across 87 project scopes, ~8,000 daily mining tasks.
+
 <!--
 The Glama badge URL below intentionally uses the legacy `cortex-plugin`
 slug. Glama listing slugs are fixed-once-created and the project was
