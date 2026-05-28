@@ -31,6 +31,16 @@ Memories are organized into layers:
 
 **Always-wake recall** — the `UserPromptSubmit` hook runs `active_memory_slice` on every prompt. Topic overlap is tracked only for telemetry and tuning; it no longer gates activation. You don't need to call it manually.
 
+**Injection mode (`MEMEM_INJECTION_MODE`)** — controls whether the hook auto-injects context into every prompt (v1.9+):
+
+| Value | Behaviour |
+|-------|-----------|
+| `auto` | Default. Hook injects the active memory slice on every prompt. Equivalent to pre-v1.9 behaviour. |
+| `hybrid` | Hook applies gating heuristics (trivial-query filter, turn cadence, empty-streak backoff, topic-shift detection) before injecting. Recommended for high-frequency sessions — reduces noise without losing recall. Enable with `MEMEM_INJECTION_MODE=hybrid`. |
+| `tool` | Hook produces no auto-injection. You control recall entirely via the `active_memory_slice` MCP tool. Zero hook overhead; no passive context. |
+
+Set this in your Claude Code environment or shell profile (e.g. `export MEMEM_INJECTION_MODE=hybrid`).
+
 **Graph traversal** — `memory_search` and `memory_get` automatically follow the `related[]` field one hop and include linked memories in a separate section.
 
 ## Auto-save

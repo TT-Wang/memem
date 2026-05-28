@@ -10,6 +10,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
 
+## [1.9.0] - 2026-05-28 — Smart injection gating + injection mode control
+
+v1.9.0 adds four layered gating heuristics that sit between the UserPromptSubmit
+hook and the active-slice engine, and a new `MEMEM_INJECTION_MODE` env var that
+lets users opt into gating, disable auto-injection entirely, or keep the pre-v1.9
+always-inject behaviour.
+
+### Added — trivial-query filter (EN + ZH)
+
+Short acknowledgements ("yes", "ok", "sure", "好的", "继续", …) now skip the
+slice pipeline entirely. Pattern is a regex compiled at import time from
+`memem/settings.py`. Zero LLM calls, zero disk I/O on trivial turns.
+
+### Added — turn cadence gate
+
+Injections are suppressed for `MEMEM_INJECT_CADENCE` turns (default 2) after the
+last successful injection. Prevents context repetition on rapid back-and-forth.
+Override: `MEMEM_INJECT_CADENCE=N` (integer ≥ 1).
+
+### Added — empty-streak backoff
+
+When the slice engine returns empty results (no relevant memories) on N
+consecutive turns (default `MEMEM_EMPTY_STREAK_MAX=8`), further injections are
+suppressed until the topic changes. Prevents fruitless slice calls late in a
+session that has drifted out of covered knowledge.
+
+### Added — topic-shift detection via embedding cosine similarity
+
+Cosine similarity between consecutive prompt embeddings (sentence-transformers,
+lazy-loaded). If similarity exceeds `MEMEM_TOPIC_SHIFT_THRESHOLD` (default 0.85,
+meaning the topic has NOT shifted), the cadence gate is extended — no injection
+until the topic actually changes. Falls back silently when embeddings are
+unavailable (no sentence-transformers installed).
+
+### Added — `MEMEM_INJECTION_MODE` env var
+
+Three injection modes shipped in v1.9:
+
+| Value | Behaviour |
+|-------|-----------|
+| `auto` | **Default.** Always-inject; no gating applied. Identical to pre-v1.9 behaviour. |
+| `hybrid` | Apply all four gating layers before injecting. **Recommended** for daily use — reduces noise without losing recall. |
+| `tool` | Hook produces no auto-injection. The `active_memory_slice` MCP tool still works normally for on-demand recall. |
+
+**Why `auto` is the default:** shipping gating opt-in (dark) is the conservative
+choice for v1.9. Users with calibrated sessions benefit immediately by setting
+`MEMEM_INJECTION_MODE=hybrid`. We plan to flip the default to `hybrid` in v1.10
+once telemetry confirms the gating thresholds hold across diverse session patterns.
+
+To enable hybrid gating: `export MEMEM_INJECTION_MODE=hybrid`
+
+### New env vars (all optional)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MEMEM_INJECTION_MODE` | `auto` | `auto` / `hybrid` / `tool` |
+| `MEMEM_INJECT_CADENCE` | `2` | Turns between injections (hybrid mode) |
+| `MEMEM_TOPIC_SHIFT_THRESHOLD` | `0.85` | Cosine similarity above which topic is considered unchanged (hybrid mode) |
+| `MEMEM_EMPTY_STREAK_MAX` | `8` | Empty-result turns before backoff kicks in (hybrid mode) |
+
+### Changed
+
+- `memem.__version__` bumped to `1.9.0`.
+- `memem/settings.py` added as the single source of truth for all v1.9 gating constants.
+
 ## [1.8.3] - 2026-05-13 — External review fixes (layer-0 corruption, --no-llm honored)
 
 An external code review (against v1.7.1, mostly still applicable in v1.8.2)

@@ -137,7 +137,14 @@ and surfaced in the slice, but safe writeback only runs when you opt in via
 Opt-in features:
 - **`MEMEM_SHOW_BANNER=1`** — show a one-line status banner at session start (off by default)
 - **`MEMEM_PRETOOL_GATING=1`** — enrich Read tool calls with memories about the target file (off by default)
-- **`MEMEM_TOPIC_SHIFT_THRESHOLD=0.3`** — keyword overlap threshold for topic-shift re-firing (default 0.3)
+
+Hybrid retrieval gating (v1.9+) — opt in to reduce hook overhead on trivial turns:
+- **`MEMEM_INJECTION_MODE`** — `auto` (default — no gating, current behavior), `hybrid` (apply gating heuristics), `tool` (silence hook, MCP only)
+- **`MEMEM_INJECT_CADENCE=2`** — when `hybrid` is on, run full slice every Nth turn
+- **`MEMEM_TOPIC_SHIFT_THRESHOLD=0.85`** — cosine-similarity threshold for reusing the previous turn's slice (`hybrid` only)
+- **`MEMEM_EMPTY_STREAK_MAX=8`** — cap on the exponential backoff after consecutive empty slices
+
+Recommended for high-frequency sessions: `export MEMEM_INJECTION_MODE=hybrid`
 
 ## How do I install memem?
 

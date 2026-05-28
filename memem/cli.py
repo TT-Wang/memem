@@ -262,6 +262,14 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         if not query:
             print("No query provided.")
             return
+        # Injection-mode gate: when MEMEM_INJECTION_MODE=tool, the hook path
+        # (which calls `server slice …`) must produce NO output so Claude Code
+        # does not receive auto-injected context. The MCP tool `active_memory_slice`
+        # is called directly via server.py/_build_mcp and bypasses this branch,
+        # so it continues to work normally regardless of the mode setting.
+        from memem.settings import MEMEM_INJECTION_MODE
+        if MEMEM_INJECTION_MODE == "tool":
+            return
         from memem.active_slice_engine import (
             active_slice_response,
             generate_active_memory_slice_with_writeback,

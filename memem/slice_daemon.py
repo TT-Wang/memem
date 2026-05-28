@@ -42,6 +42,7 @@ from typing import Any
 
 import structlog
 
+from memem.active_slice import ActiveMemorySlice
 from memem.models import MEMEM_DIR
 
 # ---------------------------------------------------------------------------
@@ -70,6 +71,50 @@ _shutdown_requested = False
 _lock_fh: Any | None = None
 _inflight_counter_lock = threading.Lock()
 _inflight_count = 0
+
+# ---------------------------------------------------------------------------
+# Per-session embedding + slice cache (topic-shift gate, Layer 3)
+# ---------------------------------------------------------------------------
+# Maps session_id → (embedding: list[float], slice: ActiveMemorySlice)
+# Guarded by _session_cache_lock for thread safety (daemon is multithreaded).
+_session_cache: dict[str, tuple[list[float], ActiveMemorySlice]] = {}
+_session_cache_lock = threading.Lock()
+
+
+def get_cached_query_embedding(session_id: str) -> list[float] | None:
+    """Return the last cached query embedding for *session_id*, or None."""
+    with _session_cache_lock:
+        entry = _session_cache.get(session_id)
+        return entry[0] if entry is not None else None
+
+
+def get_cached_slice(session_id: str) -> ActiveMemorySlice | None:
+    """Return the last cached ActiveMemorySlice for *session_id*, or None."""
+    with _session_cache_lock:
+        entry = _session_cache.get(session_id)
+        return entry[1] if entry is not None else None
+
+
+# NOTE: standalone half-helpers (set_cached_query_embedding, set_cached_slice) were
+# removed in v1.9 — they silently dropped writes when the partner field wasn't
+# already cached. Use set_cached_embedding_and_slice() for atomic writes.
+
+
+def set_cached_embedding_and_slice(
+    session_id: str,
+    embedding: list[float],
+    slice_obj: ActiveMemorySlice,
+) -> None:
+    """Atomically store both the embedding and the slice for *session_id*."""
+    with _session_cache_lock:
+        _session_cache[session_id] = (embedding, slice_obj)
+
+
+def clear_session_cache(session_id: str) -> None:
+    """Remove all cached data for *session_id* (e.g. for test teardown)."""
+    with _session_cache_lock:
+        _session_cache.pop(session_id, None)
+
 
 log = structlog.get_logger("memem-slice-daemon")
 
@@ -332,6 +377,16 @@ def _handle_one_request(conn: socket.socket) -> None:
             environment["repo_path"] = cwd
         if task_mode:
             environment["task_mode"] = task_mode
+
+        # MEMEM_INJECTION_MODE=tool silences the hook path. Daemon must mirror
+        # the cli.py:slice gate so a running daemon doesn't keep injecting
+        # context when tool mode is set. (v1.9 fix — Phase 4.5 finding A1)
+        import memem.settings as _memem_settings
+        if _memem_settings.MEMEM_INJECTION_MODE == "tool":
+            elapsed = int((time.monotonic() - t0) * 1000)
+            log.info("request_silenced_tool_mode", scope=scope, elapsed_ms=elapsed)
+            _send_response(conn, {"ok": True, "slice": "", "elapsed_ms": elapsed})
+            return
 
         # Generate slice — this is the hot path
         try:

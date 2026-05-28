@@ -268,6 +268,8 @@ class ActiveMemorySlice(TypedDict, total=False):
     # ── Extra fields for assembled kind ──
     sub_slices: list[ActiveMemorySlice]
     composition_strategy: str
+    # ── v1.9 gating ──
+    gating_reason: str | None  # set when gating short-circuits the full pipeline
 
 
 # Type alias for new code that wants the cleaner name.

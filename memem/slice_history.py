@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import threading
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
@@ -473,3 +474,48 @@ def annotate_slice_continuity(
     )
     enriched["artifact_progression"] = summarize_artifact_progression(previous_slice, enriched)
     return enriched
+
+
+# ---------------------------------------------------------------------------
+# Per-session in-memory counters (turn count + empty-streak backoff)
+# ---------------------------------------------------------------------------
+# State is intentionally in-memory only — the daemon process holds it for the
+# lifetime of the session. No disk persistence needed.
+
+_session_lock: threading.Lock = threading.Lock()
+_turn_counts: dict[str, int] = {}
+_empty_streaks: dict[str, int] = {}
+
+
+def get_session_turn_count(session_id: str) -> int:
+    """Return the current turn count for *session_id* (0 if unseen)."""
+    with _session_lock:
+        return _turn_counts.get(session_id, 0)
+
+
+def increment_turn_count(session_id: str) -> int:
+    """Increment and return the new turn count for *session_id*."""
+    with _session_lock:
+        count = _turn_counts.get(session_id, 0) + 1
+        _turn_counts[session_id] = count
+        return count
+
+
+def get_empty_streak(session_id: str) -> int:
+    """Return the current consecutive-empty-result streak for *session_id* (0 if none)."""
+    with _session_lock:
+        return _empty_streaks.get(session_id, 0)
+
+
+def increment_empty_streak(session_id: str) -> int:
+    """Increment and return the new empty streak for *session_id*."""
+    with _session_lock:
+        streak = _empty_streaks.get(session_id, 0) + 1
+        _empty_streaks[session_id] = streak
+        return streak
+
+
+def reset_empty_streak(session_id: str) -> None:
+    """Reset the empty streak for *session_id* to zero."""
+    with _session_lock:
+        _empty_streaks[session_id] = 0

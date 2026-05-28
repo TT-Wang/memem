@@ -1,6 +1,6 @@
 {
   "name": "memem",
-  "version": "1.8.3",
+  "version": "1.9.0",
   "description": "Persistent, self-evolving memory for Claude Code. Local-first, no cloud, browsable Obsidian vault.",
   "author": {
     "name": "TT-Wang",
@@ -8,11 +8,21 @@
   },
   "repository": "https://github.com/TT-Wang/memem",
   "license": "MIT",
-  "keywords": ["memory", "context", "knowledge", "recall", "learning", "persistent-memory", "obsidian"],
+  "keywords": [
+    "memory",
+    "context",
+    "knowledge",
+    "recall",
+    "learning",
+    "persistent-memory",
+    "obsidian"
+  ],
   "mcpServers": {
     "memem": {
       "command": "bash",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/bootstrap.sh"],
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/bootstrap.sh"
+      ],
       "env": {
         "CLAUDE_PLUGIN_ROOT": "${CLAUDE_PLUGIN_ROOT}"
       }

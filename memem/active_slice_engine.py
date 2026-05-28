@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, cast
 
+import memem.settings as _memem_settings
 from memem.activation import judge_activation_heuristically, judge_activation_with_llm
 from memem.active_slice import (
     ActivationResult,
@@ -39,7 +40,15 @@ from memem.environment_context import (
     normalize_runtime_environment,
 )
 from memem.models import LAYER_L0, LAYER_L3, _normalize_scope_id, parse_iso_dt
-from memem.slice_history import annotate_slice_continuity, load_slice_history, persist_slice_history
+from memem.slice_history import (
+    annotate_slice_continuity,
+    get_empty_streak,
+    increment_empty_streak,
+    increment_turn_count,
+    load_slice_history,
+    persist_slice_history,
+    reset_empty_streak,
+)
 
 log = logging.getLogger("memem-active-slice")
 
@@ -451,23 +460,199 @@ def build_slice(
     )
 
 
+def _make_gating_stub(
+    query: str,
+    scope_id: str,
+    session_id: str,
+    gating_reason: str,
+) -> ActiveMemorySlice:
+    """Return a minimal ActiveMemorySlice that signals the caller to skip injection."""
+    return cast(ActiveMemorySlice, {
+        "slice_id": "",
+        "session_id": session_id,
+        "scope_id": scope_id,
+        "query": query,
+        "input_goal": query,
+        "generated_at": "",
+        "goals": [],
+        "constraints": [],
+        "active_background": [],
+        "decisions": [],
+        "preferences": [],
+        "failure_patterns": [],
+        "artifacts": [],
+        "open_tensions": [],
+        "resolved_tensions": [],
+        "excluded_candidates": [],
+        "candidate_deltas": [],
+        "delta_results": [],
+        "candidate_count": 0,
+        "recall_candidate_count": 0,
+        "should_emit_context": False,
+        "activation_mode": "heuristic",
+        "confidence": 0.0,
+        "warnings": [],
+        "items": [],
+        "slice_kind": "active",
+        "gating_reason": gating_reason,
+    })
+
+
 def generate_active_memory_slice(
     query: str,
     scope_id: str = "default",
     environment: dict[str, Any] | None = None,
     use_llm: bool = True,
 ) -> ActiveMemorySlice:
-    """Main Active Memory Slice Engine entrypoint."""
-    return _generate_active_memory_slice_internal(
-        query,
-        scope_id=scope_id,
-        environment=environment,
-        use_llm=use_llm,
-        writeback_mode="policy_only",
-        auto_commit_safe=False,
-        dry_run=True,
-        persist_history=True,
-    )
+    """Main Active Memory Slice Engine entrypoint.
+
+    v1.9 gating: unless MEMEM_INJECTION_MODE=='auto', trivial queries (short
+    acknowledgements, slash-commands) are short-circuited before the full
+    pipeline.  Non-trivial queries are subject to cadence gating with
+    exponential backoff when the pipeline repeatedly returns empty results.
+    """
+    # -----------------------------------------------------------------
+    # Read ALL gating constants from memem.settings (NOT from environment).
+    # The normalize_runtime_environment() whitelist silently drops unknown
+    # keys, making env-dict gating unreliable.
+    # -----------------------------------------------------------------
+    injection_mode = _memem_settings.MEMEM_INJECTION_MODE
+
+    # 'auto' → legacy behaviour, skip gating entirely.
+    # Also skip gating when no session_id is provided — per-session counters
+    # are meaningless without a stable session identity.
+    env = environment or {}
+    session_id = str(env.get("session_id", "") or "")
+    if injection_mode != "auto" and session_id:
+
+        # --- Gate 1: trivial query (regex) ---
+        stripped = query.strip()
+        if _memem_settings.MEMEM_TRIVIAL_REGEX_EN.fullmatch(stripped):
+            return _make_gating_stub(query, scope_id, session_id, "trivial_query")
+        if _memem_settings.MEMEM_TRIVIAL_REGEX_ZH.fullmatch(stripped):
+            return _make_gating_stub(query, scope_id, session_id, "trivial_query")
+        if stripped.startswith("/"):
+            return _make_gating_stub(query, scope_id, session_id, "slash_command")
+
+        # --- Gate 2: turn cadence with empty-streak backoff ---
+        turn = increment_turn_count(session_id)
+        base_cadence = _memem_settings.MEMEM_INJECT_CADENCE
+        streak = get_empty_streak(session_id)
+        if streak > 0:
+            max_multiplier = _memem_settings.MEMEM_EMPTY_STREAK_MAX
+            effective_cadence = min(base_cadence * (2 ** streak), base_cadence * max_multiplier)
+        else:
+            effective_cadence = base_cadence
+        # Turn 1 always runs, then every Nth turn thereafter.
+        # (turn-1) % cadence == 0  →  run; otherwise skip.
+        if (turn - 1) % effective_cadence != 0:
+            return _make_gating_stub(query, scope_id, session_id, "cadence_skip")
+
+    # -----------------------------------------------------------------
+    # Gate 3: topic-shift detection via cached query embedding.
+    # Only active when injection_mode != 'auto' and a session_id exists.
+    # -----------------------------------------------------------------
+    _current_emb: list[float] | None = None
+    _topic_shift_active = injection_mode != "auto" and bool(session_id)
+    if _topic_shift_active:
+        try:
+            from memem.embedding_index import _get_model  # singleton, do not re-instantiate
+            model = _get_model()
+            if model is not None:
+                _current_emb = model.encode(
+                    query, convert_to_numpy=True, show_progress_bar=False,
+                ).tolist()
+        except Exception:  # noqa: BLE001 — silently skip on any failure
+            _current_emb = None
+
+        if _current_emb is not None:
+            try:
+                from memem.slice_daemon import (
+                    get_cached_query_embedding,
+                    get_cached_slice,
+                )
+                _cached_emb = get_cached_query_embedding(session_id)
+                _cached_slice = get_cached_slice(session_id)
+                if _cached_emb is not None and _cached_slice is not None:
+                    try:
+                        import numpy as _np
+                        _a = _np.asarray(_current_emb, dtype="float32")
+                        _b = _np.asarray(_cached_emb, dtype="float32")
+                        _norm_a = _np.linalg.norm(_a)
+                        _norm_b = _np.linalg.norm(_b)
+                        _sim = (
+                            float(_np.dot(_a, _b) / (_norm_a * _norm_b))
+                            if _norm_a > 0 and _norm_b > 0
+                            else 0.0
+                        )
+                    except ImportError:
+                        # Pure-Python fallback for cosine similarity
+                        _dot = sum(x * y for x, y in zip(_current_emb, _cached_emb, strict=False))
+                        _mag_a = sum(x * x for x in _current_emb) ** 0.5
+                        _mag_b = sum(x * x for x in _cached_emb) ** 0.5
+                        _sim = _dot / (_mag_a * _mag_b) if _mag_a > 0 and _mag_b > 0 else 0.0
+
+                    if _sim >= _memem_settings.MEMEM_TOPIC_SHIFT_THRESHOLD:
+                        # Topic unchanged — reuse cached slice. Overwrite the identity
+                        # fields so downstream telemetry attributes the reuse to the
+                        # CURRENT turn, not the cached previous turn.
+                        from datetime import datetime
+                        _reuse = cast(ActiveMemorySlice, dict(_cached_slice))
+                        _reuse["gating_reason"] = "topic_shift_reuse"
+                        _reuse["query"] = query
+                        _reuse["session_id"] = session_id
+                        _reuse["scope_id"] = scope_id
+                        _reuse["generated_at"] = datetime.now(UTC).isoformat()
+                        return _reuse
+            except Exception:  # noqa: BLE001 — silently fall through on any failure
+                pass
+
+    # -----------------------------------------------------------------
+    # Full pipeline — gating passed (or auto mode).
+    # Wrap in try/except so a pipeline failure still observes the empty-streak
+    # counter (treat failure as empty result so backoff kicks in).
+    # -----------------------------------------------------------------
+    try:
+        result = _generate_active_memory_slice_internal(
+            query,
+            scope_id=scope_id,
+            environment=environment,
+            use_llm=use_llm,
+            writeback_mode="policy_only",
+            auto_commit_safe=False,
+            dry_run=True,
+            persist_history=True,
+        )
+    except Exception:
+        if injection_mode != "auto" and session_id:
+            increment_empty_streak(session_id)
+        raise
+
+    # After full pipeline: update the embedding+slice cache if we computed an embedding.
+    if _topic_shift_active and _current_emb is not None:
+        try:
+            from memem.slice_daemon import set_cached_embedding_and_slice
+            set_cached_embedding_and_slice(session_id, _current_emb, result)
+        except Exception:  # noqa: BLE001 — cache update failure must never break recall
+            pass
+
+    # Observe result for empty-streak tracking (only when gating is active with session).
+    if injection_mode != "auto" and session_id:
+        sid = session_id
+        memories = result.get("items") or []
+        has_content = bool(
+            memories
+            or result.get("goals")
+            or result.get("constraints")
+            or result.get("active_background")
+            or result.get("artifacts")
+        )
+        if result.get("should_emit_context") and has_content:
+            reset_empty_streak(sid)
+        else:
+            increment_empty_streak(sid)
+
+    return result
 
 
 def _load_previous_slice(environment: dict[str, Any], scope_id: str) -> ActiveMemorySlice | None:

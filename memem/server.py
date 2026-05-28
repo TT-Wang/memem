@@ -523,6 +523,16 @@ def _build_mcp():
         when you specifically want a narrative briefing instead of the working
         state slice. Safe writeback is available only through the explicit
         `writeback_preview` / `auto_commit_safe` opt-in flags.
+
+        Note: when `MEMEM_INJECTION_MODE` is set to `hybrid` or `tool`, this
+        MCP tool DOES still honor the gating layers (trivial-query, turn
+        cadence, topic-shift) — the implementation shares one call path with
+        the hook. Result: explicit calls with trivial queries like "yes" may
+        return an empty stub. Workaround until v1.10: pass a non-trivial query
+        string, or temporarily unset MEMEM_INJECTION_MODE for the session.
+        `MEMEM_INJECTION_MODE=tool` still silences the automatic
+        UserPromptSubmit hook injection — use this mode when you want
+        on-demand recall via this tool without the hook chatting on every prompt.
         """
         environment: dict[str, object] = {}
         if session_id:
