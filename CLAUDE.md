@@ -41,6 +41,14 @@ Memories are organized into layers:
 
 Set this in your Claude Code environment or shell profile (e.g. `export MEMEM_INJECTION_MODE=hybrid`).
 
+Hybrid-mode tunables (env vars, all optional):
+
+| Var | Default | Behaviour |
+|-----|---------|-----------|
+| `MEMEM_INJECT_CADENCE` | `2` | Run the full slice every Nth turn. Clamped to `>= 1`. |
+| `MEMEM_TOPIC_SHIFT_THRESHOLD` | `0.85` | Cosine-similarity threshold for reusing the previous turn's slice. Higher = stricter (fewer cache hits). Clamped to `[0.0, 1.0]`. |
+| `MEMEM_EMPTY_STREAK_MAX` | `8` | Cap on the exponential cadence backoff after consecutive empty slices (streak=N → cadence × 2^N, capped). |
+
 **Graph traversal** — `memory_search` and `memory_get` automatically follow the `related[]` field one hop and include linked memories in a separate section.
 
 ## Auto-save

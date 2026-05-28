@@ -1,10 +1,9 @@
 """Tests for v1.9 gating Layer 2: turn cadence + empty-streak backoff.
 
 These tests exercise:
-- MEMEM_INJECT_CADENCE=2 → turns 1,3,5 cadence-skip; turns 2,4,6 run pipeline
-  (Note: turn 1 is turn%2!=0 → skip; turn 2 is turn%2==0 → run; etc.)
-  Actually: cadence=2 means every 2nd turn. Turn 1: 1%2=1≠0 → skip.
-            Turn 2: 2%2=0 → run. Turn 3: 3%2=1≠0 → skip. Turn 4: 4%2=0 → run.
+- MEMEM_INJECT_CADENCE=2 with formula (turn-1) % cadence == 0 → run
+  Turn 1: (1-1)%2=0 → run.  Turn 2: (2-1)%2=1 → skip.
+  Turn 3: (3-1)%2=0 → run.  Turn 4: (4-1)%2=1 → skip.
 - Empty-streak backoff: streak=1 → cadence×2, streak=2 → cadence×4, etc.
 - Empty-streak capped at MAX multiplier
 - in_memory helpers: get/increment/reset functions behave correctly

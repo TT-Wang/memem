@@ -521,6 +521,11 @@ def generate_active_memory_slice(
     # 'auto' → legacy behaviour, skip gating entirely.
     # Also skip gating when no session_id is provided — per-session counters
     # are meaningless without a stable session identity.
+    #
+    # CARVE-OUT: when session_id is empty, gating is silently skipped and the
+    # full pipeline runs. Callers (CLI smoke tests, ad-hoc scripts) that omit
+    # session_id will NOT see hybrid/tool mode behaviour. Hook callers always
+    # pass session_id, so this affects only opt-out / debug code paths.
     env = environment or {}
     session_id = str(env.get("session_id", "") or "")
     if injection_mode != "auto" and session_id:

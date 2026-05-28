@@ -267,8 +267,11 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         # does not receive auto-injected context. The MCP tool `active_memory_slice`
         # is called directly via server.py/_build_mcp and bypasses this branch,
         # so it continues to work normally regardless of the mode setting.
-        from memem.settings import MEMEM_INJECTION_MODE
-        if MEMEM_INJECTION_MODE == "tool":
+        # Use module-attribute access (not `from memem.settings import …`) so
+        # tests can monkeypatch `memem.settings.MEMEM_INJECTION_MODE` and have
+        # this branch react — value-imports bind at import time and bypass patches.
+        import memem.settings as _memem_settings
+        if _memem_settings.MEMEM_INJECTION_MODE == "tool":
             return
         from memem.active_slice_engine import (
             active_slice_response,

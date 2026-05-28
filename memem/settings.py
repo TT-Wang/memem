@@ -21,9 +21,13 @@ MEMEM_INJECTION_MODE: str = os.getenv("MEMEM_INJECTION_MODE", "auto")
 # Cadence and backoff
 # ---------------------------------------------------------------------------
 
-MEMEM_INJECT_CADENCE: int = int(os.getenv("MEMEM_INJECT_CADENCE", "2"))
-MEMEM_TOPIC_SHIFT_THRESHOLD: float = float(os.getenv("MEMEM_TOPIC_SHIFT_THRESHOLD", "0.85"))
-MEMEM_EMPTY_STREAK_MAX: int = int(os.getenv("MEMEM_EMPTY_STREAK_MAX", "8"))
+# Cadence is clamped to >= 1: a value of 0 would cause ZeroDivisionError in the
+# modulo check that decides cadence-skip. Negative values are similarly nonsense.
+MEMEM_INJECT_CADENCE: int = max(1, int(os.getenv("MEMEM_INJECT_CADENCE", "2")))
+# Topic-shift threshold is clamped to [0.0, 1.0] — cosine similarity range.
+MEMEM_TOPIC_SHIFT_THRESHOLD: float = min(1.0, max(0.0, float(os.getenv("MEMEM_TOPIC_SHIFT_THRESHOLD", "0.85"))))
+# Empty-streak cap is clamped to >= 0 (0 disables backoff, negative is nonsense).
+MEMEM_EMPTY_STREAK_MAX: int = max(0, int(os.getenv("MEMEM_EMPTY_STREAK_MAX", "8")))
 
 # ---------------------------------------------------------------------------
 # Trivial-query regex patterns

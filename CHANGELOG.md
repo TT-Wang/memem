@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > Pre-v0.7.0 entries below describe what was called Cortex at the time —
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
+## [1.9.1] - 2026-05-28 — v1.9 polish: input validation + docs + test consistency
+
+Five quick fixes flagged in v1.9.0 Phase 4.5 advisory:
+
+- **`memem/settings.py`**: `MEMEM_INJECT_CADENCE` clamped to `>= 1` (prevents `ZeroDivisionError` when user sets `MEMEM_INJECT_CADENCE=0`). `MEMEM_TOPIC_SHIFT_THRESHOLD` clamped to `[0.0, 1.0]`. `MEMEM_EMPTY_STREAK_MAX` clamped to `>= 0`.
+- **`memem/cli.py`**: switched from `from memem.settings import MEMEM_INJECTION_MODE` (value-import bound at import time) to `import memem.settings as _memem_settings` (module-attribute access), so test monkeypatches against `memem.settings.MEMEM_INJECTION_MODE` actually flow through to the CLI gate.
+- **`memem/active_slice_engine.py`**: documented the session_id carve-out (gating silently skipped when caller omits session_id — affects CLI smoke tests and debug callers; hook callers always pass it).
+- **`tests/test_gating_cadence.py`**: replaced confusing/contradictory cadence-formula docstring with the correct `(turn-1) % cadence == 0` description.
+- **`CLAUDE.md`**: added a tunables table after the injection-mode table so Claude can answer user questions about `MEMEM_INJECT_CADENCE`, `MEMEM_TOPIC_SHIFT_THRESHOLD`, `MEMEM_EMPTY_STREAK_MAX` without grepping the source.
+
+No behavioural changes beyond input clamping. All 66 v1.9 gating tests still green.
+
 
 ## [1.9.0] - 2026-05-28 — Smart injection gating + injection mode control
 
