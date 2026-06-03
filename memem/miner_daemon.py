@@ -64,6 +64,13 @@ SUBPROCESS_KILL_GRACE_SECONDS = 5  # SIGTERM grace before SIGKILL
 # so it stops being re-attempted every poll. The fingerprint check in
 # find_settled_sessions will let it back in if the JSONL file changes.
 MAX_SESSION_FAILURES = 3
+# Subprocess-level timeout cap (separate from mining.py MAX_SESSION_TIMEOUTS):
+# when _run_server_command SIGKILLs the child for timing out, mine_session's
+# in-process timeout handler never runs, so we track it here in the daemon.
+# After this many subprocess timeouts on the same session, mark it COMPLETE
+# with a skip message and advance offset to current file size, so the JSONL
+# growing on each new turn doesn't keep re-queuing it forever.
+MAX_SUBPROCESS_TIMEOUTS = int(os.environ.get("MEMEM_MAX_SESSION_TIMEOUTS", "3"))
 # When every session in a poll fails, ramp the next sleep up to this cap to
 # prevent a logged-out claude CLI from spawning subprocesses every 60 seconds.
 BACKOFF_MAX_SECONDS = 1800
@@ -511,6 +518,50 @@ def _mine_session(jsonl_path: Path) -> tuple[int, bool]:
             except OSError as persist_exc:
                 log.error("persist_fatal_state_failed", session_id=sid, error=str(persist_exc))
             raise FatalMinerError(f"Claude API/auth error, miner stopping: {exc}") from exc
+
+        # Subprocess timeout accounting: mine_session's in-process timeout block
+        # is unreachable when the daemon SIGKILLs the child (str(exc) match below).
+        # Track timeout_failures here so MAX_SUBPROCESS_TIMEOUTS can permanently
+        # skip pathological sessions instead of looping on every new turn.
+        exc_text = str(exc).lower()
+        if "timed out" in exc_text:
+            try:
+                state = load_mined_session_state().get(jsonl_path.stem) or {}
+                prev_timeouts = int(state.get("timeout_failures", 0) or 0)
+                new_timeouts = prev_timeouts + 1
+                if new_timeouts >= MAX_SUBPROCESS_TIMEOUTS:
+                    # Permanent skip: advance offset to current size so the
+                    # next fingerprint change (new turn appended) does NOT
+                    # re-feed the same content to a doomed Haiku call.
+                    try:
+                        current_size = jsonl_path.stat().st_size
+                    except OSError:
+                        current_size = int(state.get("offset_bytes", 0) or 0)
+                    update_session_state(
+                        jsonl_path,
+                        STATUS_COMPLETE,
+                        message=f"skipped — {new_timeouts} subprocess timeouts at "
+                                f"{SUBPROCESS_TIMEOUT_SECONDS}s each (MEMEM_MAX_SESSION_TIMEOUTS={MAX_SUBPROCESS_TIMEOUTS})",
+                        attempts=int(state.get("attempts", 0) or 0),
+                        offset_bytes=current_size,
+                        timeout_failures=new_timeouts,
+                    )
+                    log.warning(
+                        "session_skipped_subprocess_timeouts",
+                        session_id=sid, timeouts=new_timeouts, cap=MAX_SUBPROCESS_TIMEOUTS,
+                    )
+                else:
+                    update_session_state(
+                        jsonl_path,
+                        STATUS_FAILED,
+                        message=f"subprocess timeout ({new_timeouts}/{MAX_SUBPROCESS_TIMEOUTS})",
+                        attempts=int(state.get("attempts", 0) or 0) + 1,
+                        offset_bytes=int(state.get("offset_bytes", 0) or 0),
+                        timeout_failures=new_timeouts,
+                    )
+            except OSError as persist_exc:
+                log.error("persist_timeout_state_failed", session_id=sid, error=str(persist_exc))
+
         log.error("session_processed", session_id=sid, outcome="failure", duration_ms=duration_ms, error=str(exc))
         return 0, False
 

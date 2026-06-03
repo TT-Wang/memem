@@ -254,17 +254,17 @@ def test_session_marked_failed_at_cap_after_restart(tmp_cortex_dir):
 def test_timeout_reclassified_as_transient_in_mine_session(tmp_cortex_dir, tmp_vault, monkeypatch):
     """v1.7 fix: when _mine_session receives a 'subprocess timed out after Ns'
     RetryableMinerError, it must NOT raise FatalMinerError (which stops the daemon).
-    Instead it should log the failure as transient, persist STATUS_FAILED with
-    incremented timeout_failures, and return False (no retry in this poll).
+    Instead it returns (0, False) so the daemon continues mining other sessions.
 
     Background: prior to v1.7, _is_fatal_api_error matched 'timed out' which caused
     the daemon to permanently stop on any Haiku CLI timeout. The v1.7 fix
-    reclassifies subprocess timeouts as transient — the miner continues mining
-    other sessions. The per-session timeout cap (MEMEM_MAX_SESSION_TIMEOUTS)
-    handles the case where a single session times out repeatedly.
+    reclassified subprocess timeouts as transient.
 
-    Previously (before v1.7), this test expected a FatalMinerError. Now it must
-    NOT raise FatalMinerError — the timeout is swallowed as transient.
+    Post-fix (current): _mine_session also bumps the persisted timeout_failures
+    counter so the MAX_SUBPROCESS_TIMEOUTS cap can permanently skip a session
+    that times out repeatedly (the previous gap: mine_session's in-process
+    timeout handler is unreachable because the daemon SIGKILLs the subprocess
+    before it can run, so accounting must live in the daemon).
     """
     import importlib
     from unittest.mock import patch
@@ -275,26 +275,62 @@ def test_timeout_reclassified_as_transient_in_mine_session(tmp_cortex_dir, tmp_v
 
     jsonl = _write_session_jsonl(tmp_cortex_dir, name="hangsim01")
 
-    # Force _run_server_command to raise a RetryableMinerError whose text
-    # matches the timeout pattern (e.g. from _run_server_command's TimeoutExpired handler).
     fake_exc = miner_daemon.RetryableMinerError(
         "subprocess timed out after 300s; killed process group"
     )
-    # v1.7: timeout must NOT escalate to FatalMinerError — just returns (0, False)
+    # Timeout must NOT escalate to FatalMinerError — just returns (0, False)
     with patch.object(miner_daemon, "_run_server_command", side_effect=fake_exc):
         saved, completed = miner_daemon._mine_session(jsonl)
     assert saved == 0
     assert completed is False
 
-    # v1.7: transient timeout does NOT persist state from _mine_session itself.
-    # The daemon's _run_loop is responsible for updating state on transient failures
-    # (STATUS_RETRYING). _mine_session only persists on fatal errors or timeout cap.
+    # Daemon-side timeout accounting (post-fix): one timeout below the cap
+    # must persist STATUS_FAILED with timeout_failures=1.
     states = session_state.load_mined_session_state()
-    # The session may not be in states yet (no persist from _mine_session for transient)
-    if "hangsim01" in states:
-        assert states["hangsim01"]["attempts"] < miner_daemon.MAX_SESSION_FAILURES, (
-            "Timeout must not push session to MAX_SESSION_FAILURES (it is transient)"
-        )
+    state = states["hangsim01"]
+    assert state["status"] == STATUS_FAILED
+    assert state["timeout_failures"] == 1
+    assert state["attempts"] < miner_daemon.MAX_SESSION_FAILURES
+
+
+def test_subprocess_timeouts_at_cap_mark_session_complete_skipped(tmp_cortex_dir, tmp_vault, monkeypatch):
+    """When subprocess timeouts reach MEMEM_MAX_SESSION_TIMEOUTS, _mine_session
+    must mark the session STATUS_COMPLETE with offset advanced to the current
+    file size — so subsequent JSONL growth produces small deltas instead of
+    re-queuing the same doomed content forever.
+
+    Regression guard for the 9612f54c-bbd loop where a 35MB JSONL kept
+    re-entering the queue on every new turn because the daemon's SIGKILL
+    prevented mine_session's own timeout cap from ever firing.
+    """
+    import importlib
+    from unittest.mock import patch
+
+    from memem import miner_daemon, session_state
+    importlib.reload(session_state)
+    importlib.reload(miner_daemon)
+
+    jsonl = _write_session_jsonl(tmp_cortex_dir, name="hangsim02", content="x" * 1000)
+    initial_size = jsonl.stat().st_size
+
+    fake_exc = miner_daemon.RetryableMinerError(
+        "subprocess timed out after 300s; killed process group"
+    )
+
+    # Drive _mine_session MAX_SUBPROCESS_TIMEOUTS times — each call simulates
+    # one full subprocess-killed cycle. The final call should trip the cap.
+    cap = miner_daemon.MAX_SUBPROCESS_TIMEOUTS
+    with patch.object(miner_daemon, "_run_server_command", side_effect=fake_exc):
+        for _ in range(cap):
+            miner_daemon._mine_session(jsonl)
+
+    state = session_state.load_mined_session_state()["hangsim02"]
+    assert state["status"] == STATUS_COMPLETE
+    assert state["timeout_failures"] == cap
+    assert state["offset_bytes"] == initial_size, (
+        "Skipped session must advance offset to current file size so future "
+        "deltas are small (not re-feeding the same doomed content)"
+    )
 
 
 # ---------------------------------------------------------------------------
