@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > Pre-v0.7.0 entries below describe what was called Cortex at the time —
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
+## [1.9.2] - 2026-06-03 — Fix: daemon-side subprocess-timeout accounting
+
+Single bug fix targeting a pathological loop: sessions whose JSONL grew
+faster than the miner could chew (e.g. multi-day debugging sessions in the
+10s of MB) would retry forever, burning ~15 min per cycle on Haiku timeouts
+without ever tripping the `MEMEM_MAX_SESSION_TIMEOUTS` skip cap.
+
+**Root cause.** The daemon's `_run_server_command` SIGKILLs the
+mine_session subprocess after `SUBPROCESS_TIMEOUT_SECONDS` (300s).
+mine_session's own timeout-handling code — which is supposed to bump
+`timeout_failures` and enforce the per-session cap — is unreachable because
+the process is dead before that branch can run. Result: `timeout_failures`
+in the DB stays at `0` indefinitely, and every JSONL append (new turn,
+new fingerprint) re-queues the session.
+
+**Fix.** `memem/miner_daemon.py::_mine_session` now bumps the persisted
+`timeout_failures` counter when it catches a `RetryableMinerError` whose
+message contains `"timed out"`. At `MEMEM_MAX_SESSION_TIMEOUTS` (default
+3), the session is marked `STATUS_COMPLETE` with offset advanced to the
+current file size — so subsequent JSONL growth produces small deltas
+instead of re-feeding the same doomed content. Below the cap, the session
+is marked `STATUS_FAILED` with the bumped counter so the next attempt has
+the correct baseline.
+
+**Tests.**
+
+- `test_timeout_reclassified_as_transient_in_mine_session` (updated):
+  still asserts the v1.7 contract that subprocess timeouts do NOT escalate
+  to `FatalMinerError`, plus the new assertion that one timeout below the
+  cap persists `STATUS_FAILED` with `timeout_failures=1`.
+- `test_subprocess_timeouts_at_cap_mark_session_complete_skipped` (new):
+  drives `_mine_session` `MEMEM_MAX_SESSION_TIMEOUTS` times and verifies
+  the final state is `STATUS_COMPLETE` with `offset_bytes == file_size`.
+
+Full miner suite (116 tests) green; lint clean.
+
+No behavioural changes for any session that doesn't repeatedly timeout.
+
+
 ## [1.9.1] - 2026-05-28 — v1.9 polish: input validation + docs + test consistency
 
 Five quick fixes flagged in v1.9.0 Phase 4.5 advisory:
