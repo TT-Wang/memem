@@ -41,7 +41,9 @@ def _run_integrity_check(verbose: bool = True) -> bool:
                 print(f"  [skip] {label}: not present")
             continue
         try:
-            conn = sqlite3.connect(str(p))
+            # timeout=5.0 sets SQLite busy-timeout so this read doesn't
+            # immediately fail if the miner happens to be mid-write
+            conn = sqlite3.connect(str(p), timeout=5.0)
             result = conn.execute("PRAGMA integrity_check").fetchone()
             conn.close()
             status = result[0] if result else "no result"

@@ -104,21 +104,92 @@ def test_idempotency_file_atomic_safe_after_corruption(tmp_cortex_dir):
     assert _writeback_idempotency_lookup("scope_a", "any_hash") is None
 
 
-def test_commit_deltas_dedupes_on_second_call(tmp_cortex_dir, tmp_vault):
-    """End-to-end: calling commit_deltas twice with the same deltas returns
-    the cached result on the second call, with deduped=True markers."""
-    from memem.delta_commit import commit_deltas
+def test_commit_deltas_returns_cache_when_hash_matches(tmp_cortex_dir, tmp_vault):
+    """End-to-end: when the cache holds a committed result for this scope and
+    the new commit_deltas call hashes identically, the cached list is returned
+    with deduped=True markers — re-execution is skipped.
+
+    We seed the cache directly (rather than relying on a real commit to land
+    a 'committed' status — which requires a vault state we don't have here)
+    so the test focuses on the lookup-and-return path.
+    """
+    from memem.delta_commit import (
+        _scoped_delta,
+        _writeback_idempotency_store,
+        _writeback_op_hash,
+        commit_deltas,
+    )
 
     deltas = [_make_delta("d1", "First rule")]
-    # First call: real execution (dry-run pass — no actual file writes needed
-    # because the delta won't match a vault state, but the cache write path
-    # still fires for non-dry-run, so we use auto_only to force the auto path).
-    first = commit_deltas(deltas, scope_id="t1", dry_run=False, auto_only=True)
-    assert all("deduped" not in r for r in first)
+    scoped = [_scoped_delta(d, "t1") for d in deltas]
+    op_hash = _writeback_op_hash(scoped, scope_id="t1", dry_run=False, auto_only=True)
 
-    # Second call with identical inputs: hits cache.
-    second = commit_deltas(deltas, scope_id="t1", dry_run=False, auto_only=True)
-    assert second  # has results
-    assert all(r.get("deduped") is True for r in second), (
-        f"second call must be deduped, got: {second}"
+    cached_committed = [{"delta_id": "d1", "status": "committed"}]
+    _writeback_idempotency_store("t1", op_hash, cached_committed, dry_run=False)
+
+    result = commit_deltas(deltas, scope_id="t1", dry_run=False, auto_only=True)
+    assert result == [{"delta_id": "d1", "status": "committed", "deduped": True}]
+
+
+def test_force_writeback_bypasses_cache_and_executes(tmp_cortex_dir, tmp_vault):
+    """v1.9.4: force_writeback=True must skip the cache lookup even when a
+    matching cached entry exists. Result is whatever the real executor
+    returns, not the cached value."""
+    from memem.delta_commit import (
+        _scoped_delta,
+        _writeback_idempotency_store,
+        _writeback_op_hash,
+        commit_deltas,
     )
+
+    deltas = [_make_delta("d1", "First rule")]
+    scoped = [_scoped_delta(d, "t1") for d in deltas]
+    op_hash = _writeback_op_hash(scoped, scope_id="t1", dry_run=False, auto_only=True)
+
+    cached = [{"delta_id": "d1", "status": "committed", "marker": "from_cache"}]
+    _writeback_idempotency_store("t1", op_hash, cached, dry_run=False)
+
+    forced = commit_deltas(
+        deltas, scope_id="t1", dry_run=False, auto_only=True, force_writeback=True
+    )
+    assert forced
+    assert all(r.get("marker") != "from_cache" for r in forced), (
+        "force_writeback must skip cache lookup; got cached marker"
+    )
+    assert all("deduped" not in r for r in forced)
+
+
+def test_partial_failure_batch_not_cached(tmp_cortex_dir):
+    """v1.9.4: a batch where any result is non-committed must NOT enter the
+    cache. Re-running with the same inputs must produce a fresh execution
+    (no deduped markers) so transient failures get retried."""
+    from memem.delta_commit import (
+        _writeback_idempotency_lookup,
+        _writeback_idempotency_store,
+    )
+    results = [
+        {"delta_id": "d1", "status": "committed"},
+        {"delta_id": "d2", "status": "blocked"},  # partial failure
+    ]
+    _writeback_idempotency_store("scope_a", "hashAAA", results, dry_run=False)
+    assert _writeback_idempotency_lookup("scope_a", "hashAAA") is None, (
+        "partial-failure batch must not be cached"
+    )
+
+
+def test_writeback_version_in_hash(tmp_cortex_dir):
+    """v1.9.4: hash must use DELTA_WRITEBACK_VERSION, not MINER_STATE_VERSION.
+    Bumping DELTA_WRITEBACK_VERSION must change the hash; bumping
+    MINER_STATE_VERSION must NOT (they are orthogonal version concerns).
+    """
+    import memem.delta_commit as dc
+
+    deltas = [{"a": 1}]
+    h_before = dc._writeback_op_hash(deltas, scope_id="s1", dry_run=False, auto_only=False)
+    original = dc.DELTA_WRITEBACK_VERSION
+    try:
+        dc.DELTA_WRITEBACK_VERSION = "9999"
+        h_after = dc._writeback_op_hash(deltas, scope_id="s1", dry_run=False, auto_only=False)
+    finally:
+        dc.DELTA_WRITEBACK_VERSION = original
+    assert h_before != h_after, "DELTA_WRITEBACK_VERSION must participate in the hash"

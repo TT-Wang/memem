@@ -19,7 +19,6 @@ except ImportError:  # pragma: no cover — Windows fallback
 from memem.active_slice import DeltaWritebackResult, WritebackSummary
 from memem.delta_policy import DeltaPolicyDecision, _normalized_ids, evaluate_delta_proposal
 from memem.io_utils import atomic_write_text
-from memem.miner_protocol import MINER_STATE_VERSION
 from memem.models import DELTA_AUDIT_LOG, DELTA_STATE_DIR, _normalize_scope_id, now_iso
 from memem.obsidian_store import (
     _add_related_link,
@@ -775,6 +774,14 @@ def _auto_only_result(
     return _public_result(result, preview=preview)
 
 
+# Bumped whenever commit_deltas semantics change in a way that invalidates
+# previously-cached results. NOT the same as miner-state schema; the two are
+# orthogonal (a miner-schema bump should not invalidate writeback cache and
+# vice versa). v1.9.3 used MINER_STATE_VERSION here — that was a category
+# mismatch flagged by the v1.9.3 final-release review; corrected in v1.9.4.
+DELTA_WRITEBACK_VERSION = "1"
+
+
 def _idempotency_file_path() -> Path:
     """Resolved at call time so MEMEM_DIR env-var overrides take effect."""
     from memem.models import MEMEM_DIR as _MEMEM_DIR
@@ -801,7 +808,7 @@ def _writeback_op_hash(
             "scope_id": scope_id,
             "dry_run": dry_run,
             "auto_only": auto_only,
-            "model_version": MINER_STATE_VERSION,
+            "writeback_version": DELTA_WRITEBACK_VERSION,
             "deltas": list(scoped_deltas),
         },
         sort_keys=True,
@@ -849,17 +856,46 @@ def _writeback_idempotency_store(
     *,
     dry_run: bool,
 ) -> None:
-    """Cache the result of a successful (non-dry-run) commit_deltas call."""
+    """Cache the result of a successful (non-dry-run) commit_deltas call.
+
+    v1.9.4: skip caching if ANY result reports a non-committed terminal
+    status. A partial-failure batch should not be served from cache on
+    retry — callers depend on retry to surface unresolved failures.
+
+    Concurrent-write safety: the load-modify-store window is guarded by
+    fcntl.flock on the cache file. Without it, two concurrent commits
+    for different scopes would both read the same stale cache, each add
+    their own scope, and the second store would silently overwrite the
+    first scope's entry.
+    """
     if dry_run:
         return  # dry-runs are previews; users will re-call expecting fresh output
+    # Don't cache batches that include any non-committed terminal result.
+    # 'skipped'/'rejected'/'blocked' are not transient; 'committed' / 'dry_run'
+    # are clean. The caller can retry to surface unresolved failures.
+    if any(r.get("status") not in ("committed", "dry_run") for r in results):
+        return
+    path = _idempotency_file_path()
     try:
-        cache = _writeback_idempotency_load()
-        cache[_normalize_scope_id(scope_id)] = {
-            "op_hash": op_hash,
-            "results": results,
-            "ts": now_iso(),
-        }
-        atomic_write_text(_idempotency_file_path(), json.dumps(cache, indent=2, default=str))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # fcntl-locked RMW: open a sidecar lock file (or the cache file itself
+        # for first-time writers). Lock is released when the lockfile handle
+        # closes.
+        lock_path = path.with_suffix(".json.lock")
+        with open(lock_path, "a+") as lockfh:
+            if _HAS_FCNTL:
+                fcntl.flock(lockfh.fileno(), fcntl.LOCK_EX)
+            try:
+                cache = _writeback_idempotency_load()
+                cache[_normalize_scope_id(scope_id)] = {
+                    "op_hash": op_hash,
+                    "results": results,
+                    "ts": now_iso(),
+                }
+                atomic_write_text(path, json.dumps(cache, indent=2, default=str))
+            finally:
+                if _HAS_FCNTL:
+                    fcntl.flock(lockfh.fileno(), fcntl.LOCK_UN)
     except OSError:
         # Cache write failure must never break the writeback itself
         pass
@@ -870,6 +906,7 @@ def commit_deltas(
     scope_id: str = "default",
     dry_run: bool = False,
     auto_only: bool = False,
+    force_writeback: bool = False,
 ) -> list[dict[str, Any]]:
     """Public wrapper for committing multiple deltas.
 
@@ -881,13 +918,20 @@ def commit_deltas(
     The cache lives at ``~/.memem/writeback-idempotency.json`` and is keyed by
     scope_id. Only the most recent successful write per scope is remembered.
     Dry-run results are NOT cached (their purpose is to surface previews).
+    Partial-failure batches are NOT cached either (caller must retry to
+    surface unresolved failures — see _writeback_idempotency_store).
+
+    v1.9.4: ``force_writeback=True`` bypasses the cache lookup (still updates
+    cache on success). Use when the caller knows the prior result is stale
+    even though inputs are unchanged (e.g., vault state mutated externally).
     """
     scoped_deltas = [_scoped_delta(delta, scope_id) for delta in deltas]
 
     op_hash = _writeback_op_hash(scoped_deltas, scope_id=scope_id, dry_run=dry_run, auto_only=auto_only)
-    cached = _writeback_idempotency_lookup(scope_id, op_hash)
-    if cached is not None:
-        return cached
+    if not force_writeback:
+        cached = _writeback_idempotency_lookup(scope_id, op_hash)
+        if cached is not None:
+            return cached
 
     decisions = [evaluate_delta_proposal(delta) for delta in scoped_deltas]
 
