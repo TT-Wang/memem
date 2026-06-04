@@ -40,6 +40,11 @@ def _init_graph_db() -> sqlite3.Connection:
     """Initialize graph.db and return an open sqlite connection."""
     MEMEM_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(GRAPH_DB))
+    # WAL: concurrent reads from the slice engine + writes from the miner.
+    # busy_timeout absorbs short lock contention.
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS memory_edges (

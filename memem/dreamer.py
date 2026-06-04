@@ -32,6 +32,7 @@ import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
+from memem.io_utils import atomic_write_text
 from memem.models import DEFAULT_LAYER, LAYER_L0, MEMEM_DIR, now_iso
 
 log = logging.getLogger("memem-dreamer")
@@ -485,7 +486,7 @@ def write_diff_log(diff: dict) -> Path:
     DREAMS_DIR.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(UTC).strftime("%Y-%m-%dT%H-%M-%SZ")
     path = DREAMS_DIR / f"{ts}.json"
-    path.write_text(json.dumps(diff, indent=2, default=str))
+    atomic_write_text(path, json.dumps(diff, indent=2, default=str))
     return path
 
 

@@ -35,6 +35,7 @@ import logging
 import threading
 from pathlib import Path
 
+from memem.io_utils import atomic_write_text
 from memem.models import MEMEM_DIR, now_iso
 
 log = logging.getLogger("memem-embedding")
@@ -165,7 +166,7 @@ def _persist() -> None:
     MEMEM_DIR.mkdir(parents=True, exist_ok=True)
     try:
         np.save(str(_EMB_PATH), _index_matrix)
-        _IDS_PATH.write_text(json.dumps({
+        atomic_write_text(_IDS_PATH, json.dumps({
             "ids": _index_ids,
             "model": _MODEL_NAME,
             "built_at": now_iso(),

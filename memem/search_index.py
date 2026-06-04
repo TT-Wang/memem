@@ -99,6 +99,12 @@ def _init_search_db() -> sqlite3.Connection:
     """
     MEMEM_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(SEARCH_DB))
+    # WAL gives single-writer/many-reader semantics so the CLI can read FTS
+    # while the miner upserts. NORMAL synchronous keeps the durability story
+    # reasonable without serializing every write through fsync.
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     current_version = conn.execute("PRAGMA user_version").fetchone()[0]
     if current_version < _FTS_SCHEMA_VERSION:
         _migrate_fts_schema(conn)

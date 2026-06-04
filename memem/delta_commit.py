@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 from collections.abc import Collection
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 
 try:
@@ -17,6 +18,8 @@ except ImportError:  # pragma: no cover — Windows fallback
 
 from memem.active_slice import DeltaWritebackResult, WritebackSummary
 from memem.delta_policy import DeltaPolicyDecision, _normalized_ids, evaluate_delta_proposal
+from memem.io_utils import atomic_write_text
+from memem.miner_protocol import MINER_STATE_VERSION
 from memem.models import DELTA_AUDIT_LOG, DELTA_STATE_DIR, _normalize_scope_id, now_iso
 from memem.obsidian_store import (
     _add_related_link,
@@ -772,14 +775,120 @@ def _auto_only_result(
     return _public_result(result, preview=preview)
 
 
+def _idempotency_file_path() -> Path:
+    """Resolved at call time so MEMEM_DIR env-var overrides take effect."""
+    from memem.models import MEMEM_DIR as _MEMEM_DIR
+    return _MEMEM_DIR / "writeback-idempotency.json"
+
+
+def _writeback_op_hash(
+    scoped_deltas: list[DeltaProposal],
+    *,
+    scope_id: str,
+    dry_run: bool,
+    auto_only: bool,
+) -> str:
+    """Stable hash of (scope_id, dry_run, auto_only, deltas, model_version).
+
+    Canonical JSON (sorted keys, no whitespace) makes the hash stable across
+    Python versions and dict-ordering variations. model_version is the
+    MINER_STATE_VERSION so a schema bump invalidates cached hashes.
+    """
+    import hashlib
+
+    canonical = json.dumps(
+        {
+            "scope_id": scope_id,
+            "dry_run": dry_run,
+            "auto_only": auto_only,
+            "model_version": MINER_STATE_VERSION,
+            "deltas": list(scoped_deltas),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _writeback_idempotency_load() -> dict[str, dict[str, Any]]:
+    path = _idempotency_file_path()
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _writeback_idempotency_lookup(
+    scope_id: str, op_hash: str
+) -> list[dict[str, Any]] | None:
+    """Return the cached result list for this scope if hash matches, else None.
+
+    Dry-run results are never cached (caller policy in _store), so this
+    will only ever return a value for non-dry-run commits.
+    """
+    cache = _writeback_idempotency_load()
+    entry = cache.get(_normalize_scope_id(scope_id))
+    if not entry:
+        return None
+    if entry.get("op_hash") != op_hash:
+        return None
+    results = entry.get("results")
+    if not isinstance(results, list):
+        return None
+    # Tag each result so downstream consumers can tell this came from the cache.
+    return [{**r, "deduped": True} for r in results]
+
+
+def _writeback_idempotency_store(
+    scope_id: str,
+    op_hash: str,
+    results: list[dict[str, Any]],
+    *,
+    dry_run: bool,
+) -> None:
+    """Cache the result of a successful (non-dry-run) commit_deltas call."""
+    if dry_run:
+        return  # dry-runs are previews; users will re-call expecting fresh output
+    try:
+        cache = _writeback_idempotency_load()
+        cache[_normalize_scope_id(scope_id)] = {
+            "op_hash": op_hash,
+            "results": results,
+            "ts": now_iso(),
+        }
+        atomic_write_text(_idempotency_file_path(), json.dumps(cache, indent=2, default=str))
+    except OSError:
+        # Cache write failure must never break the writeback itself
+        pass
+
+
 def commit_deltas(
     deltas: list[DeltaProposal],
     scope_id: str = "default",
     dry_run: bool = False,
     auto_only: bool = False,
 ) -> list[dict[str, Any]]:
-    """Public wrapper for committing multiple deltas."""
+    """Public wrapper for committing multiple deltas.
+
+    v1.9.3 (H-5): idempotency check. If the same (scope_id, dry_run, auto_only,
+    deltas) tuple was just committed successfully, return the cached result
+    instead of re-executing. Guards against double-writeback from crash-and-resume
+    flows where the caller resends the same proposal set.
+
+    The cache lives at ``~/.memem/writeback-idempotency.json`` and is keyed by
+    scope_id. Only the most recent successful write per scope is remembered.
+    Dry-run results are NOT cached (their purpose is to surface previews).
+    """
     scoped_deltas = [_scoped_delta(delta, scope_id) for delta in deltas]
+
+    op_hash = _writeback_op_hash(scoped_deltas, scope_id=scope_id, dry_run=dry_run, auto_only=auto_only)
+    cached = _writeback_idempotency_lookup(scope_id, op_hash)
+    if cached is not None:
+        return cached
+
     decisions = [evaluate_delta_proposal(delta) for delta in scoped_deltas]
 
     if auto_only and not dry_run:
@@ -818,7 +927,9 @@ def commit_deltas(
                     state_file=str(batch.get("state_file", "") or ""),
                     writeback_summary=batch.get("writeback_summary", {}),
                 )
-        return [entry for entry in ordered if entry is not None]
+        final = [entry for entry in ordered if entry is not None]
+        _writeback_idempotency_store(scope_id, op_hash, final, dry_run=dry_run)
+        return final
 
     batch = execute_delta_writeback(
         scoped_deltas,
@@ -830,7 +941,7 @@ def commit_deltas(
         for preview in batch.get("previews", [])
         if str(preview.get("delta_id", "") or "")
     }
-    return [
+    final = [
         _public_result(
             result,
             preview=preview_by_id.get(str(result.get("delta_id", "") or "")),
@@ -841,6 +952,8 @@ def commit_deltas(
         )
         for result in batch.get("results", [])
     ]
+    _writeback_idempotency_store(scope_id, op_hash, final, dry_run=dry_run)
+    return final
 
 
 def commit_delta(

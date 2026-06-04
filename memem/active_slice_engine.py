@@ -39,6 +39,7 @@ from memem.environment_context import (
     environment_candidates_from_environment,
     normalize_runtime_environment,
 )
+from memem.io_utils import atomic_write_text
 from memem.models import LAYER_L0, LAYER_L3, _normalize_scope_id, parse_iso_dt
 from memem.slice_history import (
     annotate_slice_continuity,
@@ -263,8 +264,7 @@ def _tournament_break_ties(
     ]
     cache[fingerprint] = {"order": final_order, "ts": now.strftime("%Y-%m-%dT%H:%M:%SZ")}
     try:
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        cache_file.write_text(json.dumps(cache, indent=2))
+        atomic_write_text(cache_file, json.dumps(cache, indent=2))
     except Exception as exc:
         log.debug("tournament cache write failed: %s", exc)
 

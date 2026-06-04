@@ -29,6 +29,7 @@ import re
 import uuid
 from pathlib import Path
 
+from memem.io_utils import atomic_write_text
 from memem.models import now_iso
 
 log = logging.getLogger("memem-lessons")
@@ -84,7 +85,7 @@ def record_lesson(
         "---",
         "",
     ]
-    path.write_text("\n".join(frontmatter_lines))
+    atomic_write_text(path, "\n".join(frontmatter_lines))
     log.info("recorded lesson %s targeting memory %s", lesson_id, targeted_memory_id)
     return lesson_id
 

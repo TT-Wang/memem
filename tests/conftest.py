@@ -33,10 +33,11 @@ def tmp_cortex_dir(tmp_path, monkeypatch):
     state.mkdir()
     monkeypatch.setenv("MEMEM_DIR", str(state))
     monkeypatch.delenv("CORTEX_DIR", raising=False)
-    from memem import models, search_index, telemetry
+    from memem import graph_index, models, search_index, telemetry
     importlib.reload(models)
     importlib.reload(telemetry)
     importlib.reload(search_index)
+    importlib.reload(graph_index)
     return state
 
 

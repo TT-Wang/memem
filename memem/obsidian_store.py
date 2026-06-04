@@ -41,6 +41,7 @@ def _atomic_write(path: Path, content: str) -> None:
             pass
         raise
 
+from memem.io_utils import atomic_write_text
 from memem.models import (
     DEFAULT_LAYER,
     INDEX_PATH,
@@ -68,6 +69,56 @@ log = logging.getLogger("memem-obsidian")
 _fm: Any = None          # frontmatter module, loaded on first use
 _yaml: Any = None        # yaml module, loaded on first use
 _MEM_HANDLER: Any = None # _MemHandler singleton, created on first use
+
+
+_FRONTMATTER_STRICT_MODE = os.environ.get("MEMEM_FRONTMATTER_STRICT", "quarantine").lower()
+
+
+def _handle_malformed_frontmatter(md_file: Path, reason: str) -> None:
+    """Dispatch a malformed-frontmatter file per MEMEM_FRONTMATTER_STRICT.
+
+    Modes:
+      - skip       : log warning, leave the file in place
+      - quarantine : move to ~/.memem/quarantine/<original_relpath> (default)
+      - raise      : ValueError
+
+    The quarantine destination preserves the relative path under the vault root
+    so multiple files with the same name from different scopes don't collide.
+    """
+    if _FRONTMATTER_STRICT_MODE == "raise":
+        raise ValueError(f"Malformed frontmatter in {md_file}: {reason}")
+
+    if _FRONTMATTER_STRICT_MODE == "quarantine":
+        from memem.models import MEMEM_DIR
+        try:
+            quarantine_root = MEMEM_DIR / "quarantine"
+            # Preserve the file's name + a short hash of its source path so two
+            # files named "memory.md" from different folders don't clash.
+            import hashlib
+            src_hash = hashlib.sha1(str(md_file).encode()).hexdigest()[:8]
+            dest = quarantine_root / f"{src_hash}_{md_file.name}"
+            quarantine_root.mkdir(parents=True, exist_ok=True)
+            try:
+                md_file.rename(dest)
+            except OSError:
+                # Fall back to copy+unlink for cross-fs moves
+                import shutil
+                shutil.copy2(md_file, dest)
+                md_file.unlink(missing_ok=True)
+            log.warning(
+                "Quarantined malformed memory file %s → %s (%s)",
+                md_file, dest, reason,
+            )
+            return
+        except Exception as exc:  # noqa: BLE001 — quarantine must never crash the reader
+            log.warning(
+                "Quarantine failed for %s (%s); falling back to skip: %s",
+                md_file, reason, exc,
+            )
+            # Fall through to skip
+
+    # Default / skip
+    log.warning("Skipping malformed memory file %s (%s)", md_file, reason)
 
 
 def _ensure_frontmatter() -> None:
@@ -572,6 +623,17 @@ def _parse_obsidian_memory_file(md_file: Path) -> dict | None:
         content = md_file.read_text(errors="ignore")
     except OSError as exc:
         log.warning("Failed to read memory file %s: %s", md_file, exc)
+        return None
+
+    # M-4 v1.9.3: reject files without YAML frontmatter rather than silently
+    # treating the whole body as content with schema_version=0. Behaviour is
+    # controlled by MEMEM_FRONTMATTER_STRICT:
+    #   - skip       : log warning, return None (file ignored)
+    #   - quarantine : move to ~/.memem/quarantine/, log, return None (default)
+    #   - raise      : raise ValueError (loud failure for debugging)
+    # Frontmatter presence test: file starts with `---` after leading whitespace.
+    if not content.lstrip().startswith("---"):
+        _handle_malformed_frontmatter(md_file, reason="missing_frontmatter")
         return None
 
     mem: dict[str, Any] = {
@@ -1432,5 +1494,5 @@ def purge_mined_memories(mined_sessions_file: Path) -> dict:
                 deleted += 1
 
     if mined_sessions_file.exists():
-        mined_sessions_file.write_text("")
+        atomic_write_text(mined_sessions_file, "")
     return {"deleted": deleted}

@@ -16,6 +16,49 @@ from memem.session_state import MINED_SESSIONS_FILE
 from memem.storage import _register_server_pid
 
 
+def _run_integrity_check(verbose: bool = True) -> bool:
+    """Run SQLite PRAGMA integrity_check on the three WAL DBs.
+
+    Returns True if any DB failed the check (caller treats as a blocker).
+    Returns False (no failures) if all DBs are healthy OR if a DB file is
+    absent (fresh install).
+    """
+    import sqlite3
+    from pathlib import Path
+
+    from memem.models import MEMEM_DIR
+
+    dbs = [
+        ("search.db", MEMEM_DIR / "search.db"),
+        ("graph.db", MEMEM_DIR / "graph.db"),
+        ("mined_sessions.db", MEMEM_DIR / "mined_sessions.db"),
+    ]
+    any_failed = False
+    for label, path in dbs:
+        p = Path(path)
+        if not p.exists():
+            if verbose:
+                print(f"  [skip] {label}: not present")
+            continue
+        try:
+            conn = sqlite3.connect(str(p))
+            result = conn.execute("PRAGMA integrity_check").fetchone()
+            conn.close()
+            status = result[0] if result else "no result"
+            if status == "ok":
+                if verbose:
+                    print(f"  [ok]   {label}: integrity_check passed")
+            else:
+                any_failed = True
+                if verbose:
+                    print(f"  [FAIL] {label}: {status}")
+        except sqlite3.Error as exc:
+            any_failed = True
+            if verbose:
+                print(f"  [FAIL] {label}: sqlite error: {exc}")
+    return any_failed
+
+
 def _append_env_list(environment: dict[str, Any], key: str, value: str) -> None:
     values = environment.setdefault(key, [])
     if not isinstance(values, list):
@@ -540,8 +583,17 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         caps = detect_capabilities()
         write_capabilities(caps)
         print(pretty_report(caps))
-        blockers = not caps.get("mcp") or not caps.get("writable_state_dir") or not caps.get("writable_vault")
+        # SQLite integrity check on all 3 WAL DBs (search / graph / session-state).
+        # Surfaces corruption that PRAGMA integrity_check can detect: torn pages,
+        # malformed btree, page-checksum failures (WAL mode does NOT itself ensure
+        # this; it just gives concurrent-access semantics).
+        integrity_failed = _run_integrity_check(verbose=True)
+        blockers = not caps.get("mcp") or not caps.get("writable_state_dir") or not caps.get("writable_vault") or integrity_failed
         raise SystemExit(1 if blockers else 0)
+
+    if cmd == "--integrity-check":
+        integrity_failed = _run_integrity_check(verbose=True)
+        raise SystemExit(1 if integrity_failed else 0)
 
     if cmd == "--events":
         from memem.models import EVENT_LOG
