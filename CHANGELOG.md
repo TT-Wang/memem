@@ -9,6 +9,103 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > Pre-v0.7.0 entries below describe what was called Cortex at the time —
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
+## [1.9.3] - 2026-06-04 — Data correctness pass (atomic writes, WAL, frontmatter strictness, writeback idempotency)
+
+Four hardening items targeted at silent-corruption paths, batched into a
+single release per VPS-accessibility upgrade plan. No behavioural changes
+on the happy path; every change is a no-op when nothing goes wrong.
+
+### Added — `memem/io_utils.py` (H-1)
+
+New shared `atomic_write_text(path, content)` / `atomic_write_bytes(...)`
+helpers: tempfile in sibling dir → fsync (configurable via `MEMEM_FSYNC`,
+default on) → `os.replace`. Promoted from inline patterns scattered across
+`working_memory.py`, `delta_commit.py`, `telemetry.py`, `feedback.py`.
+
+Applied to five **previously non-atomic** data-write sites:
+
+- `obsidian_store.py:1435` — mined-sessions reset
+- `lessons.py:87` — lesson frontmatter write
+- `embedding_index.py:168` — embedding ID mapping (critical for recall)
+- `dreamer.py:488` — dream cycle output
+- `active_slice_engine.py:267` — tournament cache
+
+Power-loss / NFS-jitter / mid-write SIGKILL no longer leave half-written
+files in any of those paths.
+
+### Added — WAL + busy_timeout on `graph_index` and `search_index` (H-2)
+
+`session_state_db.py` already used WAL since v1.6. `graph_index.py` and
+`search_index.py` were missing it — both now set:
+
+- `PRAGMA journal_mode=WAL`
+- `PRAGMA synchronous=NORMAL`
+- `PRAGMA busy_timeout=5000`
+
+so concurrent reads from the slice engine and writes from the miner no
+longer race on the locking semantics.
+
+Also added `memem --integrity-check` CLI command (and rolled it into
+`--doctor`) that runs `PRAGMA integrity_check` on all three WAL DBs.
+Healthy DBs report `[ok]`; missing DBs are `[skip]` (fresh install);
+genuine corruption returns exit-code 1.
+
+### Added — strict frontmatter validation (M-4)
+
+`_parse_obsidian_memory_file` previously fell back gracefully when a file
+had no YAML frontmatter — the entire body was ingested as content with
+`schema_version: 0`, polluting FTS results.
+
+Now controlled by `MEMEM_FRONTMATTER_STRICT`:
+
+| Value | Behaviour |
+|-------|-----------|
+| `skip` | Log warning, return None; file stays in place |
+| `quarantine` (default) | Move to `~/.memem/quarantine/<hash>_<name>` and log |
+| `raise` | Throw `ValueError` (loud failure for debugging) |
+
+Quarantine destination prepends a short hash of the source path so two
+files named `memory.md` from different scopes don't collide.
+
+### Added — writeback idempotency cache (H-5)
+
+`commit_deltas` now hashes `(scope_id, dry_run, auto_only, deltas, model_version)`
+on entry. If the same hash was just committed successfully for this scope,
+the cached result list is returned with `deduped: True` markers instead of
+re-executing. Cache lives at `~/.memem/writeback-idempotency.json`, scope-keyed,
+one entry per scope (most recent successful write wins).
+
+Dry-run results are explicitly **not** cached (their purpose is to surface
+previews). Corrupted cache files fall through cleanly to a fresh execution.
+
+Guards against double-writeback on crash-and-resume flows where the caller
+resends the same proposal set.
+
+### Tests
+
+29 new tests across four files:
+
+- `tests/test_io_utils.py` — 8 tests: roundtrip, parent-dir creation, overwrite,
+  no-tmp-leak on success, tmp-cleanup on failure, bytes variant, concurrent
+  20-writer race (no torn writes), `MEMEM_FSYNC=0` env disables fsync
+- `tests/test_wal_pragmas.py` — 6 tests: WAL mode + busy_timeout on each DB,
+  integrity-check helper on fresh and healthy installs
+- `tests/test_frontmatter_strict.py` — 6 tests: well-formed still parses,
+  all three modes (skip/quarantine/raise) behave correctly, quarantine
+  collision-disambiguation, leading-whitespace tolerance
+- `tests/test_writeback_idempotency.py` — 9 tests: hash stability across
+  dict-order / scope / dry-run, store-and-lookup roundtrip, miss on different
+  hash, dry-run-not-cached, scope isolation, corrupted-file safety, end-to-end
+  commit_deltas dedup
+
+Also fixed `tests/conftest.py`'s `tmp_cortex_dir` fixture to also reload
+`graph_index` — without this, `GRAPH_DB` stays bound to the prior MEMEM_DIR
+when tests use the fixture (same pattern that already covers `models`,
+`search_index`, `telemetry`).
+
+Full suite: 787 passed, 2 skipped. Lint clean.
+
+
 ## [1.9.2] - 2026-06-03 — Fix: daemon-side subprocess-timeout accounting
 
 Single bug fix targeting a pathological loop: sessions whose JSONL grew
