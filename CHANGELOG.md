@@ -9,6 +9,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > Pre-v0.7.0 entries below describe what was called Cortex at the time —
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
+## [1.9.4] - 2026-06-04 — v1.9.3 final-release review fixes
+
+Six items flagged by the v1.9.3 forge reviewer (final-release lens):
+
+- **`tests/conftest.py`** — `tmp_cortex_dir` fixture now reloads `delta_commit`
+  alongside `models`/`search_index`/`graph_index`/`telemetry`. Without this,
+  `DELTA_AUDIT_LOG` and `DELTA_STATE_DIR` stayed bound to the real `~/.memem/`
+  paths during tests, so `commit_deltas` invocations from the test suite were
+  silently mutating the developer's live data. Caught by the reviewer; the
+  live `~/.memem/delta-audit.jsonl` does have a few extra entries from v1.9.3
+  test runs (append-only, no corruption).
+- **`memem/delta_commit.py::_writeback_idempotency_store`** — wrapped the
+  load-modify-store cycle in an `fcntl.flock` exclusive lock (sidecar
+  `.json.lock` file). Without it, two concurrent commits for different scopes
+  could both read the same stale cache, each add their own scope, and the
+  second store would silently overwrite the first scope's entry. Atomic write
+  alone doesn't close this window.
+- **`memem/delta_commit.py::_writeback_idempotency_store`** — partial-failure
+  batches (any result with status ∉ {`committed`, `dry_run`}) are no longer
+  cached. v1.9.3 would cache a rejected/blocked result and serve it on retry,
+  masking the failure from callers who depend on retry to surface unresolved
+  state.
+- **`memem/delta_commit.py::commit_deltas`** — new `force_writeback=False`
+  parameter. When `True`, the cache lookup is skipped even if a matching
+  entry exists; the executor runs fresh and updates the cache on success.
+  Use when the caller knows the prior result is stale despite unchanged
+  inputs (e.g., vault state mutated externally).
+- **`memem/delta_commit.py`** — new `DELTA_WRITEBACK_VERSION = "1"` constant
+  participates in the idempotency hash instead of `MINER_STATE_VERSION`. The
+  reviewer correctly flagged this as a category mismatch: miner-state schema
+  and delta-writeback semantics are orthogonal version concerns. A miner-DB
+  schema bump should not invalidate writeback cache, and vice versa.
+- **`memem/cli.py::_run_integrity_check`** — pass `timeout=5.0` to
+  `sqlite3.connect` so a busy miner doesn't immediately fail the integrity
+  probe. Mirrors the existing pattern in `status.py` and `session_state_db.py`.
+
+**Deferred** (warning, not blocking):
+
+- Vault pre-flight audit for `MEMEM_FRONTMATTER_STRICT=quarantine`: on first
+  scan post-upgrade, malformed files get moved without a heads-up. Quarantine
+  is recoverable (files go to `~/.memem/quarantine/`), but a dry-run audit
+  mode would be safer. Filed for follow-up; not blocking the release.
+
+Tests: 3 new tests in `tests/test_writeback_idempotency.py` covering
+partial-failure-not-cached, `force_writeback=True` bypassing cache, and
+`DELTA_WRITEBACK_VERSION` participating in the hash. Full suite: 790
+passed, 2 skipped. Lint clean.
+
+
 ## [1.9.3] - 2026-06-04 — Data correctness pass (atomic writes, WAL, frontmatter strictness, writeback idempotency)
 
 Four hardening items targeted at silent-corruption paths, batched into a
