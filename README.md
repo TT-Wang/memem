@@ -30,6 +30,20 @@ memem is a Claude Code plugin that gives Claude persistent memory across session
 
 It's **local-first**: no cloud services, no API keys required, no vendor lock-in. Everything lives in `~/obsidian-brain/memem/memories/` as human-readable markdown.
 
+### What's new in v1.9.4 (data correctness pass)
+
+Two release pair (v1.9.3 + v1.9.4) targeting silent-corruption paths. All changes are no-ops on the happy path.
+
+- **Atomic writes everywhere** — shared `atomic_write_text` helper (tempfile + fsync + `os.replace`) applied to 5 previously non-atomic data paths (embedding ID map, tournament cache, lesson frontmatter, dreamer output, mined-sessions reset). `MEMEM_FSYNC=0` opts out per-call. Power-loss / NFS-jitter / SIGKILL no longer torn-writes vault data.
+- **WAL on every SQLite DB** — `graph.db` and `search.db` now use `journal_mode=WAL` + `synchronous=NORMAL` + `busy_timeout=5000`, matching `session_state_db.py` since v1.6. Concurrent reads from the slice engine no longer race with miner writes. New `memem --integrity-check` CLI command (also called from `--doctor`) runs `PRAGMA integrity_check` on all three DBs.
+- **Strict frontmatter validation** — files without `---` frontmatter are no longer silently ingested with `schema_version=0`. New `MEMEM_FRONTMATTER_STRICT` env var: `quarantine` (default — move to `~/.memem/quarantine/<hash>_<name>`), `skip` (log + ignore), or `raise`.
+- **Writeback idempotency cache** — `commit_deltas` hashes `(scope_id, dry_run, auto_only, deltas, DELTA_WRITEBACK_VERSION)` on entry; matching hits return cached result with `deduped: True` markers. Cache at `~/.memem/writeback-idempotency.json`. Dry-runs and partial-failure batches are not cached. `force_writeback=True` bypasses the lookup. RMW guarded by `fcntl.flock`.
+- **Daemon-side subprocess-timeout accounting** (v1.9.2) — fixed an infinite-loop where a huge JSONL session would re-queue forever because the daemon's SIGKILL preempted `mine_session`'s in-process timeout cap. Now the daemon itself increments `timeout_failures` and permanently skips after `MEMEM_MAX_SESSION_TIMEOUTS` (default 3).
+
+### What's new in v1.9 (smart injection gating)
+
+Four layered gating heuristics between the `UserPromptSubmit` hook and the active-slice engine, plus a new `MEMEM_INJECTION_MODE` env (`auto` / `hybrid` / `tool`). Hybrid mode reduces hook overhead on trivial turns via: (1) trivial-query regex EN+ZH, (2) per-session turn cadence (`MEMEM_INJECT_CADENCE`, default 2), (3) empty-streak exponential backoff (`MEMEM_EMPTY_STREAK_MAX`, default 8), (4) topic-shift cosine via cached query embedding (`MEMEM_TOPIC_SHIFT_THRESHOLD`, default 0.85). Persistent slice daemon since v1.8 eliminates cold-start cost. See `CLAUDE.md` for the full tunables table.
+
 ### What's new in v1.1
 
 - **Layered memory becomes real end-to-end.** Every memory now lives in one of four layers (L0/L1/L2/L3) at save time, not just at mining time. `memory_save` accepts an optional `layer` param (Claude can override) and auto-classifies otherwise. The slice engine pins L0 (project identity) on every prompt and gates L3 (rare archival) behind explicit search.
@@ -310,15 +324,16 @@ This is by design: missing optional dependencies should degrade, not fail.
 
 ## How do I diagnose problems?
 
-Run `/memem-doctor`. It runs the same preflight the bootstrap shim runs (Python version, `mcp` importable, `claude` CLI on PATH, directory writability, `uv` available), then prints a report labelled **HEALTHY**, **DEGRADED**, or **FAILING** with explicit fix instructions for each blocker.
+Run `/memem-doctor`. It runs the same preflight the bootstrap shim runs (Python version, `mcp` importable, `claude` CLI on PATH, directory writability, `uv` available) **plus a SQLite integrity check on all three WAL DBs** (v1.9.3+), then prints a report labelled **HEALTHY**, **DEGRADED**, or **FAILING** with explicit fix instructions for each blocker.
 
 For deeper debugging:
 
 ```bash
-tail -f ~/.memem/bootstrap.log   # first-run shim log
-tail -f ~/.memem/miner.log       # miner daemon log
-cat ~/.memem/events.jsonl        # memory operation audit trail
-python3 -m memem.server --status   # detailed status dump
+tail -f ~/.memem/bootstrap.log              # first-run shim log
+tail -f ~/.memem/miner.log                  # miner daemon log
+cat ~/.memem/events.jsonl                   # memory operation audit trail
+python3 -m memem.server --status            # detailed status dump
+python3 -m memem.server --integrity-check   # PRAGMA integrity_check on every DB
 ```
 
 ## How does the mining pipeline work?
