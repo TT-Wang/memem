@@ -49,6 +49,14 @@ Hybrid-mode tunables (env vars, all optional):
 | `MEMEM_TOPIC_SHIFT_THRESHOLD` | `0.85` | Cosine-similarity threshold for reusing the previous turn's slice. Higher = stricter (fewer cache hits). Clamped to `[0.0, 1.0]`. |
 | `MEMEM_EMPTY_STREAK_MAX` | `8` | Cap on the exponential cadence backoff after consecutive empty slices (streak=N → cadence × 2^N, capped). |
 
+Selective-recall tunables (v1.9.6+, env vars, all optional):
+
+| Var | Default | Behaviour |
+|-----|---------|-----------|
+| `MEMEM_RECALL_MIN_CONFIDENCE` | `0.45` | Activation-confidence threshold for emitting context. Below this, slice is marked `should_emit_context=False` with `gating_reason="low_confidence"` and the hook suppresses `additionalContext`. Clamped to `[0.0, 1.0]`. |
+| `MEMEM_RECALL_MIN_ITEM_SCORE` | `0.0` | Per-item composite-score floor for recall results (0.0 = disabled). L0 project-identity anchors are always exempt. Clamped to `[0.0, 1.0]`. |
+| `MEMEM_RECALL_OOV_THRESHOLD` | `0.0` | Out-of-vault detection threshold (0.0 = disabled). When `> 0`, queries with no L0-title keyword overlap and all candidate scores below threshold return a stub with `gating_reason="out_of_vault"`. Daemon must be restarted for env-var changes to take effect. Clamped to `[0.0, 1.0]`. |
+
 **Graph traversal** — `memory_search` and `memory_get` automatically follow the `related[]` field one hop and include linked memories in a separate section.
 
 ## Auto-save

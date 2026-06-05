@@ -70,14 +70,22 @@ def _start_daemon_process(sock_path: Path, max_inflight: int = 8,
     tmp_dir = sock_path.parent
 
     def _run_daemon(sock_path_str: str, tmp_dir_str: str, max_inflight: int, fake_slice: str) -> None:
-        # Mock out the heavy embedding / slice generation
+        # Mock out the heavy embedding / slice generation.
+        # C1: daemon now calls generate_active_memory_slice + generate_prompt_context
+        # instead of active_slice_response. Mock both accordingly.
         from pathlib import Path as _Path
         from unittest.mock import patch
 
-        mock_response = fake_slice
+        mock_slice_obj = {
+            "should_emit_context": True,
+            "gating_reason": "",
+            "memories": [],
+            "query": "test query",
+        }
         tmp_dir = _Path(tmp_dir_str)
 
-        with patch("memem.active_slice_engine.active_slice_response", return_value=mock_response):
+        with patch("memem.active_slice_engine.generate_active_memory_slice", return_value=mock_slice_obj), \
+             patch("memem.active_slice_engine.generate_prompt_context", return_value=fake_slice):
             from memem.slice_daemon import run
             run(
                 sock_path=sock_path_str,
@@ -205,11 +213,15 @@ class TestDaemonRefusesOverload:
 
             tmp_dir = _Path(tmp_dir_str)
 
+            mock_slice_obj = {"should_emit_context": True, "gating_reason": "", "memories": []}
+
             def _slow_response(*args, **kwargs):
                 time.sleep(0.5)
-                return fake_slice
+                return mock_slice_obj
 
-            with patch("memem.active_slice_engine.active_slice_response", side_effect=_slow_response):
+            # C1: daemon uses generate_active_memory_slice (not active_slice_response).
+            with patch("memem.active_slice_engine.generate_active_memory_slice", side_effect=_slow_response), \
+                 patch("memem.active_slice_engine.generate_prompt_context", return_value=fake_slice):
                 from memem.slice_daemon import run
                 run(
                     sock_path=sock_path_str,
@@ -270,7 +282,8 @@ class TestDaemonRequestTimeout:
                 time.sleep(60)
                 return "never"
 
-            with patch("memem.active_slice_engine.active_slice_response", side_effect=_forever):
+            # C1: daemon uses generate_active_memory_slice (not active_slice_response).
+            with patch("memem.active_slice_engine.generate_active_memory_slice", side_effect=_forever):
                 from memem.slice_daemon import run
                 run(
                     sock_path=sock_path_str,

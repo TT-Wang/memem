@@ -7,6 +7,7 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 
+import memem.settings as _memem_settings
 from memem.models import DEFAULT_LAYER, now_iso
 
 if TYPE_CHECKING:
@@ -570,7 +571,7 @@ def build_active_memory_slice(
         selected_memory_items
         or artifacts
         or (tensions and has_grounding_context)
-        or (has_recall_candidates and confidence >= 0.45)
+        or (has_recall_candidates and confidence >= _memem_settings.MEMEM_RECALL_MIN_CONFIDENCE)
     )
 
     slice_obj: ActiveMemorySlice = {
@@ -615,6 +616,7 @@ def build_active_memory_slice(
         "candidate_count": len(flatten_candidate_bundle(candidate_bundle)),
         "recall_candidate_count": recall_candidate_count,
         "should_emit_context": should_emit_context,
+        "gating_reason": "" if should_emit_context else "low_confidence",
         "activation_mode": activation_result.get("activation_mode", "heuristic"),
         "confidence": confidence,
         "warnings": activation_result.get("warnings", []),

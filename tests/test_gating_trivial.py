@@ -105,9 +105,11 @@ def test_auto_mode_bypasses_trivial_gate(monkeypatch, tmp_vault, tmp_cortex_dir)
         sh._empty_streaks.clear()
 
     result = _call_generate("yes", monkeypatch, injection_mode="auto")
-    # In auto mode, gating_reason must NOT be set
-    assert result.get("gating_reason") is None, (
-        f"auto mode should not gate; gating_reason was {result.get('gating_reason')!r}"
+    # In auto mode, trivial-query gating must NOT fire. Confidence-driven
+    # gating_reason="low_confidence" (v1.9.6 A3) is independent — it's a
+    # slice-level signal the hook may act on, not a hybrid-mode gate.
+    assert result.get("gating_reason") != "trivial_query", (
+        f"auto mode should bypass trivial gate; got {result.get('gating_reason')!r}"
     )
 
 

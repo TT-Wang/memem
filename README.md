@@ -158,6 +158,11 @@ Hybrid retrieval gating (v1.9+) — opt in to reduce hook overhead on trivial tu
 - **`MEMEM_TOPIC_SHIFT_THRESHOLD=0.85`** — cosine-similarity threshold for reusing the previous turn's slice (`hybrid` only)
 - **`MEMEM_EMPTY_STREAK_MAX=8`** — cap on the exponential backoff after consecutive empty slices
 
+Selective recall (v1.9.6+) — suppress context injection when the slice is low-confidence or out-of-vault:
+- **`MEMEM_RECALL_MIN_CONFIDENCE=0.45`** — minimum activation confidence required to emit context. Below this, the hook emits a "0 items (low confidence)" systemMessage and suppresses `additionalContext`.
+- **`MEMEM_RECALL_MIN_ITEM_SCORE=0.0`** — per-item composite-score floor for recall results (0.0 = disabled). L0 project-identity anchors are always exempt.
+- **`MEMEM_RECALL_OOV_THRESHOLD=0.0`** — out-of-vault detection threshold (0.0 = disabled). When set (e.g. 0.3), queries with no L0 keyword overlap and all candidate scores below threshold emit "0 items (out of vault)" and suppress context. Daemon must be restarted for env-var changes to take effect.
+
 Recommended for high-frequency sessions: `export MEMEM_INJECTION_MODE=hybrid`
 
 ## How do I install memem?

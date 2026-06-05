@@ -2,6 +2,7 @@ import logging
 from collections import Counter
 from datetime import UTC, datetime
 
+import memem.settings as _memem_settings
 from memem.active_slice import (
     ActiveMemorySlice,
     MemoryItem,
@@ -9,7 +10,7 @@ from memem.active_slice import (
     _stable_id,
     render_slice_markdown,
 )
-from memem.models import DEFAULT_LAYER, LAST_BRIEF_PATH, now_iso, parse_iso_dt
+from memem.models import DEFAULT_LAYER, LAST_BRIEF_PATH, LAYER_L0, now_iso, parse_iso_dt
 from memem.obsidian_store import (
     _find_memory,
     _obsidian_memories,
@@ -178,6 +179,15 @@ def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 1
             scored.append((score, mem))
 
         scored.sort(key=lambda x: x[0], reverse=True)
+
+        # C3: per-item score floor — drop low-scoring items, but NEVER drop L0
+        # anchors (project-identity memories are always injected regardless of score).
+        _min_item_score = _memem_settings.MEMEM_RECALL_MIN_ITEM_SCORE
+        if _min_item_score > 0.0:
+            scored = [
+                (s, m) for s, m in scored
+                if s >= _min_item_score or m.get("layer") == LAYER_L0
+            ]
 
         # Optional cross-encoder rerank: take top-50, score with cross-encoder,
         # then reorder. Final truncation to `limit` happens after this step.

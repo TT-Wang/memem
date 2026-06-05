@@ -79,8 +79,15 @@ def _make_fake_model(embeddings: dict[str, list[float]]):
 
 
 def test_similar_queries_reuse_cache(monkeypatch, tmp_vault, tmp_cortex_dir):
-    """Two queries with cosine ≥ threshold → 2nd call returns topic_shift_reuse."""
+    """Two queries with cosine ≥ threshold → cache reuse behaviour depends on C5 guard.
+
+    C5 (topic-shift cache guard): if the cached slice has should_emit_context=False
+    (e.g. empty vault), reuse is skipped and the full pipeline runs instead.
+    When the cached slice has should_emit_context=True, reuse fires normally.
+    """
     import memem.slice_history as sh
+    from memem.active_slice_engine import _make_gating_stub
+    from memem.slice_daemon import set_cached_embedding_and_slice
 
     sid = "topic-similar-test"
     _patch_gating(monkeypatch)
@@ -91,6 +98,8 @@ def test_similar_queries_reuse_cache(monkeypatch, tmp_vault, tmp_cortex_dir):
     fake_model = _make_fake_model({
         "how does authentication work?": same_vec,
         "explain authentication please": same_vec,
+        "query one": same_vec,
+        "query two": same_vec,
     })
 
     import memem.settings as settings
@@ -106,15 +115,30 @@ def test_similar_queries_reuse_cache(monkeypatch, tmp_vault, tmp_cortex_dir):
             f"First call should not reuse cache; got gating_reason={r1.get('gating_reason')!r}"
         )
 
-        # Second call: cache has embedding → similarity=1.0 ≥ 0.85 → reuse.
-        # Pin empty_streak=0 again so cadence gate doesn't fire first.
+        # C5 guard: first call returned should_emit_context=False (empty vault).
+        # The second similar call should NOT reuse the stale low-confidence cache —
+        # it must fall through to the full pipeline.
         with sh._session_lock:
             sh._empty_streaks[sid] = 0
         r2 = _call("explain authentication please", sid)
-        assert r2.get("gating_reason") == "topic_shift_reuse", (
-            f"Second similar call should return topic_shift_reuse; got {r2.get('gating_reason')!r}"
+        assert r2.get("gating_reason") != "topic_shift_reuse", (
+            f"C5 guard: similar call with stale (should_emit_context=False) cache "
+            f"must not reuse; got {r2.get('gating_reason')!r}"
         )
-        assert r2.get("should_emit_context") is False
+
+        # Now seed the cache with a slice that HAS content (should_emit_context=True).
+        # In this case topic-shift reuse SHOULD fire normally.
+        good_slice = _make_gating_stub("query one", "test", sid, "cadence_skip")
+        good_slice["should_emit_context"] = True  # type: ignore[index]
+        set_cached_embedding_and_slice(sid, same_vec, good_slice)
+
+        with sh._session_lock:
+            sh._empty_streaks[sid] = 0
+        r3 = _call("query two", sid)
+        assert r3.get("gating_reason") == "topic_shift_reuse", (
+            f"Similar query with good cache (should_emit_context=True) should reuse; "
+            f"got {r3.get('gating_reason')!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -284,8 +308,15 @@ def test_cache_sessions_are_isolated():
 
 
 def test_threshold_boundary_exact(monkeypatch, tmp_vault, tmp_cortex_dir):
-    """Similarity exactly equal to threshold → should reuse (≥ comparison)."""
+    """Similarity exactly equal to threshold → reuse fires when cache has content (C5 guard).
+
+    C5: reuse only happens when the cached slice has should_emit_context=True.
+    We seed the cache directly with a good slice to isolate the threshold comparison
+    from the C5 should_emit_context guard.
+    """
     import memem.slice_history as sh
+    from memem.active_slice_engine import _make_gating_stub
+    from memem.slice_daemon import set_cached_embedding_and_slice
 
     sid = "topic-boundary-test"
     _patch_gating(monkeypatch)
@@ -304,17 +335,18 @@ def test_threshold_boundary_exact(monkeypatch, tmp_vault, tmp_cortex_dir):
     })
 
     with mock.patch("memem.embedding_index._get_model", return_value=fake_model):
-        # Pin empty_streak=0 so cadence gate doesn't fire on 2nd turn.
-        with sh._session_lock:
-            sh._empty_streaks[sid] = 0
-        _call("query one", sid)
+        # Seed cache directly with a slice that has should_emit_context=True so
+        # C5 guard allows reuse. This isolates the ≥ threshold comparison.
+        good_slice = _make_gating_stub("query one", "test", sid, "cadence_skip")
+        good_slice["should_emit_context"] = True  # type: ignore[index]
+        set_cached_embedding_and_slice(sid, vec, good_slice)
 
         with sh._session_lock:
             sh._empty_streaks[sid] = 0
         r2 = _call("query two", sid)
         assert r2.get("gating_reason") == "topic_shift_reuse", (
-            f"Identical vectors should trigger reuse (sim=1.0 ≥ {threshold}); "
-            f"got {r2.get('gating_reason')!r}"
+            f"Identical vectors should trigger reuse (sim=1.0 ≥ {threshold}) "
+            f"when cache has content; got {r2.get('gating_reason')!r}"
         )
 
 

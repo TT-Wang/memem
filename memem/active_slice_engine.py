@@ -60,6 +60,42 @@ _MAX_ARTIFACT_CANDIDATES = 8
 PromptContextMode = Literal["slice", "assembly"]
 WritebackExecutionMode = Literal["policy_only", "preview", "commit"]
 
+_OOV_STOPWORDS = frozenset({
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+    "do", "does", "did", "have", "has", "had",
+    "i", "you", "he", "she", "it", "we", "they",
+    "this", "that", "these", "those",
+    "and", "or", "but", "not",
+    "to", "of", "in", "on", "at", "for", "with", "by", "as", "from",
+})
+
+
+def _detect_out_of_vault(query: str, candidate_bundle: CandidateBundle, threshold: float) -> bool:
+    """Return True if query has no vault match.
+
+    Heuristic: max memory candidate score < threshold AND no L0 anchor's
+    title/tags contain any query token. Returns False (in-vault) when
+    threshold <= 0.0 to act as a clean opt-out guard.
+    """
+    import re
+    if threshold <= 0.0:
+        return False
+    all_candidates = flatten_candidate_bundle(candidate_bundle)
+    memory_candidates = [c for c in all_candidates if c.get("candidate_type") == "memory"]
+    max_memory_score = max((float(c.get("score", 0.0)) for c in memory_candidates), default=0.0)
+    if max_memory_score >= threshold:
+        return False
+    # Check L0 anchor overlap
+    query_tokens = set(re.findall(r'\w{3,}', query.lower())) - _OOV_STOPWORDS
+    if not query_tokens:
+        return False  # too-short query — don't claim out-of-vault
+    l0_anchors = [c for c in all_candidates if c.get("layer") == LAYER_L0]
+    for anchor in l0_anchors:
+        title = str(anchor.get("title", "")).lower()
+        if any(tok in title for tok in query_tokens):
+            return False
+    return True
+
 
 def _dedupe_candidates(candidates: list[Candidate]) -> list[Candidate]:
     seen: set[str] = set()
@@ -608,7 +644,10 @@ def generate_active_memory_slice(
                         _reuse["session_id"] = session_id
                         _reuse["scope_id"] = scope_id
                         _reuse["generated_at"] = datetime.now(UTC).isoformat()
-                        return _reuse
+                        if not _cached_slice.get("should_emit_context", True):
+                            pass  # C5: stale low-confidence cache must not be reused — fall through to full pipeline
+                        else:
+                            return _reuse
             except Exception:  # noqa: BLE001 — silently fall through on any failure
                 pass
 
@@ -808,6 +847,10 @@ def _generate_active_memory_slice_internal(
     previous_slice = _load_previous_slice(env, normalized_scope)
     activation_env = _continuity_environment(env, previous_slice)
     candidate_bundle = generate_candidates(query, normalized_scope, env, use_llm=use_llm)
+    _oov_threshold = _memem_settings.MEMEM_RECALL_OOV_THRESHOLD
+    if _oov_threshold > 0.0 and _detect_out_of_vault(query, candidate_bundle, _oov_threshold):
+        _sid = str(env.get("session_id", "") or "")
+        return _make_gating_stub(query, normalized_scope, _sid, "out_of_vault")
     all_candidates = flatten_candidate_bundle(candidate_bundle)
     include_history = bool(env.get("history_mode") or env.get("include_history"))
 

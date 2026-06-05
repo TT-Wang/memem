@@ -16,9 +16,14 @@ import os
 SLICE_UNCHANGED_PLACEHOLDER = "[Active Memory Slice unchanged from previous turn — see slice above]"
 
 
-def _build_system_message(final_context, scope):
+def _build_system_message(final_context, scope, should_emit_context=True, gating_reason=""):
     if os.environ.get("MEMEM_VISIBLE_RECALL", "1") == "0":
         return ""
+    # C1: daemon signalled context should be suppressed — show gating label.
+    if not should_emit_context and gating_reason == "out_of_vault":
+        return f"🧠 memem: 0 items (out of vault) · {scope}"
+    if not should_emit_context and gating_reason != "out_of_vault":
+        return f"🧠 memem: 0 items (low confidence) · {scope}"
     if final_context == SLICE_UNCHANGED_PLACEHOLDER or (
         isinstance(final_context, str) and SLICE_UNCHANGED_PLACEHOLDER in final_context
     ):
@@ -89,6 +94,29 @@ def test_hook_python_body_matches():
     assert "MEMEM_VISIBLE_RECALL" in hook, (
         "auto-recall.sh missing MEMEM_VISIBLE_RECALL env var — opt-out removed?"
     )
-    # Anchor check: the three brand-line labels
+    # Anchor check: the original three brand-line labels
     for label in ("slice cached", "gated", "items ·"):
         assert label in hook, f"auto-recall.sh missing brand label: {label!r}"
+    # Anchor check: the two new C1 gating labels (v1.9.6)
+    for label in ("out of vault", "low confidence"):
+        assert label in hook, f"auto-recall.sh missing C1 gating label: {label!r}"
+
+
+def test_low_confidence_shows_label(monkeypatch):
+    """C1: _build_system_message with should_emit_context=False, gating_reason='low_confidence'
+    → result contains 'low confidence'.
+    """
+    monkeypatch.delenv("MEMEM_VISIBLE_RECALL", raising=False)
+    msg = _build_system_message("some content", "cortex-plugin", should_emit_context=False, gating_reason="low_confidence")
+    assert "low confidence" in msg, f"Expected 'low confidence' in message, got: {msg!r}"
+    assert "cortex-plugin" in msg
+
+
+def test_out_of_vault_shows_label(monkeypatch):
+    """C1: _build_system_message with should_emit_context=False, gating_reason='out_of_vault'
+    → result contains 'out of vault'.
+    """
+    monkeypatch.delenv("MEMEM_VISIBLE_RECALL", raising=False)
+    msg = _build_system_message("some content", "scope", should_emit_context=False, gating_reason="out_of_vault")
+    assert "out of vault" in msg, f"Expected 'out of vault' in message, got: {msg!r}"
+    assert "scope" in msg

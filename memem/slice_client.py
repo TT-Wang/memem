@@ -100,3 +100,80 @@ def try_slice_via_daemon(
 
     except Exception:
         return None
+
+
+def try_slice_via_daemon_with_meta(
+    query: str,
+    scope: str,
+    session_id: str = "",
+    cwd: str = "",
+    task_mode: str = "",
+    use_llm: bool = False,
+    timeout_seconds: float = 5.0,
+    sock_path: str | Path | None = None,
+) -> dict | None:
+    """Like try_slice_via_daemon but returns a metadata envelope on success.
+
+    Returns a dict with keys:
+        ``slice``               — rendered slice string
+        ``should_emit_context`` — bool (True if context should be injected)
+        ``gating_reason``       — str reason why context was suppressed, or ""
+
+    Returns ``None`` on ANY failure (mirrors try_slice_via_daemon behaviour).
+    When the daemon response lacks ``should_emit_context`` (old daemon), defaults
+    to True for backwards-compatibility.
+
+    Never raises.
+    """
+    try:
+        effective_sock = Path(sock_path) if sock_path else _get_sock_path()
+        if not effective_sock.exists():
+            return None
+
+        payload = json.dumps({
+            "query": query,
+            "scope": scope,
+            "session_id": session_id,
+            "cwd": cwd,
+            "task_mode": task_mode,
+            "use_llm": use_llm,
+        }) + "\n"
+
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(timeout_seconds)
+            sock.connect(str(effective_sock))
+            sock.sendall(payload.encode("utf-8"))
+
+            # Read until newline
+            buf = bytearray()
+            while True:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                buf.extend(chunk)
+                if b"\n" in buf:
+                    break
+
+        if not buf:
+            return None
+
+        raw = buf.decode("utf-8", errors="replace").rstrip("\n").strip()
+        resp = json.loads(raw)
+
+        if not isinstance(resp, dict):
+            return None
+        if not resp.get("ok"):
+            return None
+
+        slice_str = resp.get("slice")
+        if not isinstance(slice_str, str):
+            return None
+
+        return {
+            "slice": slice_str,
+            "should_emit_context": bool(resp.get("should_emit_context", True)),
+            "gating_reason": str(resp.get("gating_reason", "")),
+        }
+
+    except Exception:
+        return None

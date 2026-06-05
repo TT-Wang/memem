@@ -9,6 +9,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > Pre-v0.7.0 entries below describe what was called Cortex at the time —
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
+## [1.9.6] - 2026-05-30 — Selective recall: confidence gating, per-item scoring, and out-of-vault detection
+
+Five new capabilities that give the hook smarter control over when and what context to emit. The primary user-visible change is that `additionalContext` is now suppressed (with an explanatory `systemMessage`) when the recall pipeline determines it would be low-value or off-topic.
+
+### Changes (C1–C5)
+
+**C1 — `should_emit_context` envelope field**
+
+The hook now reads `should_emit_context` from the daemon socket response. When the daemon signals `False` (low slice confidence or out-of-vault query), `additionalContext` is omitted entirely and the gating reason is surfaced in the visible `systemMessage` instead of silently injecting a low-quality context block.
+
+**C2 — `MEMEM_RECALL_MIN_CONFIDENCE` env var (default 0.45)**
+
+Tunable confidence threshold for emitting context. When the slice's aggregate confidence falls below this floor, the daemon sets `should_emit_context=False` and the hook gates. Raise this value (e.g. `0.6`) to be more aggressive about suppressing uncertain recall; set to `0.0` to disable confidence gating entirely.
+
+**C3 — `MEMEM_RECALL_MIN_ITEM_SCORE` env var (default 0.0 = disabled)**
+
+Per-item composite score floor for recall results. Items whose composite score falls below this threshold are dropped from the slice before it is returned. L0 anchor memories (project-identity) are exempt — they are never dropped regardless of score, ensuring core project context is always available.
+
+**C4 — `MEMEM_RECALL_OOV_THRESHOLD` env var (default 0.0 = disabled)**
+
+Out-of-vault detector. When enabled (non-zero value), the daemon emits a gating stub with `gating_reason="out_of_vault"` when the query has no L0 keyword overlap and all candidate memory scores fall below the threshold. This prevents off-topic queries from injecting loosely-related context. Opt-in in v1.9.6; **default-on planned for v1.9.7**.
+
+**C5 — Topic-shift cache invalidation**
+
+Cached slices where `should_emit_context=False` (low-confidence) are no longer reused on subsequent turns. Previously, a cached gated result would persist across topic shifts, masking newly-relevant context. Now, a cached low-confidence slice is always re-evaluated on the next prompt, ensuring the gate is reassessed with fresh inputs.
+
+### systemMessage taxonomy (6 states)
+
+| State | Message |
+|-------|---------|
+| Fresh slice | `🧠 memem: N items · {scope}` |
+| Cache hit | `🧠 memem: slice cached · {scope}` |
+| Gated (generic) | `🧠 memem: gated · {scope}` |
+| Silenced (opt-out) | `🧠 memem: silent · trivial-or-gated` |
+| **New:** Out of vault | `🧠 memem: 0 items (out of vault) · {scope}` |
+| **New:** Low confidence | `🧠 memem: 0 items (low confidence) · {scope}` |
+
+### Daemon protocol change
+
+The socket response envelope now includes two new fields:
+- `should_emit_context` (`bool`) — whether the hook should inject context
+- `gating_reason` (`str | None`) — human-readable reason when `should_emit_context=False` (e.g. `"out_of_vault"`, `"low_confidence"`)
+
+Backwards compatible — old clients that only read `resp["slice"]` continue to work unchanged.
+
+### Note on defaults
+
+`MEMEM_RECALL_OOV_THRESHOLD=0.0` means out-of-vault detection is **disabled by default** in v1.9.6. This is intentional — the feature is opt-in for this release so users can tune the threshold against their vault before it gates by default. Set a positive value (e.g. `MEMEM_RECALL_OOV_THRESHOLD=0.3`) to enable. Default-on is planned for v1.9.7.
+
 ## [1.9.5] - 2026-06-05 — Visible recall indicator (TUI parity with EverMe)
 
 UX-only change. The `auto-recall.sh` UserPromptSubmit hook now emits a

@@ -388,14 +388,29 @@ def _handle_one_request(conn: socket.socket) -> None:
             _send_response(conn, {"ok": True, "slice": "", "elapsed_ms": elapsed})
             return
 
-        # Generate slice — this is the hot path
+        # Generate slice — this is the hot path.
+        # C1 envelope protocol: call generate_active_memory_slice first to get the
+        # slice dict (which carries should_emit_context + gating_reason), then call
+        # generate_prompt_context with the pre-built slice_obj to avoid double-running
+        # the pipeline. Both are exported from memem.active_slice_engine.
         try:
-            from memem.active_slice_engine import active_slice_response
-            slice_text = active_slice_response(
+            from memem.active_slice_engine import (
+                generate_active_memory_slice,
+                generate_prompt_context,
+            )
+            slice_obj = generate_active_memory_slice(
                 query,
                 scope_id=scope,
                 environment=environment or None,
                 use_llm=use_llm,
+            )
+            slice_text = generate_prompt_context(
+                query,
+                scope_id=scope,
+                environment=environment or None,
+                use_llm=use_llm,
+                mode="slice",
+                slice_obj=slice_obj,
             )
         except Exception as exc:
             elapsed = int((time.monotonic() - t0) * 1000)
@@ -406,7 +421,16 @@ def _handle_one_request(conn: socket.socket) -> None:
         elapsed = int((time.monotonic() - t0) * 1000)
         log.info("request_handled", scope=scope, elapsed_ms=elapsed)
         _write_heartbeat()
-        _send_response(conn, {"ok": True, "slice": slice_text, "elapsed_ms": elapsed})
+        # C1: envelope includes should_emit_context + gating_reason for the hook.
+        # Existing clients that only read resp["slice"] continue to work unchanged —
+        # the new fields are additive.
+        _send_response(conn, {
+            "ok": True,
+            "slice": slice_text,
+            "should_emit_context": slice_obj.get("should_emit_context", True),
+            "gating_reason": slice_obj.get("gating_reason", ""),
+            "elapsed_ms": elapsed,
+        })
 
     finally:
         with _inflight_counter_lock:

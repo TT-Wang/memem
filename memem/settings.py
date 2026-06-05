@@ -26,6 +26,12 @@ MEMEM_INJECTION_MODE: str = os.getenv("MEMEM_INJECTION_MODE", "auto")
 MEMEM_INJECT_CADENCE: int = max(1, int(os.getenv("MEMEM_INJECT_CADENCE", "2")))
 # Topic-shift threshold is clamped to [0.0, 1.0] — cosine similarity range.
 MEMEM_TOPIC_SHIFT_THRESHOLD: float = min(1.0, max(0.0, float(os.getenv("MEMEM_TOPIC_SHIFT_THRESHOLD", "0.85"))))
+# Minimum activation confidence to emit recall context (C2 — tunable threshold).
+MEMEM_RECALL_MIN_CONFIDENCE: float = min(1.0, max(0.0, float(os.getenv("MEMEM_RECALL_MIN_CONFIDENCE", "0.45"))))
+# Minimum per-item score floor for recall results (C3 — 0.0 = disabled by default).
+MEMEM_RECALL_MIN_ITEM_SCORE: float = min(1.0, max(0.0, float(os.getenv("MEMEM_RECALL_MIN_ITEM_SCORE", "0.0"))))
+# Out-of-vault detection threshold (C4 — 0.0 = disabled by default; opt-in via env).
+MEMEM_RECALL_OOV_THRESHOLD: float = min(1.0, max(0.0, float(os.getenv("MEMEM_RECALL_OOV_THRESHOLD", "0.0"))))
 # Empty-streak cap is clamped to >= 0 (0 disables backoff, negative is nonsense).
 MEMEM_EMPTY_STREAK_MAX: int = max(0, int(os.getenv("MEMEM_EMPTY_STREAK_MAX", "8")))
 

@@ -171,21 +171,28 @@ def infer_task_mode(hook: dict, message: str) -> str:
     return "coding"
 
 
-def run_active_slice(query: str, scope: str, session_id: str, cwd: str, task_mode: str) -> str:
+def run_active_slice(query: str, scope: str, session_id: str, cwd: str, task_mode: str) -> tuple:
+    """Return (slice_str, should_emit_context, gating_reason).
+
+    Tries the slice daemon first (C1 envelope protocol) for should_emit_context
+    and gating_reason metadata. Falls back to the cold subprocess path which
+    defaults to should_emit_context=True (preserves existing behaviour).
+    """
     # Try the slice daemon first (warm, ~50-500ms) before falling back to
     # cold subprocess (5-10s cold-load of sentence-transformers).
     try:
         sys.path.insert(0, plugin_root)
-        from memem.slice_client import try_slice_via_daemon
-        result = try_slice_via_daemon(
+        from memem.slice_client import try_slice_via_daemon_with_meta
+        meta = try_slice_via_daemon_with_meta(
             query, scope, session_id, cwd, task_mode,
             use_llm=False, timeout_seconds=5.0,
         )
-        if result is not None:
-            return result
+        if meta is not None:
+            return (meta["slice"], meta["should_emit_context"], meta["gating_reason"])
     except Exception:
         pass
-    # Fallback: existing subprocess path (unchanged behavior)
+    # Fallback: existing subprocess path (unchanged behavior).
+    # should_emit_context defaults to True — we have no envelope here.
     try:
         env = os.environ.copy()
         env["PYTHONPATH"] = plugin_root + os.pathsep + env.get("PYTHONPATH", "")
@@ -205,10 +212,10 @@ def run_active_slice(query: str, scope: str, session_id: str, cwd: str, task_mod
             env=env,
         )
         if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
+            return (result.stdout.strip(), True, "")
     except Exception:
         pass
-    return ""
+    return ("", True, "")
 
 # Parse hook input from the tempfile (avoids argv size limits)
 try:
@@ -249,14 +256,21 @@ last_keywords = set(last_data.get("keywords", []))
 last_session  = last_data.get("session_id", "")
 last_primed   = last_data.get("primed", False)
 
+# Top-level gating metadata populated by run_active_slice (C1 envelope protocol).
+_should_emit_context = True
+_gating_reason = ""
+
 # Run active slice generation
-assembled = run_active_slice(message, scope, session_id, cwd, task_mode)
+_slice_result = run_active_slice(message, scope, session_id, cwd, task_mode)
+assembled, _should_emit_context, _gating_reason = _slice_result
 
 # If slice generation failed or returned empty, leave last-brief UNTOUCHED so the
 # next prompt with similar keywords will retry. Silent starvation was the
 # bug we fixed in v0.10.2 — previously .last-brief.json was written before
 # this check, causing any transient projection failure to suppress future recall.
-if not assembled:
+# Exception: if should_emit_context is False (daemon gated the request), we still
+# proceed to emit the appropriate systemMessage rather than silently exiting.
+if not assembled and _should_emit_context:
     emit_empty()
 
 # Compute overlap ratio for telemetry only.
@@ -440,9 +454,15 @@ maybe_save_compaction_checkpoint()
 # pattern). Format: "🧠 memem: {count} items · {scope} · {state}"
 # where state = "fresh" | "cached" | "gated".
 # Opt-out via MEMEM_VISIBLE_RECALL=0.
-def _build_system_message(final_context: str, scope: str) -> str:
+# v1.9.6 (C1): extended with should_emit_context / gating_reason branches.
+def _build_system_message(final_context: str, scope: str, should_emit_context: bool = True, gating_reason: str = "") -> str:
     if os.environ.get("MEMEM_VISIBLE_RECALL", "1") == "0":
         return ""
+    # C1: daemon signalled context should be suppressed — show gating label.
+    if not should_emit_context and gating_reason == "out_of_vault":
+        return f"🧠 memem: 0 items (out of vault) · {scope}"
+    if not should_emit_context and gating_reason != "out_of_vault":
+        return f"🧠 memem: 0 items (low confidence) · {scope}"
     if final_context == SLICE_UNCHANGED_PLACEHOLDER or (
         isinstance(final_context, str) and SLICE_UNCHANGED_PLACEHOLDER in final_context
     ):
@@ -454,13 +474,15 @@ def _build_system_message(final_context: str, scope: str) -> str:
     return f"🧠 memem: {count} items · {scope}"
 
 
+# C1: when daemon gated context (should_emit_context=False), suppress additionalContext.
+_emit_context = final_context if _should_emit_context else ""
 _payload = {
     "hookSpecificOutput": {
         "hookEventName": "UserPromptSubmit",
-        "additionalContext": final_context,
+        "additionalContext": _emit_context,
     }
 }
-_sys_msg = _build_system_message(final_context, scope)
+_sys_msg = _build_system_message(final_context, scope, should_emit_context=_should_emit_context, gating_reason=_gating_reason)
 if _sys_msg:
     _payload["systemMessage"] = _sys_msg
 
