@@ -63,7 +63,12 @@ EMPTY_RESPONSE = json.dumps({
     "hookSpecificOutput": {
         "hookEventName": "UserPromptSubmit",
         "additionalContext": ""
-    }
+    },
+    "systemMessage": (
+        "🧠 memem: silent · trivial-or-gated"
+        if os.environ.get("MEMEM_VISIBLE_RECALL", "1") != "0"
+        else ""
+    ),
 })
 
 def tokenize(text: str) -> set:
@@ -429,10 +434,35 @@ def maybe_save_compaction_checkpoint():
 
 maybe_save_compaction_checkpoint()
 
-print(json.dumps({
+
+# v1.9.5: emit a user-visible systemMessage so the recall is observable in
+# the Claude Code TUI (mirrors EverMe's "🧠 Recalling N memories from EverMe"
+# pattern). Format: "🧠 memem: {count} items · {scope} · {state}"
+# where state = "fresh" | "cached" | "gated".
+# Opt-out via MEMEM_VISIBLE_RECALL=0.
+def _build_system_message(final_context: str, scope: str) -> str:
+    if os.environ.get("MEMEM_VISIBLE_RECALL", "1") == "0":
+        return ""
+    if final_context == SLICE_UNCHANGED_PLACEHOLDER or (
+        isinstance(final_context, str) and SLICE_UNCHANGED_PLACEHOLDER in final_context
+    ):
+        return f"🧠 memem: slice cached · {scope}"
+    if not final_context or not final_context.strip():
+        return f"🧠 memem: gated · {scope}"
+    # Count "- " list items in the rendered slice as a rough item-count proxy
+    count = final_context.count("\n- ") + final_context.count("\n  - ")
+    return f"🧠 memem: {count} items · {scope}"
+
+
+_payload = {
     "hookSpecificOutput": {
         "hookEventName": "UserPromptSubmit",
         "additionalContext": final_context,
     }
-}))
+}
+_sys_msg = _build_system_message(final_context, scope)
+if _sys_msg:
+    _payload["systemMessage"] = _sys_msg
+
+print(json.dumps(_payload))
 HOOKPY
