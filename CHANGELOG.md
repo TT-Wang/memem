@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > Pre-v0.7.0 entries below describe what was called Cortex at the time —
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
+## [1.9.5] - 2026-06-05 — Visible recall indicator (TUI parity with EverMe)
+
+UX-only change. The `auto-recall.sh` UserPromptSubmit hook now emits a
+user-visible `systemMessage` so the recall is observable in the Claude
+Code TUI. Previously memem was silent — recall was happening on every
+prompt (visible in the model's context as `# Active Memory Slice`) but
+the user saw nothing in chat. Compare EverMe's `🧠 Recalling N
+memories from EverMe` line.
+
+### Format
+
+`🧠 memem: {count} items · {scope}` — for fresh-slice turns
+`🧠 memem: slice cached · {scope}` — when topic-shift cache hit reuses prior turn's slice
+`🧠 memem: gated · {scope}` — when the slice pipeline returns empty
+`🧠 memem: silent · trivial-or-gated` — on the `emit_empty` early-out paths (trivial query, no plugin root, etc.)
+
+### Opt-out
+
+`MEMEM_VISIBLE_RECALL=0` returns to the pre-v1.9.5 silent behaviour
+(no `systemMessage` field emitted at all). Default is `1` (on).
+
+### Implementation
+
+- `hooks/auto-recall.sh`: new `_build_system_message(final_context, scope)`
+  function inside the Python heredoc; called once before `print(json.dumps(...))`
+  and conditionally adds `systemMessage` to the payload. `EMPTY_RESPONSE`
+  constant also extended with the opt-out-aware silent label.
+- `tests/test_visible_recall.py`: 6 tests covering all 4 state labels,
+  the opt-out env var, the default-on behaviour, and an anchor check
+  that the function still exists in the hook source.
+
+### Why this matters
+
+Without a `systemMessage`, every memem injection looks (to the user) like
+it never ran — even though the model is consuming a 6-8 KB slice every
+turn. This UX gap was making memem feel "silent vs broken" relative to
+EverMe's noisy-but-obvious recall line. Now both surface their work.
+
+
 ## [1.9.4] - 2026-06-04 — v1.9.3 final-release review fixes
 
 Six items flagged by the v1.9.3 forge reviewer (final-release lens):
