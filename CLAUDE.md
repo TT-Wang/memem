@@ -79,6 +79,18 @@ Call `mcp__memem__memory_save` with:
 - Completed-work logs or TODO state
 - Trivial or obvious facts easily re-discovered from code
 
+## Kind tags (v1.10)
+
+Tag `memory_save` calls with a `type:*` tag to help recall-time grouping:
+
+- `type:episodic` — timestamped event (decision made, problem encountered, status update at a moment in time)
+- `type:skill` — reusable approach, pattern, or convention (something to do again)
+- `type:case` — full task narrative: problem → approach → result
+
+**Multi-label OK:** a memory can carry both `type:episodic` and `type:case` (e.g., a debugging session that tells a full story).
+
+**Backward compat:** these tags drive recall-time grouping only; they do not change storage. Untagged memories fall back to heuristic detection.
+
 ## Starting the miner (opt-in)
 
 memem is **opt-in** as of v0.9.0 — install does not start any background processes. The miner daemon only runs once the user explicitly enables it. Opt-in is tracked by the marker file `~/.memem/.miner-opted-in`.

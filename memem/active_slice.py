@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 
@@ -827,6 +828,102 @@ def render_slice_as_compact_context(slice_obj: ActiveMemorySlice, max_chars: int
 # ---------------------------------------------------------------------------
 
 
+_KNOWN_KINDS = {"episodic", "skill", "case"}
+_IMPERATIVE_RE = re.compile(r'\b(use|prefer|always|never|do not|avoid|run|set)\b', re.IGNORECASE)
+_ISO_DATE_TITLE_RE = re.compile(r'^On \d{4}-\d{2}-\d{2}', re.IGNORECASE)
+
+
+def _classify_kinds(mem: dict) -> list[str]:
+    """Return a subset of {'episodic', 'skill', 'case'} for a given memory dict.
+
+    Multi-label allowed. Tag-driven path takes priority; heuristic fallback used
+    only when no 'type:*' tags are present.
+    """
+    # Tag-driven path (preferred). MemoryItem stores tags under 'tags';
+    # raw memory dicts use 'domain_tags'. Check both so the pipeline path works.
+    domain_tags = mem.get("domain_tags") or mem.get("tags") or []
+    type_tags = [t[5:] for t in domain_tags if isinstance(t, str) and t.startswith("type:")]
+    # Filter to known kinds first: unknown 'type:foo' tags must not suppress heuristics.
+    known = [t for t in type_tags if t in _KNOWN_KINDS]
+    if known:
+        seen: set[str] = set()
+        result: list[str] = []
+        for tag in known:
+            if tag not in seen:
+                seen.add(tag)
+                result.append(tag)
+        return result
+
+    # Heuristic fallback
+    kinds: list[str] = []
+    source_session = mem.get("source_session")
+    title = mem.get("title", "") or ""
+    source_type = mem.get("source_type", "")
+    content = mem.get("content") or mem.get("essence") or ""
+
+    # episodic
+    if source_session and (
+        bool(_ISO_DATE_TITLE_RE.match(title)) or source_type == "session_summary"
+    ):
+        kinds.append("episodic")
+
+    # skill
+    importance = int(mem.get("importance", 0) or 0)
+    related = mem.get("related") or []
+    if (
+        importance >= 4
+        and len(related) >= 2
+        and bool(_IMPERATIVE_RE.search(content[:200]))
+    ):
+        kinds.append("skill")
+
+    # case
+    case_keywords = ["tried", "result", "approach", "blocked", "fixed by"]
+    if source_session and len(content) > 500:
+        content_lower = content.lower()
+        matched = sum(1 for kw in case_keywords if kw in content_lower)
+        if matched >= 2:
+            kinds.append("case")
+
+    return kinds
+
+
+def _render_typed_sections(items: list[dict]) -> str:
+    """Render items bucketed by memory kind (episodic/skill/case).
+
+    Items can appear in multiple buckets (multi-label). Returns sections
+    joined by double newlines, or empty string if all buckets are empty.
+    """
+    episodic: list[dict] = []
+    skill: list[dict] = []
+    case: list[dict] = []
+
+    for item in items:
+        kinds = _classify_kinds(item)
+        if "episodic" in kinds:
+            episodic.append(item)
+        if "skill" in kinds:
+            skill.append(item)
+        if "case" in kinds:
+            case.append(item)
+
+    sections: list[str] = []
+    if episodic:
+        header = f"## Episodic memory ({len(episodic)})"
+        lines = [header] + [_format_compact_index_line_from_item(cast(MemoryItem, item)) for item in episodic]
+        sections.append("\n".join(lines))
+    if skill:
+        header = f"## Skills ({len(skill)})"
+        lines = [header] + [_format_compact_index_line_from_item(cast(MemoryItem, item)) for item in skill]
+        sections.append("\n".join(lines))
+    if case:
+        header = f"## Cases ({len(case)})"
+        lines = [header] + [_format_compact_index_line_from_item(cast(MemoryItem, item)) for item in case]
+        sections.append("\n".join(lines))
+
+    return "\n\n".join(sections)
+
+
 def _format_compact_index_line_from_item(item: MemoryItem) -> str:
     """Produce the standard compact line format from a MemoryItem.
 
@@ -886,11 +983,22 @@ def _render_get_slice(slice_data: ActiveMemorySlice) -> str:
     """Render a get-kind slice: full content per item + linked related section.
 
     Preserves the ### [id] title format and [not-found: id] markers
-    used by existing tests.
+    used by existing tests. Prepends typed sections (episodic/skill/case)
+    and skips duplicates in the per-item loop.
     """
     items = slice_data.get("items", [])
     missing_ids = slice_data.get("missing_ids", [])
     linked = slice_data.get("linked", [])
+
+    # Typed sections render at the top as a compact NAVIGATION INDEX
+    # (one line per typed item). The default per-item loop below still emits
+    # the FULL CONTENT BLOCK for every item, typed or not, so memory_get's
+    # contract (full content for requested IDs) is preserved.
+    typed_block = _render_typed_sections(items)
+
+    output_parts: list[str] = []
+    if typed_block:
+        output_parts.append(typed_block)
 
     lines: list[str] = []
     for item in items:
@@ -926,7 +1034,12 @@ def _render_get_slice(slice_data: ActiveMemorySlice) -> str:
         for item in linked:
             lines.append(_format_compact_index_line_from_item(item))
 
-    return "\n".join(lines)
+    default_block = "\n".join(lines)
+    if output_parts:
+        if default_block:
+            output_parts.append(default_block)
+        return "\n\n".join(output_parts)
+    return default_block
 
 
 def _render_timeline_slice(slice_data: ActiveMemorySlice) -> str:

@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > Pre-v0.7.0 entries below describe what was called Cortex at the time —
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
+## [1.10.0] - 2026-06-05 — Typed recall grouping — Episodic / Skills / Cases sections at recall surface (EverMe-mirroring, zero extra LLM cost)
+
+- **New:** Recall output prepends a compact navigation index with `## Episodic memory (N)`, `## Skills (N)`, `## Cases (N)` headers at the top, mirroring EverMe's TUI conventions. The full per-item content blocks below are unchanged — typed sections are additive navigation, not replacements.
+- **Mechanism:** Tag-driven via namespaced `type:episodic` / `type:skill` / `type:case` values in `domain_tags` (raw memory dicts) or `tags` (MemoryItem objects).
+- **Heuristic backfill (limited scope):** When no `type:*` tag is present, callers that pass raw memory dicts directly into `_classify_kinds` get heuristic detection (episodic = `source_session` + ISO-date title; skill = importance ≥ 4 + ≥2 related links + imperative verb in first 200 chars; case = `source_session` + long content + ≥2 narrative tokens). The MemoryItem pipeline path (recall.py → `_render_get_slice`) does NOT propagate `source_session`, so heuristic episodic/case detection is mostly inert for legacy vault memories until v1.10.1 propagates the field. Tag-driven path works for ALL paths.
+- **Multi-label:** A single memory can carry multiple kind tags (`type:episodic` AND `type:case` for a debugging-session narrative) — appears in every matching section header AND retains its full content block.
+- **Zero extra LLM cost:** No new Haiku prompts, no mining changes, no subdir storage. All classification work happens at the render layer.
+- **Output format change (NEW):** `_render_get_slice` output now begins with `## Episodic memory (N)` / `## Skills (N)` / `## Cases (N)` headers BEFORE the `### [id] title` per-item blocks. Downstream parsers that anchored on `### [` as the first line should be updated.
+- **CLAUDE.md updated** with a new `## Kind tags (v1.10)` self-save convention so Claude tags new memories with the right kind at `memory_save` time.
+- **Design rationale:** Prior `memory_type` classification attempt (commit `e9c22ca`, April 10 2026) was removed 30 min after introduction as dead code. v1.10 honors the L0/L1 vault wisdom "filter before the LLM, not inside it" (memories `8b1318ac`, `787c50d6`) by keeping classification purely at the recall layer.
+- **EverMe reality check:** Research established EverMe is NOT a 3-way classifier — it runs 7+ parallel extractors server-side with cross-session skill clustering. memem deliberately scopes the v1.10 work to recall-surface parity, not pipeline replication.
+- **Backward compatible (storage/schema):** 2811+ existing vault memories with no `type:*` tags continue to render via the default per-item blocks. No migration, no schema change, no content loss.
+- **Phase 4.5 (3-lens Opus review) findings applied:** dropped pre-release dedup logic that would have silently truncated typed memories to compact snippets in `memory_get` (full content now always emitted); unknown `type:foo` tags no longer suppress heuristic fallback; ISO-date title regex made case-insensitive.
+
 ## [1.9.6] - 2026-05-30 — Selective recall: confidence gating, per-item scoring, and out-of-vault detection
 
 Five new capabilities that give the hook smarter control over when and what context to emit. The primary user-visible change is that `additionalContext` is now suppressed (with an explanatory `systemMessage`) when the recall pipeline determines it would be low-value or off-topic.
