@@ -109,7 +109,7 @@ def test_active_slice_cli_no_llm(tmp_vault, tmp_cortex_dir, capsys, monkeypatch)
 
     out = _dispatch(["slice", "Prepare", "project", "review", "--scope", "memem", "--no-llm"], capsys)
     assert "# Active Memory Slice" in out.out
-    assert "## Goals" in out.out
+    assert "## Anchors" in out.out
 
 
 def test_active_slice_cli_json(tmp_vault, tmp_cortex_dir, capsys, monkeypatch):

@@ -8,6 +8,7 @@ import os
 import subprocess
 from typing import Any, cast
 
+import memem.settings as _settings
 from memem.active_slice import (
     ActivationEntry,
     ActivationResult,
@@ -541,9 +542,13 @@ def judge_activation_with_llm(
     scope_id: str,
     environment: dict[str, Any],
     candidate_bundle: CandidateBundle,
-    timeout: int = 30,
+    timeout: float | None = None,
 ) -> ActivationResult:
     """Run bounded Haiku activation, falling back to deterministic judgement."""
+    # Resolve timeout: caller may override; default from settings (2s hard cap on hook path).
+    if timeout is None:
+        timeout = _settings.MEMEM_LLM_JUDGE_TIMEOUT
+
     if not assembly_available():
         fallback = judge_activation_heuristically(query, scope_id, environment, candidate_bundle)
         fallback["warnings"] = ["LLM activation unavailable; used heuristic activation."]
@@ -578,27 +583,47 @@ def judge_activation_with_llm(
     if len(prompt) > 40000:
         prompt = prompt[:40000]
 
+    # v1.13 Phase 4.5 fix: use Popen + communicate so we can kill the whole
+    # session group on timeout. subprocess.run(..., start_new_session=True) only
+    # SIGKILLs the immediate child on TimeoutExpired, leaking any grandchildren
+    # the claude binary may spawn (current binary is a single ELF, but wrapping
+    # this defensively prevents future-regression leaks).
+    import signal as _signal
+    proc_handle: subprocess.Popen | None = None
     try:
-        proc = subprocess.run(
+        proc_handle = subprocess.Popen(
             ["claude", "-p", "--model", "haiku", "--tools", "", "--system-prompt", _ACTIVATION_SYSTEM],
-            input=prompt,
-            capture_output=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout,
             env={**os.environ, "MEMEM_HOOK_DISABLE": "1"},
             start_new_session=True,
         )
+        try:
+            stdout, _stderr = proc_handle.communicate(input=prompt, timeout=timeout)
+            returncode = proc_handle.returncode
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(proc_handle.pid), _signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                proc_handle.kill()
+            try:
+                proc_handle.communicate(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
+            raise
     except Exception as exc:
         fallback = judge_activation_heuristically(query, scope_id, environment, candidate_bundle)
         fallback["warnings"] = [f"LLM activation failed ({type(exc).__name__}); used heuristic activation."]
         return fallback
 
-    if proc.returncode != 0 or not proc.stdout.strip():
+    if returncode != 0 or not stdout.strip():
         fallback = judge_activation_heuristically(query, scope_id, environment, candidate_bundle)
         fallback["warnings"] = ["LLM activation returned no usable output; used heuristic activation."]
         return fallback
 
-    parsed = _extract_json_object(proc.stdout)
+    parsed = _extract_json_object(stdout)
     if parsed is None:
         fallback = judge_activation_heuristically(query, scope_id, environment, candidate_bundle)
         fallback["warnings"] = ["LLM activation returned malformed JSON; used heuristic activation."]

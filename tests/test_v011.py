@@ -254,7 +254,7 @@ def test_auto_recall_consumes_primed_flag(tmp_path):
     data = json.loads(result.stdout)
     ctx = data["hookSpecificOutput"]["additionalContext"]
     assert "# Active Memory Slice" in ctx
-    assert "## Goals" in ctx
+    assert "## Anchors" in ctx
 
     # The primed flag should be cleared after consumption
     data = json.loads(marker.read_text())
@@ -300,7 +300,7 @@ def test_auto_recall_topic_shift_uses_active_slice(tmp_path):
     data = json.loads(result.stdout)
     ctx = data["hookSpecificOutput"]["additionalContext"]
     assert "# Active Memory Slice" in ctx
-    assert "## Goals" in ctx
+    assert "## Anchors" in ctx
 
 
 def test_auto_recall_same_topic_still_uses_active_slice(tmp_path):
@@ -339,7 +339,7 @@ def test_auto_recall_same_topic_still_uses_active_slice(tmp_path):
     data = json.loads(result.stdout)
     ctx = data["hookSpecificOutput"]["additionalContext"]
     assert "# Active Memory Slice" in ctx
-    assert "## Goals" in ctx
+    assert "## Anchors" in ctx
 
 
 @skip_on_ci

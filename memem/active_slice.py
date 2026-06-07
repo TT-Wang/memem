@@ -86,6 +86,12 @@ class Candidate(TypedDict, total=False):
     source_score: float
     graph_distance: int
     source_reason: str
+    # v1.13: kind routing — propagated from source memory's tags/inferred_kind so
+    # the active-slice 6-section router honors the "user type:* tags always win"
+    # contract instead of always falling back to heuristics on a tagless mem_proxy.
+    kind: str
+    inferred_kind: str
+    tags: list[str]
 
 
 class ActiveMemoryItem(TypedDict, total=False):
@@ -99,6 +105,9 @@ class ActiveMemoryItem(TypedDict, total=False):
     layer: int
     score: float
     why_activated: str
+    kind: str          # explicit kind tag (e.g. 'episodic', 'skill', 'case')
+    inferred_kind: str  # ephemeral: set by kind_classifier at recall time
+    tags: list[str]    # propagated from source memory so engine router can re-classify
 
 
 class ActiveArtifact(TypedDict, total=False):
@@ -183,6 +192,8 @@ class ActivationEntry(TypedDict, total=False):
     centrality: float
     role_confidence: float
     drop_reason: str
+    kind: str          # explicit kind tag (e.g. 'episodic', 'skill', 'case')
+    inferred_kind: str  # ephemeral: set by kind_classifier at recall time
 
 
 class ActivationTension(TypedDict, total=False):
@@ -272,6 +283,11 @@ class ActiveMemorySlice(TypedDict, total=False):
     composition_strategy: str
     # ── v1.9 gating ──
     gating_reason: str | None  # set when gating short-circuits the full pipeline
+    # ── v1.13 6-section schema ──
+    episodic_items: list[ActiveMemoryItem]   # items with kind/inferred_kind == 'episodic'
+    skill_items: list[ActiveMemoryItem]      # items with kind/inferred_kind == 'skill'
+    case_items: list[ActiveMemoryItem]       # items with kind/inferred_kind == 'case'
+    recent_actions: list[str]               # last 3 actions from slice_history (populated by engine)
 
 
 # Type alias for new code that wants the cleaner name.
@@ -319,7 +335,7 @@ def normalize_memory_candidate(
     memory_id = mem.get("id", "")
     essence = mem.get("essence") or mem.get("full_record", "") or ""
     final_score = float(score if score is not None else mem.get("score", 0.5) or 0.5)
-    return {
+    cand: Candidate = {
         "candidate_id": f"memory:{memory_id[:8]}",
         "candidate_type": "memory",
         "memory_id": memory_id,
@@ -340,6 +356,17 @@ def normalize_memory_candidate(
         "graph_distance": graph_distance,
         "source_reason": source_reason,
     }
+    # v1.13: propagate kind/tags so 6-section router can honor user type:* tags.
+    # Phase 4.5 fix: prevents the engine's mem_proxy from always falling back to
+    # heuristics by giving the router a tagged surface to inspect.
+    tags = mem.get("tags") or mem.get("domain_tags") or []
+    if tags:
+        cand["tags"] = list(tags)
+    if mem.get("kind"):
+        cand["kind"] = str(mem["kind"])
+    if mem.get("inferred_kind"):
+        cand["inferred_kind"] = str(mem["inferred_kind"])
+    return cand
 
 
 def normalize_artifact_candidate(
@@ -460,7 +487,7 @@ def resolve_candidate_reference(entry: Mapping[str, Any], lookup: Mapping[str, C
 
 
 def _item_from_candidate(cand: Candidate, role: ActiveRole, why: str = "", score: float | None = None) -> ActiveMemoryItem:
-    return {
+    item: ActiveMemoryItem = {
         "memory_id": cand.get("memory_id", ""),
         "role": role,
         "title": cand.get("title", "Untitled"),
@@ -474,6 +501,15 @@ def _item_from_candidate(cand: Candidate, role: ActiveRole, why: str = "", score
         "score": float(score if score is not None else cand.get("score", 0.5) or 0.5),
         "why_activated": why or cand.get("source_reason", ""),
     }
+    # v1.13 Phase 4.5 fix: propagate kind/tags so the 6-section engine router
+    # honors explicit user type:* tags instead of always falling back to heuristics.
+    if cand.get("kind"):
+        item["kind"] = cand["kind"]
+    if cand.get("inferred_kind"):
+        item["inferred_kind"] = cand["inferred_kind"]
+    if cand.get("tags"):
+        item["tags"] = list(cand["tags"])
+    return item
 
 
 def _artifact_from_candidate(cand: Candidate, why: str = "", score: float | None = None) -> ActiveArtifact:
@@ -805,8 +841,201 @@ def _render_slice(slice_obj: ActiveMemorySlice, max_chars: int | None = None) ->
     return truncated
 
 
+def _get_item_effective_kind(item: Mapping[str, Any]) -> str:
+    """Return the effective kind for routing: explicit 'kind' wins, then 'inferred_kind'."""
+    return str(item.get("kind") or item.get("inferred_kind") or "")
+
+
+def _get_item_role(item: Mapping[str, Any]) -> str:
+    return str(item.get("role") or "")
+
+
+def render_slice_v2(slice_obj: ActiveMemorySlice) -> str:
+    """Render active slice with the v1.13 6-section schema.
+
+    Sections: Anchors / Episodic / Skills / Cases / Working / Pending.
+
+    Items are routed by kind/inferred_kind:
+    - 'episodic'  → Episodic
+    - 'skill'     → Skills
+    - 'case'      → Cases
+    - unclassified by kind: route by role:
+        background → Skills supplement
+        goal/constraint (layer=0) → Anchors
+        open_tension/preference → Working
+        other → Anchors (fallback)
+
+    The Working section always shows: query echo, last 3 recent_actions, scope_id.
+    The Pending section shows writeback_summary when status != 'not_run' OR counts > 0.
+
+    Suppresses empty sections.
+    """
+    if not slice_obj.get("should_emit_context", True):
+        return ""
+
+    # ── Collect all content items from all active sections ──
+    all_items: list[Mapping[str, Any]] = []
+    all_items.extend(slice_obj.get("goals", []))
+    all_items.extend(slice_obj.get("constraints", []))
+    all_items.extend(slice_obj.get("active_background", []))
+    all_items.extend(slice_obj.get("decisions", []))
+    all_items.extend(slice_obj.get("preferences", []))
+    all_items.extend(slice_obj.get("failure_patterns", []))
+
+    # ── Pre-populated v1.13 kind lists (set by engine) take priority ──
+    anchors: list[Mapping[str, Any]] = []
+    episodic: list[Mapping[str, Any]] = list(slice_obj.get("episodic_items", []))
+    skills: list[Mapping[str, Any]] = list(slice_obj.get("skill_items", []))
+    cases: list[Mapping[str, Any]] = list(slice_obj.get("case_items", []))
+
+    # Track IDs already placed by pre-populated lists to avoid duplicates.
+    # v1.13 Phase 4.5 fix: also track object identity for empty-memory_id items
+    # (synthetic items like current_query) so they aren't duplicated into kind
+    # buckets when they happen to classify as episodic/skill/case.
+    placed_ids: set[str] = set()
+    placed_obj_ids: set[int] = set()
+    for item in (*episodic, *skills, *cases):
+        mid = str(item.get("memory_id") or "")
+        if mid:
+            placed_ids.add(mid)
+        else:
+            placed_obj_ids.add(id(item))
+
+    # ── Route remaining items by kind/inferred_kind → role ──
+    for item in all_items:
+        mid = str(item.get("memory_id") or "")
+        if mid:
+            if mid in placed_ids:
+                continue
+        elif id(item) in placed_obj_ids:
+            continue
+
+        eff_kind = _get_item_effective_kind(item)
+        role = _get_item_role(item)
+        layer = int(item.get("layer", 2) or 2)
+
+        target_list: list[Mapping[str, Any]] | None = None
+        if eff_kind == "episodic":
+            target_list = episodic
+        elif eff_kind == "skill":
+            target_list = skills
+        elif eff_kind == "case":
+            target_list = cases
+        elif layer == 0 or role in ("goal", "constraint"):
+            # L0 anchors and goals/constraints → Anchors
+            target_list = anchors
+
+        if target_list is not None:
+            target_list.append(item)
+            if mid:
+                placed_ids.add(mid)
+            else:
+                placed_obj_ids.add(id(item))
+        elif role == "background":
+            # background → Skills supplement
+            skills.append(item)
+            placed_ids.add(mid)
+        elif role in ("open_tension", "preference"):
+            # tension/preference → Working (handled separately below)
+            pass
+        else:
+            # fallback: goes to Anchors
+            anchors.append(item)
+            placed_ids.add(mid)
+
+    # Also add L0 goals explicitly (they may not be in all_items above)
+    for item in slice_obj.get("goals", []):
+        mid = str(item.get("memory_id") or "")
+        layer = int(item.get("layer", 2) or 2)
+        if layer == 0 and (not mid or mid not in placed_ids):
+            anchors.append(item)
+            if mid:
+                placed_ids.add(mid)
+
+    # ── Header ──
+    confidence_value = slice_obj.get("confidence", 0.0)
+    confidence = float(confidence_value) if isinstance(confidence_value, int | float) else 0.0
+    header_lines = [
+        "# Active Memory Slice",
+        "",
+        f"- scope: {slice_obj.get('scope_id', 'default')}",
+        f"- query: {_compact(str(slice_obj.get('query', '') or ''), 240)}",
+        f"- activation: {slice_obj.get('activation_mode', 'heuristic')}",
+        f"- confidence: {confidence:.2f}",
+    ]
+    task_mode = _compact(str(slice_obj.get("task_mode", "") or ""), 40)
+    if task_mode:
+        header_lines.append(f"- task mode: {task_mode}")
+    sections = ["\n".join(header_lines)]
+
+    # ── Anchors ──
+    if anchors:
+        sections.append(_render_section("Anchors", _render_items(anchors)))
+
+    # ── Episodic ──
+    if episodic:
+        sections.append(_render_section("Episodic", _render_items(episodic)))
+
+    # ── Skills ──
+    if skills:
+        sections.append(_render_section("Skills", _render_items(skills)))
+
+    # ── Cases ──
+    if cases:
+        sections.append(_render_section("Cases", _render_items(cases)))
+
+    # ── Working ──
+    working_lines: list[str] = []
+    query = _compact(str(slice_obj.get("query", "") or ""), 240)
+    if query:
+        working_lines.append(f"- query: {query}")
+    scope_id = str(slice_obj.get("scope_id", "") or "")
+    if scope_id:
+        working_lines.append(f"- scope: {scope_id}")
+    recent_actions = slice_obj.get("recent_actions", []) or []
+    for action in recent_actions[:3]:
+        action_text = _compact(str(action or ""), 120)
+        if action_text:
+            working_lines.append(f"- action: {action_text}")
+    # Add open tensions and preferences into Working
+    for tension in slice_obj.get("open_tensions", []):
+        desc = _compact(str(tension.get("description", "") or ""), 180)
+        severity = str(tension.get("severity", "medium") or "medium").lower()
+        if desc:
+            working_lines.append(f"- tension [{severity}]: {desc}")
+    for pref in slice_obj.get("preferences", []):
+        title = _compact(str(pref.get("title", "") or ""), 90)
+        summary = _compact(str(pref.get("summary", "") or ""), 120)
+        line = f"- preference: {title}"
+        if summary and summary.lower() != title.lower():
+            line += f" — {summary}"
+        if title:
+            working_lines.append(line)
+    if working_lines:
+        sections.append(_render_section("Working", working_lines))
+
+    # ── Pending ──
+    writeback_summary = slice_obj.get("writeback_summary")
+    delta_results = slice_obj.get("delta_results", []) or []
+    pending_lines = _render_writeback(writeback_summary, delta_results)
+    if pending_lines:
+        sections.append(_render_section("Pending", pending_lines))
+
+    blocks = [s for s in sections if s]
+    return "\n\n".join(blocks).strip()
+
+
 def render_slice_as_prompt_context(slice_obj: ActiveMemorySlice) -> str:
-    return _render_slice(slice_obj)
+    """Render active slice as prompt context.
+
+    When MEMEM_RENDER_LEGACY=1 (env var), produces v1.12 output byte-for-byte.
+    Otherwise delegates to render_slice_v2() with the new 6-section schema.
+    """
+    from memem import settings as _memem_settings
+
+    if _memem_settings._render_legacy_enabled():
+        return _render_slice(slice_obj)
+    return render_slice_v2(slice_obj)
 
 
 def render_slice_as_compact_context(slice_obj: ActiveMemorySlice, max_chars: int = 4000) -> str:

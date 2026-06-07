@@ -52,15 +52,28 @@ def test_llm_activation_falls_back_when_unavailable(monkeypatch):
 
 
 def test_llm_activation_parses_valid_json(monkeypatch):
+    """v1.13 Phase 4.5: activation.py switched from subprocess.run to Popen+communicate
+    to enable pgrp-level cleanup on timeout; this test was updated to mock Popen.
+    """
     import subprocess
 
     from memem import activation
     from memem.active_slice import current_query_candidate
 
     monkeypatch.setattr(activation, "assembly_available", lambda: True)
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(
-        a[0], 0, stdout='{"goals":[{"candidate_id":"current_query","why":"goal","score":0.9}]}', stderr=""
-    ))
+
+    class _FakePopen:
+        def __init__(self, *args, **kwargs):
+            self.pid = 12345
+            self.returncode = 0
+
+        def communicate(self, input=None, timeout=None):
+            return ('{"goals":[{"candidate_id":"current_query","why":"goal","score":0.9}]}', "")
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(subprocess, "Popen", _FakePopen)
 
     result = activation.judge_activation_with_llm(
         "Continue proposal",

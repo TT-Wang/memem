@@ -26,8 +26,8 @@ def test_generate_prompt_context_slice_mode(tmp_vault, tmp_cortex_dir):
     )
 
     assert "# Active Memory Slice" in rendered
-    assert "## Goals" in rendered
-    assert "## Constraints" in rendered
+    assert "## Anchors" in rendered
+    assert "## Skills" in rendered
 
 
 def test_generate_prompt_context_assembly_mode(tmp_vault, tmp_cortex_dir, monkeypatch):

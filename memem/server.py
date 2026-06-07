@@ -399,7 +399,7 @@ def _build_mcp():
         ] = False,
         use_llm: Annotated[
             bool,
-            Field(description="Use bounded Haiku activation when available; fallback is deterministic heuristic mode."),
+            Field(description="Use bounded Haiku activation when available; fallback is deterministic heuristic mode. Defaults to the MEMEM_USE_LLM_JUDGE env-var setting."),
         ] = True,
         session_id: Annotated[
             str,
@@ -534,6 +534,12 @@ def _build_mcp():
         UserPromptSubmit hook injection — use this mode when you want
         on-demand recall via this tool without the hook chatting on every prompt.
         """
+        # Respect MEMEM_USE_LLM_JUDGE: if the env var disables the judge,
+        # override the caller-supplied use_llm=True default. An explicit
+        # use_llm=False from the caller is always honoured.
+        from memem import settings as _settings
+        effective_use_llm = use_llm and _settings._llm_judge_enabled()
+
         environment: dict[str, object] = {}
         if session_id:
             environment["session_id"] = session_id
@@ -566,7 +572,7 @@ def _build_mcp():
                 query,
                 scope_id=scope_id,
                 environment=runtime_environment,
-                use_llm=use_llm,
+                use_llm=effective_use_llm,
                 auto_commit_safe=auto_commit_safe,
                 dry_run=not auto_commit_safe,
             )
@@ -582,7 +588,7 @@ def _build_mcp():
                 query,
                 scope_id=scope_id,
                 environment=runtime_environment,
-                use_llm=use_llm,
+                use_llm=effective_use_llm,
                 mode="slice",
                 slice_obj=result["slice"],
             )
@@ -592,7 +598,7 @@ def _build_mcp():
             scope_id=scope_id,
             environment=runtime_environment,
             raw_json=raw_json,
-            use_llm=use_llm,
+            use_llm=effective_use_llm,
         )
 
     @mcp.tool()

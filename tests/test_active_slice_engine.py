@@ -86,8 +86,8 @@ def test_rendered_active_slice_contains_expected_sections_when_memory_matches(tm
     from memem.active_slice_engine import active_slice_response
     rendered = active_slice_response("Prepare project review risks", scope_id="memem", use_llm=False)
     assert "# Active Memory Slice" in rendered
-    assert "## Goals" in rendered
-    assert "## Constraints" in rendered
+    assert "## Anchors" in rendered
+    assert "## Skills" in rendered
     assert "## Warnings" not in rendered
 
 

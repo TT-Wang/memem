@@ -323,11 +323,41 @@ def _write_heartbeat() -> None:
 # ---------------------------------------------------------------------------
 
 def _warmup_model() -> None:
-    """Attempt to import and touch sentence-transformers to pre-load weights."""
+    """Attempt to import and touch sentence-transformers to pre-load weights.
+
+    Also logs the state of all three v1.13 feature flags at startup:
+    MEMEM_USE_LLM_JUDGE, MEMEM_USE_EMBEDDINGS, MEMEM_RENDER_LEGACY.
+    """
+    import os
+
+    from memem import settings
+    from memem.settings import _embeddings_enabled
+
+    use_llm_judge = settings.MEMEM_USE_LLM_JUDGE
+    use_embeddings = _embeddings_enabled()
+    render_legacy = os.environ.get("MEMEM_RENDER_LEGACY", "0") == "1"
+
+    flag_summary = (
+        f"MEMEM_USE_LLM_JUDGE={'1' if use_llm_judge else '0'} "
+        f"MEMEM_USE_EMBEDDINGS={'1' if use_embeddings else '0'} "
+        f"MEMEM_RENDER_LEGACY={'1' if render_legacy else '0'}"
+    )
+    log.info("daemon_flags", flags=flag_summary)
+    print(f"[slice-daemon] feature flags: {flag_summary}")
+
+    if not use_embeddings:
+        log.info("embedding_warmup_skipped", note="skipping embedding warmup (MEMEM_USE_EMBEDDINGS=0)")
+        # Keep "embedding judge disabled" message for backward compat with existing tests
+        print("[slice-daemon] embedding judge disabled (MEMEM_USE_EMBEDDINGS=0)")
+        print("[slice-daemon] skipping embedding warmup (MEMEM_USE_EMBEDDINGS=0)")
+        return
     try:
         # Try to import the embedding module — if it fails, log degraded mode.
         from memem import embedding_index  # noqa: F401
-        log.info("model_loaded", note="embedding_index imported")
+        log.info("model_loaded", note="embedding model loaded")
+        # Keep "embedding judge enabled" message for backward compat with existing tests
+        print("[slice-daemon] embedding judge enabled")
+        print("[slice-daemon] embedding model loaded")
     except Exception as exc:
         log.warning("model_load_degraded", error=str(exc),
                     note="sentence-transformers unavailable; degraded mode")

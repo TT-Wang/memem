@@ -21,6 +21,7 @@ import memem.settings as _memem_settings
 from memem.activation import judge_activation_heuristically, judge_activation_with_llm
 from memem.active_slice import (
     ActivationResult,
+    ActiveMemoryItem,
     ActiveMemorySlice,
     Candidate,
     CandidateBundle,
@@ -38,6 +39,7 @@ from memem.delta_policy import evaluate_delta_proposals
 from memem.environment_context import (
     normalize_runtime_environment,
 )
+from memem.kind_classifier import infer_kind as _infer_kind
 from memem.models import LAYER_L0, _normalize_scope_id, parse_iso_dt
 from memem.slice_history import (
     annotate_slice_continuity,
@@ -175,17 +177,20 @@ def build_slice(
     query: str,
     scope_id: str = "default",
     environment: dict[str, Any] | None = None,
-    use_llm: bool = False,
+    use_llm: bool | None = None,
 ) -> ActiveMemorySlice:
     """Build and return a structured ActiveMemorySlice dict without rendering.
 
     This is the preferred entry point for callers that need the slice structure
-    (e.g. context_assemble merging multiple slices). LLM activation is disabled
-    by default to keep assembly fast; callers can opt in by passing use_llm=True.
+    (e.g. context_assemble merging multiple slices). When use_llm is None (the
+    default), the MEMEM_USE_LLM_JUDGE env-var setting is consulted. Pass
+    use_llm=False explicitly to force heuristic regardless of the env var.
 
     History persistence is intentionally disabled: assembly callers will call
     this for multiple scopes and should not create spurious history records.
     """
+    if use_llm is None:
+        use_llm = _memem_settings._llm_judge_enabled()
     return _generate_active_memory_slice_internal(
         query,
         SliceGenRequest(
@@ -547,6 +552,105 @@ def _persist_slice(slice_obj: ActiveMemorySlice) -> None:
         log.warning("slice history persistence failed", exc=exc)
 
 
+def _populate_v13_kind_buckets(slice_obj: ActiveMemorySlice) -> None:
+    """Post-processing pass: route kind-classified items into the v1.13 bucket fields.
+
+    Reads items from goals/constraints/active_background/decisions/preferences/
+    failure_patterns, calls infer_kind() on each, and populates:
+      episodic_items — items with kind/inferred_kind == 'episodic'
+      skill_items    — items with kind/inferred_kind == 'skill'
+      case_items     — items with kind/inferred_kind == 'case'
+
+    L0 anchors (layer==0) are excluded from all three buckets; they remain in
+    goals and are rendered under ## Anchors by render_slice_v2().
+
+    Items that classify as 'other' are left in their existing section fields
+    (goals/constraints/etc.) and will fall through the role-based routing in
+    render_slice_v2().
+
+    This pass is skipped entirely when MEMEM_RENDER_LEGACY='1'.
+    """
+    if _memem_settings._render_legacy_enabled():
+        # Legacy mode: skip routing pass; old section fields drive old renderer
+        slice_obj["episodic_items"] = []
+        slice_obj["skill_items"] = []
+        slice_obj["case_items"] = []
+        return
+
+    episodic_items: list[ActiveMemoryItem] = []
+    skill_items: list[ActiveMemoryItem] = []
+    case_items: list[ActiveMemoryItem] = []
+    placed_ids: set[str] = set()
+
+    all_section_items: list[ActiveMemoryItem] = []
+    for section_key in ("goals", "constraints", "active_background", "decisions", "preferences", "failure_patterns"):
+        all_section_items.extend(cast(list[ActiveMemoryItem], slice_obj.get(section_key, [])))
+
+    for item in all_section_items:
+        # L0 anchors always go to Anchors rendering path — never to kind buckets
+        layer = int(item.get("layer", 2) if item.get("layer") is not None else 2)
+        if layer == 0:
+            continue
+
+        # Determine effective kind: explicit 'kind' field takes priority over inferred
+        eff_kind = str(item.get("kind") or "")
+        if not eff_kind:
+            # Build a minimal memory-like dict so infer_kind() can analyse it.
+            # v1.13 Phase 4.5 fix: pass the propagated tags so the classifier's
+            # tag-priority path (kind_classifier.py) can honor explicit type:* tags
+            # instead of always falling back to heuristics.
+            mem_proxy: dict[str, Any] = {
+                "title": item.get("title", ""),
+                "content": item.get("summary", "") or item.get("why_activated", ""),
+                "tags": list(item.get("tags") or []),
+            }
+            # If inferred_kind is already set on the item, use it directly
+            existing_inferred = str(item.get("inferred_kind") or "")
+            if existing_inferred:
+                eff_kind = existing_inferred
+            else:
+                eff_kind = _infer_kind(mem_proxy)
+                # Write inferred_kind back onto item so render_slice_v2 can read it
+                item["inferred_kind"] = eff_kind  # type: ignore[typeddict-unknown-key]
+
+        mid = str(item.get("memory_id") or "")
+
+        if eff_kind == "episodic":
+            if not mid or mid not in placed_ids:
+                episodic_items.append(item)
+                if mid:
+                    placed_ids.add(mid)
+        elif eff_kind == "skill":
+            if not mid or mid not in placed_ids:
+                skill_items.append(item)
+                if mid:
+                    placed_ids.add(mid)
+        elif eff_kind == "case":
+            if not mid or mid not in placed_ids:
+                case_items.append(item)
+                if mid:
+                    placed_ids.add(mid)
+        # 'other' → stays in source section; role-based routing in render_slice_v2 handles it
+
+    slice_obj["episodic_items"] = episodic_items
+    slice_obj["skill_items"] = skill_items
+    slice_obj["case_items"] = case_items
+
+    # Populate recent_actions from working_memory last_3_actions section
+    try:
+        import memem.working_memory as _wm
+        wm = _wm.read_working_memory()
+        last_3_raw = wm.get("last_3_actions", "") or ""
+        recent_actions: list[str] = [
+            line.strip().lstrip("- ").strip()
+            for line in last_3_raw.splitlines()
+            if line.strip() and line.strip() not in ("-", "")
+        ]
+        slice_obj["recent_actions"] = recent_actions[:3]
+    except Exception:  # noqa: BLE001 — never break slice generation
+        slice_obj["recent_actions"] = []
+
+
 def _generate_active_memory_slice_internal(
     query: str,
     req: SliceGenRequest,
@@ -574,7 +678,10 @@ def _generate_active_memory_slice_internal(
     filtered_candidates = pre["candidates"]
     filtered_bundle = _bundle_from_candidates(filtered_candidates, candidate_bundle)
 
-    if use_llm:
+    # Gate LLM judge on both caller flag and the module-level env-var setting.
+    # MEMEM_USE_LLM_JUDGE=0 disables LLM across all entry points regardless of use_llm arg.
+    _effective_use_llm = use_llm and _memem_settings._llm_judge_enabled()
+    if _effective_use_llm:
         try:
             activation = judge_activation_with_llm(query, normalized_scope, activation_env, filtered_bundle)
         except Exception as exc:
@@ -585,7 +692,7 @@ def _generate_active_memory_slice_internal(
             ]
     else:
         activation = judge_activation_heuristically(query, normalized_scope, activation_env, filtered_bundle)
-    if not use_llm:
+    if not _effective_use_llm:
         activation["warnings"] = list(activation.get("warnings", [])) + ["LLM activation disabled; used heuristic activation."]
 
     activation["excluded_candidates"] = list(activation.get("excluded_candidates", [])) + pre["excluded_candidates"]
@@ -596,6 +703,8 @@ def _generate_active_memory_slice_internal(
     slice_obj = build_active_memory_slice(query, normalized_scope, env, filtered_bundle, activation)
     carry_forward_limit = int(env.get("continuity_summary_limit", 4) or 4)
     slice_obj = annotate_slice_continuity(slice_obj, previous_slice, carry_forward_limit=carry_forward_limit)
+    # v1.13: populate 6-section kind buckets (episodic_items / skill_items / case_items)
+    _populate_v13_kind_buckets(slice_obj)
     candidate_deltas = propose_deltas_from_slice(slice_obj)
     policy_decisions = evaluate_delta_proposals(candidate_deltas)
     slice_obj["candidate_deltas"] = candidate_deltas

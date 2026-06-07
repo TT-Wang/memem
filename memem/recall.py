@@ -10,6 +10,7 @@ from memem.active_slice import (
     _stable_id,
     render_slice_markdown,
 )
+from memem.kind_classifier import infer_kind as _infer_kind
 from memem.models import DEFAULT_LAYER, LAST_BRIEF_PATH, LAYER_L0, now_iso, parse_iso_dt
 from memem.obsidian_store import (
     _find_memory,
@@ -65,14 +66,19 @@ def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 1
     candidate_limit = limit * 4  # generous — re-ranker filters noise
 
     try:
-        from memem.embedding_index import _search_embedding_with_scores
         from memem.obsidian_store import _ngram_search_candidates
         from memem.search_index import _search_fts
 
-        with ThreadPoolExecutor(max_workers=3) as pool:
+        _use_emb = _memem_settings._embeddings_enabled()
+        log.debug("embedding_retrieval_enabled=%s", _use_emb)
+
+        _max_workers = 3 if _use_emb else 2
+        with ThreadPoolExecutor(max_workers=_max_workers) as pool:
             fts_future = pool.submit(_search_fts, query, scope, candidate_limit)
             ngram_future = pool.submit(_ngram_search_candidates, query, scope, candidate_limit)
-            emb_future = pool.submit(_search_embedding_with_scores, query, candidate_limit)
+            if _use_emb:
+                from memem.embedding_index import _search_embedding_with_scores
+                emb_future = pool.submit(_search_embedding_with_scores, query, candidate_limit)
             try:
                 fts_ids = fts_future.result(timeout=10) or []
             except Exception as exc:
@@ -83,11 +89,14 @@ def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 1
             except Exception as exc:
                 log.debug("ngram candidate generation failed: %s", exc)
                 ngram_ids = []
-            try:
-                # Embedding has a longer budget — model encode dominates.
-                emb_results = emb_future.result(timeout=30) or []
-            except Exception as exc:
-                log.debug("embedding candidate generation failed: %s", exc)
+            if _use_emb:
+                try:
+                    # Embedding has a longer budget — model encode dominates.
+                    emb_results = emb_future.result(timeout=30) or []  # type: ignore[possibly-undefined]
+                except Exception as exc:
+                    log.debug("embedding candidate generation failed: %s", exc)
+                    emb_results = []
+            else:
                 emb_results = []
 
         # Build embedding-score lookup AND id list for the union step.
@@ -205,11 +214,16 @@ def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 1
                 for mem in top50:
                     if mem.get("id", "") not in seen:
                         reranked.append(mem)
+                for mem in reranked:
+                    _infer_kind(mem)
                 return reranked[:limit]
             except Exception as exc:  # noqa: BLE001
                 log.warning("cross-encoder rerank failed, using heuristic order: %s", exc)
 
-        return [mem for _, mem in scored[:limit]]
+        results_out = [mem for _, mem in scored[:limit]]
+        for mem in results_out:
+            _infer_kind(mem)
+        return results_out
     except Exception as exc:
         log.debug("Union search failed, falling back to file scan: %s", exc)
         return []  # Fallback: caller will use file scan
@@ -339,6 +353,12 @@ def _search_memories(
                         from memem.telemetry import record_session_recall
 
                         record_session_recall(session_id, mem_id)
+        # Apply kind classification unconditionally — idempotent, cheap, and
+        # the "already classified" gate caused stale inferred_kind when a user
+        # later added type:* tags to a memory only reachable via graph expansion
+        # (Phase 4.5 Lens B finding).
+        for mem in results:
+            _infer_kind(mem)
         return results
 
     # Fallback to file scan (existing code continues below)
@@ -422,6 +442,10 @@ def _search_memories(
                     from memem.telemetry import record_session_recall
 
                     record_session_recall(session_id, mem_id)
+
+    # Classify untagged memories (fallback file-scan path).
+    for mem in results:
+        _infer_kind(mem)
 
     return results
 

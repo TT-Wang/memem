@@ -180,12 +180,15 @@ def run_active_slice(query: str, scope: str, session_id: str, cwd: str, task_mod
     """
     # Try the slice daemon first (warm, ~50-500ms) before falling back to
     # cold subprocess (5-10s cold-load of sentence-transformers).
+    # MEMEM_USE_LLM_JUDGE=1 (default) enables Haiku activation judge.
+    # MEMEM_USE_LLM_JUDGE=0 forces heuristic path across all entry points.
+    _USE_LLM_JUDGE = os.environ.get("MEMEM_USE_LLM_JUDGE", "1") != "0"
     try:
         sys.path.insert(0, plugin_root)
         from memem.slice_client import try_slice_via_daemon_with_meta
         meta = try_slice_via_daemon_with_meta(
             query, scope, session_id, cwd, task_mode,
-            use_llm=False, timeout_seconds=5.0,
+            use_llm=_USE_LLM_JUDGE, timeout_seconds=5.0,
         )
         if meta is not None:
             return (meta["slice"], meta["should_emit_context"], meta["gating_reason"])
@@ -196,7 +199,9 @@ def run_active_slice(query: str, scope: str, session_id: str, cwd: str, task_mod
     try:
         env = os.environ.copy()
         env["PYTHONPATH"] = plugin_root + os.pathsep + env.get("PYTHONPATH", "")
-        cmd = [sys.executable, "-m", "memem.server", "slice", "--query-file", "-", "--scope", scope, "--no-llm"]
+        cmd = [sys.executable, "-m", "memem.server", "slice", "--query-file", "-", "--scope", scope]
+        if not _USE_LLM_JUDGE:
+            cmd.append("--no-llm")
         if session_id:
             cmd.extend(["--session-id", session_id])
         if cwd:

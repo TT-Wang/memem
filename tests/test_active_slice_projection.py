@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 
-def test_render_slice_order_goals_constraints_tensions():
+def test_render_slice_order_goals_constraints_tensions(monkeypatch):
+    """Legacy section ordering test — runs under MEMEM_RENDER_LEGACY=1."""
+    monkeypatch.setenv("MEMEM_RENDER_LEGACY", "1")
     from memem.active_slice import render_slice_as_prompt_context
 
     rendered = render_slice_as_prompt_context({
@@ -72,7 +74,9 @@ def test_render_slice_respects_should_emit_context_false():
     assert rendered == ""
 
 
-def test_render_slice_surfaces_continuity_and_writeback_when_present():
+def test_render_slice_surfaces_continuity_and_writeback_when_present(monkeypatch):
+    """Legacy continuity/previous_slice_id test — runs under MEMEM_RENDER_LEGACY=1."""
+    monkeypatch.setenv("MEMEM_RENDER_LEGACY", "1")
     from memem.active_slice import render_slice_as_prompt_context
 
     rendered = render_slice_as_prompt_context({
