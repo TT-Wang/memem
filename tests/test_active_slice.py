@@ -206,7 +206,7 @@ def test_recall_candidates_still_emit_context_when_activation_is_sparse():
 
 
 def test_slice_metrics_include_continuity_and_writeback_surfaces():
-    from memem.active_slice_metrics import summarize_slice_metrics
+    from memem.active_slice_engine import summarize_slice_metrics
 
     metrics = summarize_slice_metrics({
         "slice_id": "slice_123",

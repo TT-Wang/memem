@@ -78,7 +78,8 @@ def test_memory_remind_importable_via_server():
     # We test that the imports in _build_mcp succeed (don't actually call it
     # as FastMCP requires an MCP transport).  Verify the new imports don't break.
     import memem.cross_vault  # noqa: F401
-    import memem.vault_registry  # noqa: F401
+    # v1.11.0: vault_registry was inlined into server.py._build_mcp;
+    # the import path is gone but the loader is still available via _build_mcp.
     assert True
 
 

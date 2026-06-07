@@ -10,12 +10,65 @@ can pass arbitrary vault paths and get back clean results.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from pathlib import Path
 from typing import TypedDict
 
 log = logging.getLogger("memem-cross-vault")
+
+
+def load_vault_registry() -> list[dict]:
+    """Load the vault registry from ~/.memem/vaults.json.
+
+    Returns a list of dicts, each with at least ``id`` and ``path`` keys.
+
+    When vaults.json does not exist, returns a synthetic single-element list
+    pointing at the current default vault so callers work without configuration.
+    Invalid entries (missing ``id`` or ``path``) are skipped with a warning.
+
+    (v1.11.0: moved here from former ``memem/vault_registry.py`` — this is the
+    module that actually consumes the registry, so the loader belongs here.)
+    """
+    from memem.models import MEMEM_DIR, OBSIDIAN_MEMORIES_DIR
+
+    vaults_json = MEMEM_DIR / "vaults.json"
+    default = [{"id": "default", "path": str(OBSIDIAN_MEMORIES_DIR)}]
+
+    if not vaults_json.exists():
+        return default
+
+    try:
+        raw = json.loads(vaults_json.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        log.warning("Failed to read vaults.json, using default vault: %s", exc)
+        return default
+
+    if not isinstance(raw, list):
+        log.warning("vaults.json must be a JSON array, using default vault")
+        return default
+
+    valid: list[dict] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            log.warning("Skipping invalid vault entry (not a dict): %r", entry)
+            continue
+        vault_id = entry.get("id")
+        vault_path = entry.get("path")
+        if not vault_id:
+            log.warning("Skipping vault entry missing 'id': %r", entry)
+            continue
+        if not vault_path:
+            log.warning("Skipping vault entry missing 'path' (id=%s): %r", vault_id, entry)
+            continue
+        valid.append({"id": str(vault_id), "path": str(vault_path)})
+
+    if not valid:
+        log.warning("vaults.json had no valid entries, using default vault")
+        return default
+
+    return valid
 
 
 class ReminderHit(TypedDict):

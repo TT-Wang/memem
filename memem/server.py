@@ -39,6 +39,7 @@ def _build_mcp():
     from memem.active_slice_engine import (
         generate_prompt_context as _generate_prompt_context,
     )
+    from memem.cross_vault import load_vault_registry as _load_vault_registry
     from memem.cross_vault import search_across_vaults as _search_across_vaults
     from memem.graph_index import (
         _rebuild_graph as _memory_graph_rebuild,
@@ -65,7 +66,6 @@ def _build_mcp():
         memory_timeline as _memory_timeline,
     )
     from memem.transcripts import transcript_search as _transcript_search
-    from memem.vault_registry import load_vault_registry as _load_vault_registry
 
     mcp = FastMCP("memem")
 

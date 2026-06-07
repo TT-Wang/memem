@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > Pre-v0.7.0 entries below describe what was called Cortex at the time —
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
+## [1.11.0] - 2026-06-07 — Micro-file inlines + vault dedup script
+
+- **Inlined `active_slice_metrics.py`** (45 LOC) into `memem/active_slice_engine.py`. The `summarize_slice_metrics` helper now lives next to its single caller. Same name, new import path.
+- **Moved `vault_registry.py` → `cross_vault.py::load_vault_registry`** (71 LOC, top-level function). `cross_vault.py` is the module that actually consumes the registry, so the loader belongs there. Same name, same behaviour, new import path. Test suite for the loader (3 tests covering edge cases) updated. Server's `_build_mcp` now imports `load_vault_registry` from `cross_vault` alongside the existing `search_across_vaults` import.
+- **Net: -116 LOC, 2 fewer top-level modules** (active_slice_metrics.py, vault_registry.py)
+- **Vault dedup script written to `/tmp/v1110_vault_cleanup_phase1.py`** (opt-in, dry-run by default):
+  - Identifies 2 superseded memories (`invalid_at` set) + 106 title-duplicate deletions across 95 clusters (keeps highest `access_count` per cluster)
+  - Zero data loss — every unique title survives
+  - Re-run with `--apply` to actually delete (~108 files, ~500KB of FTS index pressure removed)
+- **Audit corrections honestly recorded:**
+  - The prior "essence field empty for all 3277 memories" finding was a false alarm — essence is populated from the markdown body, not YAML frontmatter; the audit script grepped the wrong place
+  - The prior "3 orphan modules with zero importers" finding was also wrong — `slice_client.py`, `compaction.py`, `session_state_db.py` are all imported (from `hooks/auto-recall.sh` or other Python modules); left untouched
+- **Backward compatibility:** any external code importing `memem.active_slice_metrics.summarize_slice_metrics` should switch to `memem.active_slice_engine.summarize_slice_metrics` (same name, new path). `memem.vault_registry` was only ever imported by `server.py::_build_mcp` (and one sanity-import test, updated). Minor version bump (1.10.1 → 1.11.0) reflects these import-path changes.
+- **Deferred to later v1.11.x:**
+  - Phase 2 vault cleanup (L0 482→20, L1 719→50) — needs per-project human audit
+  - Cortex→memem name migration for 779 legacy `cortex-plugin` project memories
+  - Heuristic recall improvements (session episodic surface, topic-relevant L1 gating)
+
 ## [1.10.1] - 2026-06-07 — Injection cleanup — ~30% fewer tokens per hook injection, trivial-query auto-skip
 
 - **Removed 4 dead sections from `_render_slice()`**: `## Carry Forward` (duplicate of `## Constraints`), `## Candidate Deltas` (internal write-back proposals, always rejected by next section), `## Writeback` (system telemetry like `status=not_run; proposed=...`), and `## Warnings` (operational logs like `LLM activation disabled`). Net: ~30% fewer tokens injected per hook turn.

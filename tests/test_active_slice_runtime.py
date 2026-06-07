@@ -82,7 +82,7 @@ def test_slice_fallback_to_heuristic_when_llm_unavailable(tmp_vault, tmp_cortex_
 
 
 def test_slice_metrics_summary():
-    from memem.active_slice_metrics import summarize_slice_metrics
+    from memem.active_slice_engine import summarize_slice_metrics
 
     metrics = summarize_slice_metrics({
         "slice_id": "slice_123",

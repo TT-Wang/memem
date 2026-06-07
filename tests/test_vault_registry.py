@@ -23,8 +23,8 @@ def _reload_vault_registry(monkeypatch, tmp_memem_dir: Path) -> None:
     monkeypatch.delenv("CORTEX_DIR", raising=False)
     import memem.models
     importlib.reload(memem.models)
-    import memem.vault_registry
-    importlib.reload(memem.vault_registry)
+    import memem.cross_vault
+    importlib.reload(memem.cross_vault)
 
 
 # ---------------------------------------------------------------------------
@@ -48,10 +48,10 @@ def test_no_vaults_json_returns_default(tmp_path, monkeypatch):
 
     import memem.models
     importlib.reload(memem.models)
-    import memem.vault_registry
-    importlib.reload(memem.vault_registry)
+    import memem.cross_vault
+    importlib.reload(memem.cross_vault)
 
-    from memem.vault_registry import load_vault_registry
+    from memem.cross_vault import load_vault_registry
     result = load_vault_registry()
 
     assert isinstance(result, list)
@@ -81,10 +81,10 @@ def test_vaults_json_two_entries(tmp_path, monkeypatch):
 
     import memem.models
     importlib.reload(memem.models)
-    import memem.vault_registry
-    importlib.reload(memem.vault_registry)
+    import memem.cross_vault
+    importlib.reload(memem.cross_vault)
 
-    from memem.vault_registry import load_vault_registry
+    from memem.cross_vault import load_vault_registry
     result = load_vault_registry()
 
     assert len(result) == 2
@@ -117,10 +117,10 @@ def test_malformed_entry_skipped(tmp_path, monkeypatch):
 
     import memem.models
     importlib.reload(memem.models)
-    import memem.vault_registry
-    importlib.reload(memem.vault_registry)
+    import memem.cross_vault
+    importlib.reload(memem.cross_vault)
 
-    from memem.vault_registry import load_vault_registry
+    from memem.cross_vault import load_vault_registry
     result = load_vault_registry()
 
     # Only the valid entry should be returned
