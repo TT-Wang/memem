@@ -88,7 +88,7 @@ def test_rendered_active_slice_contains_expected_sections_when_memory_matches(tm
     assert "# Active Memory Slice" in rendered
     assert "## Goals" in rendered
     assert "## Constraints" in rendered
-    assert "## Warnings" in rendered
+    assert "## Warnings" not in rendered
 
 
 def test_golden_product_proposal_continuation(tmp_vault, tmp_cortex_dir, monkeypatch):

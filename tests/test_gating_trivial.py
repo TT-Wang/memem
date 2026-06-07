@@ -97,19 +97,17 @@ def test_slash_command_gating_reason(query, monkeypatch, tmp_vault, tmp_cortex_d
 # ---------------------------------------------------------------------------
 
 
-def test_auto_mode_bypasses_trivial_gate(monkeypatch, tmp_vault, tmp_cortex_dir):
-    """In auto mode, trivial queries like 'yes' should reach the full pipeline."""
+def test_auto_mode_gates_pure_ack_query(monkeypatch, tmp_vault, tmp_cortex_dir):
+    """In auto mode, pure-ack trivial queries like 'yes' should be gated (v1.10.1)."""
     import memem.slice_history as sh
     with sh._session_lock:
         sh._turn_counts.clear()
         sh._empty_streaks.clear()
 
     result = _call_generate("yes", monkeypatch, injection_mode="auto")
-    # In auto mode, trivial-query gating must NOT fire. Confidence-driven
-    # gating_reason="low_confidence" (v1.9.6 A3) is independent — it's a
-    # slice-level signal the hook may act on, not a hybrid-mode gate.
-    assert result.get("gating_reason") != "trivial_query", (
-        f"auto mode should bypass trivial gate; got {result.get('gating_reason')!r}"
+    # v1.10.1: auto-mode trivial-ack gate now fires for pure-acknowledgment queries.
+    assert result.get("gating_reason") == "trivial_query", (
+        f"auto mode should gate pure-ack queries; got {result.get('gating_reason')!r}"
     )
 
 

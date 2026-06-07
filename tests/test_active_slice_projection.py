@@ -102,5 +102,5 @@ def test_render_slice_surfaces_continuity_and_writeback_when_present():
     assert "- task mode: proposal" in rendered
     assert "- previous slice: slice_prev" in rendered
     assert "## Resolved Tensions" in rendered
-    assert "## Carry Forward" in rendered
-    assert "## Writeback" in rendered
+    assert "## Carry Forward" not in rendered
+    assert "## Writeback" not in rendered

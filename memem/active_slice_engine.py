@@ -69,6 +69,13 @@ _OOV_STOPWORDS = frozenset({
     "to", "of", "in", "on", "at", "for", "with", "by", "as", "from",
 })
 
+# v1.10.1: pure-acknowledgment tokens for the auto-mode trivial-ack gate.
+# Conservative set — only the most unambiguous single-word acknowledgements.
+_AUTO_PURE_ACK_TOKENS = frozenset({
+    "yes", "no", "ok", "okay", "go", "sure", "thanks", "thx",
+    "y", "n", "true", "false", "确认", "好", "好的", "是", "对",
+})
+
 
 def _detect_out_of_vault(query: str, candidate_bundle: CandidateBundle, threshold: float) -> bool:
     """Return True if query has no vault match.
@@ -564,6 +571,16 @@ def generate_active_memory_slice(
     # pass session_id, so this affects only opt-out / debug code paths.
     env = environment or {}
     session_id = str(env.get("session_id", "") or "")
+
+    # v1.10.1: auto-mode trivial-ack gate. Only fires for pure-acknowledgment queries
+    # (≤3 tokens, all tokens in the ack set). Conservative on purpose — false-positive
+    # cost (skipping a legit query) is much higher than false-negative (still injecting).
+    if injection_mode == "auto" and session_id:
+        _query_tokens = (query or "").strip().lower().split()
+        if 0 < len(_query_tokens) <= 3 and all(t in _AUTO_PURE_ACK_TOKENS for t in _query_tokens):
+            _sid = str(env.get("session_id", "") or "")
+            return _make_gating_stub(query, scope_id, _sid, "trivial_query")
+
     if injection_mode != "auto" and session_id:
 
         # --- Gate 1: trivial query (regex) ---

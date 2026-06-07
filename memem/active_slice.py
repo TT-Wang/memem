@@ -777,19 +777,9 @@ def _render_slice(slice_obj: ActiveMemorySlice, max_chars: int | None = None) ->
         _render_section("Failure Patterns", _render_items(slice_obj.get("failure_patterns", []))),
         _render_section("Open Tensions", _render_tensions(slice_obj.get("open_tensions", []))),
         _render_section("Resolved Tensions", _render_tensions(slice_obj.get("resolved_tensions", []))),
-        _render_section("Carry Forward", _render_string_list(slice_obj.get("carry_forward_summary", []))),
         _render_section("Artifacts", _render_items(slice_obj.get("artifacts", []))),
         _render_section("Preferences", _render_items(slice_obj.get("preferences", []))),
         _render_section("Active Background", _render_items(slice_obj.get("active_background", []))),
-        _render_section("Candidate Deltas", _render_deltas(slice_obj.get("candidate_deltas", []))),
-        _render_section(
-            "Writeback",
-            _render_writeback(
-                cast(Mapping[str, Any] | None, slice_obj.get("writeback_summary")),
-                cast(Sequence[Mapping[str, Any]], slice_obj.get("delta_results", [])),
-            ),
-        ),
-        _render_section("Warnings", [f"- {_compact(str(warning), 220)}" for warning in slice_obj.get("warnings", [])]),
     ]
     blocks = [section for section in sections if section]
     rendered = "\n\n".join(blocks).strip()

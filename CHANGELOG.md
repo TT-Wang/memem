@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > Pre-v0.7.0 entries below describe what was called Cortex at the time —
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
+## [1.10.1] - 2026-06-07 — Injection cleanup — ~30% fewer tokens per hook injection, trivial-query auto-skip
+
+- **Removed 4 dead sections from `_render_slice()`**: `## Carry Forward` (duplicate of `## Constraints`), `## Candidate Deltas` (internal write-back proposals, always rejected by next section), `## Writeback` (system telemetry like `status=not_run; proposed=...`), and `## Warnings` (operational logs like `LLM activation disabled`). Net: ~30% fewer tokens injected per hook turn.
+- **⚠️ Output-format break (for parsers):** Downstream consumers that anchored on `## Carry Forward`, `## Candidate Deltas`, `## Writeback`, or `## Warnings` headers in the rendered markdown will no longer see them. Read the structured data via the `ActiveMemorySlice` dict (e.g. through the MCP `active_memory_slice` tool) instead — the fields are still there.
+- **Slice data schema unchanged.** The `ActiveMemorySlice` TypedDict still carries `carry_forward_summary`, `candidate_deltas`, `writeback_summary`, and `warnings` fields. Only the markdown render is trimmed — MCP `active_memory_slice` tool consumers and write-back system continue to see the full structured data.
+- **Auto-mode trivial-ack gate (extension of v1.9.6).** The trivial-query gate now also fires in `auto` injection mode for the most unambiguous pure-acknowledgment queries (≤3 tokens, all from a fixed 17-token frozenset: `yes`/`no`/`ok`/`okay`/`go`/`sure`/`thanks`/`thx`/`y`/`n`/`true`/`false`/`确认`/`好`/`好的`/`是`/`对`). Conservative on purpose — false-positive cost (skipping a legit query) is higher than false-negative (still injecting for a borderline case).
+- **Conservative-by-design — what's deliberately NOT in the auto-mode set:** borderline acks like `yep`/`yup`/`nope`/`cool`/`k`/`kk`/`ty` (English) and `好吧`/`好啊`/`嗯`/`是的`/`对的`/`行`/`可以`/`了解`/`明白`/`知道了`/`收到` (Chinese) are still injected in auto mode. The existing v1.9.6 regex (which catches these) only fires in `hybrid`/`tool` modes. Set `MEMEM_INJECTION_MODE=hybrid` for the broader coverage.
+- **Backward compatibility:** No schema migration. No removed exports. Existing `auto`-mode behavior preserved for ANY query that doesn't match the pure-ack frozenset.
+- **Design lineage:** Sections identified by direct observation of injection content during a live session — pure render-layer surgery, zero LLM cost, zero schema changes, zero mining changes. Framework: "delete dead requirements" before optimizing remaining ones (Musk five-step algorithm applied to memem's render layer).
+
 ## [1.10.0] - 2026-06-05 — Typed recall grouping — Episodic / Skills / Cases sections at recall surface (EverMe-mirroring, zero extra LLM cost)
 
 - **New:** Recall output prepends a compact navigation index with `## Episodic memory (N)`, `## Skills (N)`, `## Cases (N)` headers at the top, mirroring EverMe's TUI conventions. The full per-item content blocks below are unchanged — typed sections are additive navigation, not replacements.
