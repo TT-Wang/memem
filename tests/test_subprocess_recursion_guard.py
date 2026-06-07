@@ -128,10 +128,10 @@ class TestProceduralHaikuGuard:
 
 
 class TestTournamentJudgeGuard:
-    """Tournament pairwise judge (_tournament_break_ties) in active_slice_engine.py must pass guard params."""
+    """Tournament pairwise judge (_tournament_break_ties) in candidate_generation.py must pass guard params."""
 
     def test_env_and_session_flag(self, tmp_path):
-        from memem import active_slice_engine
+        from memem import candidate_generation
 
         captured: list[dict] = []
 
@@ -157,9 +157,9 @@ class TestTournamentJudgeGuard:
             "score": 0.75,
         }
 
-        with patch.object(active_slice_engine.subprocess, "run", side_effect=fake_run):
+        with patch.object(candidate_generation.subprocess, "run", side_effect=fake_run):
             try:
-                active_slice_engine._tournament_break_ties(
+                candidate_generation._tournament_break_ties(
                     query="test query about code",
                     candidates=[c1, c2],  # type: ignore[arg-type]
                     cache_dir=tmp_path,

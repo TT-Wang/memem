@@ -280,7 +280,7 @@ MemorySlice = ActiveMemorySlice
 
 def _stable_id(prefix: str, payload: Any) -> str:
     encoded = json.dumps(payload, sort_keys=True, default=str)
-    return f"{prefix}_{hashlib.sha1(encoded.encode('utf-8')).hexdigest()[:12]}"
+    return f"{prefix}_{hashlib.sha1(encoded.encode('utf-8'), usedforsecurity=False).hexdigest()[:12]}"
 
 
 def _compact(text: str, limit: int = 500) -> str:

@@ -230,9 +230,9 @@ def test_vault_cache_perf_10_lookups(tmp_vault, tmp_cortex_dir):
 
 
 def test_pkl_cache_cold_start_rehydrates(tmp_vault, tmp_cortex_dir):
-    """After a save, the pkl file exists and contains the memory. A fresh
-    cache state (simulating a new process) can re-hydrate from it without
-    re-parsing every file."""
+    """After a save, the msgpack cache file exists and contains the memory.
+    A fresh cache state (simulating a new process) can re-hydrate from it
+    without re-parsing every file. (SEC-001: pickle replaced by msgpack)"""
     import importlib
 
     from memem import obsidian_store
@@ -243,19 +243,19 @@ def test_pkl_cache_cold_start_rehydrates(tmp_vault, tmp_cortex_dir):
         project="general", source_type="user",
     )
     obsidian_store._save_memory(m)
-    # Force sweep to write pkl (save alone updates in-memory only)
+    # Force sweep to write msgpack cache (save alone updates in-memory only)
     obsidian_store._trigger_sweep()
 
-    assert obsidian_store._VAULT_CACHE_PKL_PATH.exists(), "pkl should be written after sweep"
+    assert obsidian_store._VAULT_CACHE_MSGPACK_PATH.exists(), "msgpack cache should be written after sweep"
 
-    # Simulate a new process: clear the in-memory cache, clear the pkl-loaded
-    # flag, then load pkl directly.
+    # Simulate a new process: clear the in-memory cache, clear the loaded
+    # flag, then load cache directly.
     with obsidian_store._VAULT_CACHE_LOCK:
         obsidian_store._VAULT_CACHE.clear()
         obsidian_store._VAULT_CACHE_FILES.clear()
     obsidian_store._VAULT_PKL_LOADED = False
 
-    loaded = obsidian_store._load_pkl_cache()
+    loaded = obsidian_store._load_vault_cache()
     assert loaded is True
     # Same memory should be back in the cache without any glob/parse
     assert m["id"] in obsidian_store._VAULT_CACHE
@@ -263,8 +263,8 @@ def test_pkl_cache_cold_start_rehydrates(tmp_vault, tmp_cortex_dir):
 
 
 def test_pkl_cache_detects_drift_across_processes(tmp_vault, tmp_cortex_dir):
-    """If the pkl was written, then a (simulated) other process modifies a
-    file while we're offline, the next `_ensure_cache_warm` on re-start
+    """If the msgpack cache was written, then a (simulated) other process modifies
+    a file while we're offline, the next `_ensure_cache_warm` on re-start
     picks up the mtime change via the sweep and re-parses that file."""
     import importlib
     import os as _os
@@ -278,11 +278,11 @@ def test_pkl_cache_detects_drift_across_processes(tmp_vault, tmp_cortex_dir):
         project="general", source_type="user",
     )
     obsidian_store._save_memory(m)
-    obsidian_store._trigger_sweep()  # writes pkl
+    obsidian_store._trigger_sweep()  # writes msgpack cache
     mid = m["id"]
     file_path = obsidian_store._VAULT_CACHE[mid]["file"]
 
-    # Simulate process exit: keep pkl on disk, drop in-memory state
+    # Simulate process exit: keep cache on disk, drop in-memory state
     with obsidian_store._VAULT_CACHE_LOCK:
         obsidian_store._VAULT_CACHE.clear()
         obsidian_store._VAULT_CACHE_FILES.clear()
@@ -294,7 +294,7 @@ def test_pkl_cache_detects_drift_across_processes(tmp_vault, tmp_cortex_dir):
     new_mtime = Path(file_path).stat().st_mtime + 1
     _os.utime(file_path, (new_mtime, new_mtime))
 
-    # Simulated restart: ensure_cache_warm should load pkl THEN sweep,
+    # Simulated restart: ensure_cache_warm should load cache THEN sweep,
     # and the sweep should detect the mtime drift and re-parse.
     obsidian_store._set_sweep_interval(0.05)
     obsidian_store._ensure_cache_warm()
@@ -307,9 +307,9 @@ def test_pkl_cache_detects_drift_across_processes(tmp_vault, tmp_cortex_dir):
 
 def test_pkl_cache_subprocess_cold_start(tmp_vault, tmp_cortex_dir):
     """Subprocess cold-start regression: a fresh python process with only
-    the pkl (no in-memory state) must see the vault correctly. Follows the
-    pattern in test_v011.py because monkeypatching doesn't reach a new
-    interpreter."""
+    the msgpack cache (no in-memory state) must see the vault correctly.
+    Follows the pattern in test_v011.py because monkeypatching doesn't
+    reach a new interpreter."""
     import importlib
     import subprocess
     import sys

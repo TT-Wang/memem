@@ -11,12 +11,13 @@ can pass arbitrary vault paths and get back clean results.
 from __future__ import annotations
 
 import json
-import logging
 import re
 from pathlib import Path
 from typing import TypedDict
 
-log = logging.getLogger("memem-cross-vault")
+import structlog
+
+_vault_log = structlog.get_logger("memem-vault-registry")
 
 
 def load_vault_registry() -> list[dict]:
@@ -42,30 +43,30 @@ def load_vault_registry() -> list[dict]:
     try:
         raw = json.loads(vaults_json.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        log.warning("Failed to read vaults.json, using default vault: %s", exc)
+        _vault_log.warning("vaults.json read failed", error=str(exc))
         return default
 
     if not isinstance(raw, list):
-        log.warning("vaults.json must be a JSON array, using default vault")
+        _vault_log.warning("vaults.json must be a JSON array")
         return default
 
     valid: list[dict] = []
     for entry in raw:
         if not isinstance(entry, dict):
-            log.warning("Skipping invalid vault entry (not a dict): %r", entry)
+            _vault_log.warning("invalid vault entry not a dict", entry=repr(entry))
             continue
         vault_id = entry.get("id")
         vault_path = entry.get("path")
         if not vault_id:
-            log.warning("Skipping vault entry missing 'id': %r", entry)
+            _vault_log.warning("vault entry missing id", entry=repr(entry))
             continue
         if not vault_path:
-            log.warning("Skipping vault entry missing 'path' (id=%s): %r", vault_id, entry)
+            _vault_log.warning("vault entry missing path", vault_id=vault_id, entry=repr(entry))
             continue
         valid.append({"id": str(vault_id), "path": str(vault_path)})
 
     if not valid:
-        log.warning("vaults.json had no valid entries, using default vault")
+        _vault_log.warning("vaults.json had no valid entries")
         return default
 
     return valid
@@ -174,7 +175,7 @@ def _scan_vault_memories(vault_path: str) -> list[dict]:
         try:
             mem = _parse_obsidian_memory_file(md_file)
         except Exception as exc:  # noqa: BLE001
-            log.debug("Failed to parse %s: %s", md_file, exc)
+            _vault_log.debug("failed to parse memory file", path=str(md_file), error=str(exc))
             continue
         if mem is None:
             continue
@@ -214,13 +215,13 @@ def search_across_vaults(
         vault_id = vault_entry.get("id", "unknown")
         vault_path = vault_entry.get("path", "")
         if not vault_path:
-            log.warning("Skipping vault with empty path: %s", vault_id)
+            _vault_log.warning("skipping vault with empty path", vault_id=vault_id)
             continue
 
         try:
             memories = _scan_vault_memories(vault_path)
         except Exception as exc:  # noqa: BLE001
-            log.warning("Failed to scan vault %s at %s: %s", vault_id, vault_path, exc)
+            _vault_log.warning("failed to scan vault", vault_id=vault_id, vault_path=vault_path, error=str(exc))
             continue
 
         for mem in memories:

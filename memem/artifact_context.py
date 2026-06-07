@@ -51,7 +51,7 @@ def _stable_artifact_id(source_type: str, source_ref: str, title: str, scope_id:
         "title": title,
     }
     encoded = json.dumps(payload, sort_keys=True)
-    return f"artifact_{hashlib.sha1(encoded.encode('utf-8')).hexdigest()[:12]}"
+    return f"artifact_{hashlib.sha1(encoded.encode('utf-8'), usedforsecurity=False).hexdigest()[:12]}"
 
 
 def _apply_stable_identity(candidate: Candidate, scope_id: str, source_ref: str) -> Candidate:

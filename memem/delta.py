@@ -33,7 +33,7 @@ class DeltaProposal(TypedDict, total=False):
 
 def _delta_id(delta_type: str, payload: dict) -> str:
     encoded = json.dumps({"type": delta_type, **payload}, sort_keys=True, default=str)
-    return f"delta_{hashlib.sha1(encoded.encode('utf-8')).hexdigest()[:12]}"
+    return f"delta_{hashlib.sha1(encoded.encode('utf-8'), usedforsecurity=False).hexdigest()[:12]}"
 
 
 def _unique_ids(values: list[str]) -> list[str]:

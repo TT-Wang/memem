@@ -413,13 +413,13 @@ def test_auto_recall_hook_uses_tempfile_for_large_message(tmp_path):
 
 
 def test_mine_all_logs_transient_and_continues(
-    tmp_cortex_dir, tmp_path, monkeypatch, caplog
+    tmp_cortex_dir, tmp_path, monkeypatch
 ):
     """Transient mining errors must be logged (not swallowed) and must not
     abort the mine_all loop. Each transient failure should be captured in
     the returned ``failures`` list with fatal=False.
     """
-    import logging
+    import structlog
 
     from memem import mining, session_state
     importlib.reload(session_state)
@@ -448,7 +448,7 @@ def test_mine_all_logs_transient_and_continues(
 
     monkeypatch.setattr(mining, "mine_session", fake_mine)
 
-    with caplog.at_level(logging.WARNING, logger=mining.log.name):
+    with structlog.testing.capture_logs() as captured:
         result = mining.mine_all(bypass_gate=True)
 
     # Both sessions seen, both counted as failed, nothing mined
@@ -462,23 +462,23 @@ def test_mine_all_logs_transient_and_continues(
         assert "fake transient" in f["error"]
     # Each failure must produce a warning log (not silent)
     transient_warnings = [
-        rec for rec in caplog.records
-        if "Transient mining failure" in rec.getMessage()
+        rec for rec in captured
+        if "Transient mining failure" in rec.get("event", "")
     ]
     assert len(transient_warnings) == 2, (
         f"expected 2 transient warnings, got {len(transient_warnings)}: "
-        f"{[r.getMessage() for r in caplog.records]}"
+        f"{[r.get('event') for r in captured]}"
     )
 
 
 def test_mine_all_aborts_on_fatal(
-    tmp_cortex_dir, tmp_path, monkeypatch, caplog
+    tmp_cortex_dir, tmp_path, monkeypatch
 ):
     """FatalMiningError must abort mine_all immediately and re-raise,
     so the CLI handler in cli.py can propagate FATAL_EXIT_CODE instead of
     letting mine-cron.sh relaunch into the same broken storage state.
     """
-    import logging
+    import structlog
 
     from memem import mining, session_state
     importlib.reload(session_state)
@@ -506,7 +506,7 @@ def test_mine_all_aborts_on_fatal(
 
     monkeypatch.setattr(mining, "mine_session", fake_mine)
 
-    with caplog.at_level(logging.ERROR, logger=mining.log.name):
+    with structlog.testing.capture_logs() as captured:
         import pytest
         with pytest.raises(mining.FatalMiningError, match="disk full"):
             mining.mine_all(bypass_gate=True)
@@ -518,8 +518,8 @@ def test_mine_all_aborts_on_fatal(
     )
     # And it must have logged an "aborting run" message.
     assert any(
-        "aborting run" in rec.getMessage()
-        for rec in caplog.records
+        "aborting run" in rec.get("event", "")
+        for rec in captured
     ), "expected an 'aborting run' error log line"
 
 
@@ -567,11 +567,11 @@ def test_chunked_mining_small_session_fast_path(tmp_cortex_dir, monkeypatch):
     assert insights[0]["title"] == "Small session insight"
 
 
-def test_chunked_mining_large_session_splits_chunks(tmp_cortex_dir, monkeypatch, caplog):
+def test_chunked_mining_large_session_splits_chunks(tmp_cortex_dir, monkeypatch):
     """A session larger than _MAX_PROMPT_CHARS must be split into multiple
     chunks, each sent to Haiku, and the insights aggregated across chunks.
     """
-    import logging
+    import structlog
 
     from memem import mining
     importlib.reload(mining)
@@ -599,7 +599,7 @@ def test_chunked_mining_large_session_splits_chunks(tmp_cortex_dir, monkeypatch,
 
     monkeypatch.setattr(mining.subprocess, "run", fake_run)
 
-    with caplog.at_level(logging.INFO, logger=mining.log.name):
+    with structlog.testing.capture_logs() as captured:
         insights = mining._summarize_session_haiku(messages)
 
     # Must have made more than one Haiku call (chunked path).
@@ -612,7 +612,7 @@ def test_chunked_mining_large_session_splits_chunks(tmp_cortex_dir, monkeypatch,
     )
     # Chunk-level progress must be logged.
     chunk_logs = [
-        rec for rec in caplog.records if "Mining chunk" in rec.getMessage()
+        rec for rec in captured if "Mining chunk" in rec.get("event", "")
     ]
     assert len(chunk_logs) == len(call_inputs), (
         f"expected {len(call_inputs)} chunk-progress log lines, got {len(chunk_logs)}"

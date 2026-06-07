@@ -1,13 +1,16 @@
 import json
-import logging
 import os
 import subprocess
 from pathlib import Path
 
-# Timeout for individual Haiku subprocess calls. Raised from 120s (v1.6) to 180s
-# to give large sessions more headroom without timing out prematurely.
-# Env-overridable for ops tuning without code changes.
-HAIKU_TIMEOUT_SECONDS = int(os.environ.get("MEMEM_HAIKU_TIMEOUT", "180"))
+import structlog
+
+from memem.haiku_prompts import (
+    _HAIKU_MERGE_SYSTEM,
+    _HAIKU_MINE_SYSTEM,
+    _HAIKU_PROCEDURAL_SYSTEM,
+    HAIKU_TIMEOUT_SECONDS,
+)
 
 # After this many consecutive subprocess timeouts on a single session, mark it
 # STATUS_COMPLETE with a skip message instead of retrying indefinitely.
@@ -48,7 +51,7 @@ from memem.session_state import (
 from memem.telemetry import _log_event
 from memem.transcripts import _strip_system_noise, parse_jsonl_session
 
-log = logging.getLogger("memem-miner")
+log = structlog.get_logger("memem-miner")
 
 # Minimum number of new bytes required to attempt incremental mining.
 # Below this threshold the "new content" is likely just a trailing newline
@@ -188,47 +191,6 @@ class FatalMiningError(MiningError):
     """Non-retryable storage/configuration failure."""
 
 
-_HAIKU_MINE_SYSTEM = (
-    "You are a knowledge extractor for an AI memory system. "
-    "You will receive a coding conversation. "
-    "Extract ONLY durable knowledge that a future AI session would need. "
-    "The most valuable memory prevents a future AI from making wrong assumptions "
-    "or the user from having to repeat themselves.\n\n"
-    "Output a JSON array of objects. Each object has:\n"
-    '- "title": short descriptive title (required)\n'
-    '- "project": project-name (or "general" if unclear) (required)\n'
-    '- "content": what was decided, confirmed, or built and why. Write for a '
-    "future AI that needs context. (required)\n"
-    '- "supersedes": (optional) string describing what prior decision this '
-    "reverses — only when the session explicitly overturns something\n\n"
-    '- "importance": integer 1-5 rating how important this is for a future AI session. '
-    "1=trivial fact, 2=useful info, 3=convention/pattern, 4=architecture decision, "
-    "5=critical user preference or correction (required)\n\n"
-    "SAVE these (durable knowledge):\n"
-    "- User preferences, conventions, and corrections\n"
-    "- Architecture decisions with rationale\n"
-    "- Environment facts, tool quirks, project structure\n"
-    "- Non-obvious lessons learned from failures\n\n"
-    "DO NOT save these (use transcript search instead):\n"
-    "- Task progress, session outcomes, what was worked on today\n"
-    "- Completed-work logs or TODO state\n"
-    "- Things that were discussed but ultimately rejected\n"
-    "- Trivial or obvious facts easily re-discovered from code\n"
-    "- Raw data dumps or temporary debugging state\n\n"
-    "Rules:\n"
-    "- Extract multiple distinct memories if the session covers multiple topics\n"
-    "- Each memory should be atomic and self-contained\n"
-    "- Do NOT add knowledge you weren't told\n"
-    "- If nothing worth saving, output []\n"
-    "- Output ONLY the JSON array, no other text"
-)
-
-
-_HAIKU_MERGE_SYSTEM = (
-    "Merge two memory entries about the same topic into one. "
-    "Keep all unique information. Prefer newer phrasing when they conflict. "
-    "Output only the merged text, no JSON, no explanation."
-)
 
 
 def _merge_memories(existing_content: str, new_content: str) -> str:
@@ -260,6 +222,28 @@ def _merge_memories(existing_content: str, new_content: str) -> str:
 
 def _mark_session(path: Path, status: str, message: str = "", attempts: int = 0, offset_bytes: int = 0, timeout_failures: int = 0) -> None:
     update_session_state(path, status=status, message=message, attempts=attempts, offset_bytes=offset_bytes, timeout_failures=timeout_failures)
+
+
+def _mark_session_progress(
+    path: Path,
+    stored_state: dict,
+    status: str,
+    message: str = "",
+    attempt_delta: int = 0,
+    offset_override: int | None = None,
+) -> None:
+    """Wrapper for _mark_session that reads attempts/offset/timeout_failures from stored_state."""
+    stored_attempts = int(stored_state.get("attempts", 0) or 0)
+    stored_offset = int(stored_state.get("offset_bytes", 0) or 0)
+    stored_timeout_failures = int(stored_state.get("timeout_failures", 0) or 0)
+    _mark_session(
+        path,
+        status,
+        message=message,
+        attempts=stored_attempts + attempt_delta,
+        offset_bytes=offset_override if offset_override is not None else stored_offset,
+        timeout_failures=stored_timeout_failures,
+    )
 
 
 # Per-Haiku-call char budget. Haiku 4.5 has a 200k-token input window
@@ -333,13 +317,11 @@ def _build_chunks(
         if len(chunks) >= _MAX_CHUNKS_PER_SESSION:
             remaining = n - i
             log.warning(
-                "Chunk cap hit: stopping at %d chunks, dropping %d remaining messages "
-                "(session is larger than %d chunks × %d chars ≈ %d MB of text)",
-                _MAX_CHUNKS_PER_SESSION,
-                remaining,
-                _MAX_CHUNKS_PER_SESSION,
-                max_chars,
-                (_MAX_CHUNKS_PER_SESSION * max_chars) // (1024 * 1024),
+                "Chunk cap hit: dropping remaining messages",
+                chunk_cap=_MAX_CHUNKS_PER_SESSION,
+                remaining=remaining,
+                max_chars=max_chars,
+                approx_mb=(_MAX_CHUNKS_PER_SESSION * max_chars) // (1024 * 1024),
             )
             break
 
@@ -655,15 +637,20 @@ def _summarize_session_haiku(messages: list[str]) -> list[dict]:
     # Chunked path
     chunks = _build_chunks(messages)
     log.info(
-        "Session exceeds fast-path budget (%d chars > %d), splitting into %d chunks",
-        total_chars, _MAX_PROMPT_CHARS, len(chunks),
+        "Session exceeds fast-path budget, splitting into chunks",
+        total_chars=total_chars,
+        max_chars=_MAX_PROMPT_CHARS,
+        chunks=len(chunks),
     )
     all_insights: list[dict] = []
     for i, chunk in enumerate(chunks, start=1):
         chunk_chars = sum(len(m) + 2 for m in chunk)
         log.info(
-            "Mining chunk %d/%d (%d chars, %d messages)",
-            i, len(chunks), chunk_chars, len(chunk),
+            "Mining chunk",
+            chunk=i,
+            total_chunks=len(chunks),
+            chars=chunk_chars,
+            messages=len(chunk),
         )
         # Any TransientMiningError here propagates out of the whole
         # function — per the pessimistic failure contract, one bad chunk
@@ -671,13 +658,17 @@ def _summarize_session_haiku(messages: list[str]) -> list[dict]:
         # chunk 1. The caller (mine_session) will mark STATUS_FAILED.
         chunk_insights = _mine_one_chunk(chunk)
         log.info(
-            "Chunk %d/%d: %d insights", i, len(chunks), len(chunk_insights),
+            "Chunk complete",
+            chunk=i,
+            total_chunks=len(chunks),
+            insights=len(chunk_insights),
         )
         all_insights.extend(chunk_insights)
 
     log.info(
-        "Chunked mining complete: %d chunks, %d total insights before dedup",
-        len(chunks), len(all_insights),
+        "Chunked mining complete",
+        chunks=len(chunks),
+        total_insights=len(all_insights),
     )
     return all_insights
 
@@ -748,22 +739,6 @@ def _is_agent_session(messages: list[str]) -> bool:
     )
 
 
-_HAIKU_PROCEDURAL_SYSTEM = (
-    "You are an AI assistant auditing a conversation for user corrections and preferences.\n\n"
-    "Given:\n"
-    "1. A conversation transcript\n"
-    "2. The user's current top-level instructions (from CLAUDE.md)\n\n"
-    "Identify any explicit user corrections in the session ('don't do X', 'stop doing Y', "
-    "'always Z', 'never Q'). Based on these, propose 0-3 specific instruction rewrites the "
-    "user would benefit from.\n\n"
-    "Each rewrite MUST be a JSON object with:\n"
-    '- "current_text": exact substring of the current instructions to replace, or null if brand new\n'
-    '- "proposed_text": new wording the agent should follow\n'
-    '- "reason": 1-sentence why — cite the specific user correction from this session\n\n'
-    "Output a JSON array of rewrite objects. If no rewrites are warranted, output [].\n"
-    "Output ONLY the JSON array, no other text."
-)
-
 # Env-overridable TTL for procedural suggestions before auto-archive.
 MEMEM_PROCEDURAL_TTL_DAYS = int(os.environ.get("MEMEM_PROCEDURAL_TTL_DAYS", "7"))
 
@@ -825,11 +800,11 @@ def _mine_procedural_suggestions(
             start_new_session=True,
         )
     except Exception as exc:
-        log.warning("Procedural Haiku call failed: %s", exc)
+        log.warning("Procedural Haiku call failed", exc=exc)
         return
 
     if result.returncode != 0:
-        log.warning("Procedural Haiku non-zero exit: %s", result.stderr.strip()[:200])
+        log.warning("Procedural Haiku non-zero exit", stderr=result.stderr.strip()[:200])
         return
 
     json_str = _extract_json_string(result.stdout.strip())
@@ -880,7 +855,7 @@ def _mine_procedural_suggestions(
         # with the same suggestion 3 times until they all auto-archive at 7d.
         existing, score = _find_best_match(body, scope_id="general")
         if existing and score > 0.6 and "kind:procedural-suggestion" in (existing.get("domain_tags") or []):
-            log.info("Procedural suggestion dedup: skipping (matches %s @ %.2f)", existing.get("id", "")[:8], score)
+            log.info("Procedural suggestion dedup: skipping", matches=existing.get("id", "")[:8], score=round(score, 2))
             continue
 
         title = f"Instruction suggestion: {proposed[:60]}"
@@ -901,10 +876,10 @@ def _mine_procedural_suggestions(
         mem["created_iso"] = now_str
         _save_memory(mem)
         saved_count += 1
-        log.info("Procedural suggestion saved: %s", title[:60])
+        log.info("Procedural suggestion saved", title=title[:60])
 
     if saved_count:
-        log.info("[miner] procedural-suggestion: saved %d suggestion(s) from session %s", saved_count, session_id[:8])
+        log.info("[miner] procedural-suggestion: saved suggestions", saved_count=saved_count, session=session_id[:8])
 
 
 def mine_session(jsonl_path: str) -> dict:
@@ -939,13 +914,13 @@ def mine_session(jsonl_path: str) -> dict:
     # forever; observable as miner CPU on idle sessions).
     if delta_bytes < _MIN_DELTA_BYTES:
         try:
-            _mark_session(
+            _mark_session_progress(
                 path,
+                current_state or {},
                 STATUS_COMPLETE,
                 message=f"delta too small ({delta_bytes} bytes); skipping mine, advancing offset",
-                attempts=stored_attempts,
-                offset_bytes=file_size_at_read,
-                timeout_failures=stored_timeout_failures,
+                attempt_delta=0,
+                offset_override=file_size_at_read,
             )
         except OSError:
             pass
@@ -954,12 +929,15 @@ def mine_session(jsonl_path: str) -> dict:
     # M-9: increment attempts NOW (before the Haiku call) so a SIGKILL between
     # the status-write and the Haiku response doesn't leave attempts un-incremented,
     # which would let the session re-queue indefinitely and burn Haiku quota.
-    _mark_session(path, STATUS_IN_PROGRESS, attempts=stored_attempts + 1, offset_bytes=stored_offset, timeout_failures=stored_timeout_failures)
+    _mark_session_progress(path, current_state or {}, STATUS_IN_PROGRESS, attempt_delta=1)
     try:
         if not messages:
-            _mark_session(path, STATUS_COMPLETE, "no human messages",
-                          attempts=stored_attempts + 1, offset_bytes=file_size_at_read,
-                          timeout_failures=stored_timeout_failures)
+            _mark_session_progress(
+                path, current_state or {}, STATUS_COMPLETE,
+                message="no human messages",
+                attempt_delta=1,
+                offset_override=file_size_at_read,
+            )
             return {
                 "session_id": session_id,
                 "memories_saved": 0,
@@ -968,9 +946,12 @@ def mine_session(jsonl_path: str) -> dict:
             }
 
         if _is_agent_session(messages):
-            _mark_session(path, STATUS_COMPLETE, "agent/module session — skipped",
-                          attempts=stored_attempts + 1, offset_bytes=file_size_at_read,
-                          timeout_failures=stored_timeout_failures)
+            _mark_session_progress(
+                path, current_state or {}, STATUS_COMPLETE,
+                message="agent/module session — skipped",
+                attempt_delta=1,
+                offset_override=file_size_at_read,
+            )
             return {
                 "session_id": session_id,
                 "memories_saved": 0,
@@ -980,9 +961,12 @@ def mine_session(jsonl_path: str) -> dict:
 
         insights = _summarize_session_haiku(messages)
         if not insights:
-            _mark_session(path, STATUS_COMPLETE, "nothing worth saving",
-                          attempts=stored_attempts + 1, offset_bytes=file_size_at_read,
-                          timeout_failures=stored_timeout_failures)
+            _mark_session_progress(
+                path, current_state or {}, STATUS_COMPLETE,
+                message="nothing worth saving",
+                attempt_delta=1,
+                offset_override=file_size_at_read,
+            )
             return {
                 "session_id": session_id,
                 "memories_saved": 0,
@@ -1031,12 +1015,12 @@ def mine_session(jsonl_path: str) -> dict:
                     # on the next cycle. Previously this was silently
                     # dropped (v0.10.2 fix: insight loss on transient
                     # Haiku errors).
-                    log.warning("Merge transient failure, will retry session: %s", exc)
+                    log.warning("Merge transient failure, will retry session", exc=exc)
                     raise
                 except ValueError as exc:
                     # Genuine validation failure (junk content, security
                     # threat) — drop the insight, don't retry.
-                    log.warning("Merge validation failed, skipping insight: %s", exc)
+                    log.warning("Merge validation failed, skipping insight", exc=exc)
                 continue
 
             # Score < 0.3 or merge failed — save as new
@@ -1060,12 +1044,12 @@ def mine_session(jsonl_path: str) -> dict:
                 vault_snapshot.append(mem)  # keep snapshot current for L0 cap accounting
                 memories_saved += 1
                 if mem.get("contradicts"):
-                    log.warning("Memory %s contradicts: %s", mem["id"][:8], mem["contradicts"])
+                    log.warning("Memory contradicts existing", memory_id=mem["id"][:8], contradicts=mem["contradicts"])
             except ObsidianUnavailableError as exc:
                 raise FatalMiningError(str(exc)) from exc
             except ValueError as exc:
                 # Validation failure (junk content, security threat) — skip insight, don't crash
-                log.warning("Skipping insight: %s", exc)
+                log.warning("Skipping insight", exc=exc)
                 continue
             except Exception as exc:
                 raise FatalMiningError(f"storage write failed: {exc}") from exc
@@ -1088,28 +1072,29 @@ def mine_session(jsonl_path: str) -> dict:
             if outcome != 0.0:
                 update_relevance_scores(session_id, outcome)
                 log.info(
-                    "Relevance feedback: session=%s outcome=%.2f",
-                    session_id[:8], outcome,
+                    "Relevance feedback",
+                    session=session_id[:8],
+                    outcome=round(outcome, 2),
                 )
         except Exception as exc:
-            log.warning("Relevance feedback failed (non-fatal): %s", exc)
+            log.warning("Relevance feedback failed (non-fatal)", exc=exc)
 
         # M-1 Procedural memory: mine user corrections and propose instruction
         # rewrites. Best-effort — never breaks the main extraction path.
         try:
             _mine_procedural_suggestions(messages, path, session_id)
         except Exception as exc:
-            log.warning("Procedural suggestion pass failed (non-fatal): %s", exc)
+            log.warning("Procedural suggestion pass failed (non-fatal)", exc=exc)
 
         # On success: advance offset to where we finished reading.
         # This ensures the next mine of this session only processes new content.
-        _mark_session(
+        _mark_session_progress(
             path,
+            current_state or {},
             STATUS_COMPLETE,
-            f"saved={memories_saved} merged={memories_merged} skipped={duplicates_skipped} deleted={memories_deleted} version={MINER_STATE_VERSION}",
-            attempts=stored_attempts,
-            offset_bytes=file_size_at_read,
-            timeout_failures=stored_timeout_failures,
+            message=f"saved={memories_saved} merged={memories_merged} skipped={duplicates_skipped} deleted={memories_deleted} version={MINER_STATE_VERSION}",
+            attempt_delta=0,
+            offset_override=file_size_at_read,
         )
         return {
             "session_id": session_id,
@@ -1137,8 +1122,10 @@ def mine_session(jsonl_path: str) -> dict:
                 # Session has timed out too many times; mark complete so the miner
                 # moves on rather than retrying indefinitely on a huge transcript.
                 log.warning(
-                    "Session %s skipped after %d Haiku CLI timeouts (MEMEM_MAX_SESSION_TIMEOUTS=%d)",
-                    session_id[:12], new_timeout_failures, MAX_SESSION_TIMEOUTS,
+                    "Session skipped after repeated Haiku CLI timeouts",
+                    session=session_id[:12],
+                    timeout_failures=new_timeout_failures,
+                    max_session_timeouts=MAX_SESSION_TIMEOUTS,
                 )
                 _mark_session(
                     path,
@@ -1164,10 +1151,10 @@ def mine_session(jsonl_path: str) -> dict:
                 timeout_failures=new_timeout_failures,
             )
         else:
-            _mark_session(path, STATUS_FAILED, str(exc), attempts=stored_attempts + 1, offset_bytes=stored_offset, timeout_failures=stored_timeout_failures)
+            _mark_session_progress(path, current_state or {}, STATUS_FAILED, message=str(exc), attempt_delta=1)
         raise
     except Exception as exc:
-        _mark_session(path, STATUS_FAILED, str(exc), attempts=stored_attempts + 1, offset_bytes=stored_offset, timeout_failures=stored_timeout_failures)
+        _mark_session_progress(path, current_state or {}, STATUS_FAILED, message=str(exc), attempt_delta=1)
         raise FatalMiningError(f"unexpected mining failure: {exc}") from exc
 
 
@@ -1238,8 +1225,11 @@ def mine_all(bypass_gate: bool = True) -> dict:
                 "fatal": True,
             })
             log.error(
-                "Fatal mining error on %s — aborting run (%d/%d sessions processed): %s",
-                path.stem[:12], total, len(failures), exc,
+                "Fatal mining error — aborting run",
+                session=path.stem[:12],
+                processed=total,
+                failures=len(failures),
+                exc=exc,
             )
             raise
         except TransientMiningError as exc:
@@ -1256,8 +1246,9 @@ def mine_all(bypass_gate: bool = True) -> dict:
                 "fatal": False,
             })
             log.warning(
-                "Transient mining failure on %s (will retry next run): %s",
-                path.stem[:12], exc,
+                "Transient mining failure (will retry next run)",
+                session=path.stem[:12],
+                exc=exc,
             )
             continue
         except MiningError as exc:
@@ -1271,8 +1262,9 @@ def mine_all(bypass_gate: bool = True) -> dict:
                 "fatal": False,
             })
             log.warning(
-                "Mining failure on %s (treating as transient): %s",
-                path.stem[:12], exc,
+                "Mining failure (treating as transient)",
+                session=path.stem[:12],
+                exc=exc,
             )
             continue
         if result.get("skipped"):
@@ -1297,9 +1289,9 @@ def mine_all(bypass_gate: bool = True) -> dict:
             for project in seen_projects:
                 consolidation_result = _consolidate_project(project)
                 if consolidation_result["merged"] > 0 or consolidation_result["deleted"] > 0:
-                    log.info("Consolidation: project=%s merged=%d deleted=%d", project, consolidation_result["merged"], consolidation_result["deleted"])
+                    log.info("Consolidation", project=project, merged=consolidation_result["merged"], deleted=consolidation_result["deleted"])
         except Exception as exc:
-            log.warning("Consolidation failed: %s", exc)
+            log.warning("Consolidation failed", exc=exc)
 
         # Refine playbooks — sweep ALL projects with enough memories, not just
         # seen_projects. The staleness hash in _playbook_refine makes this
@@ -1310,11 +1302,14 @@ def mine_all(bypass_gate: bool = True) -> dict:
             from memem.playbook import _playbook_sweep
             totals = _playbook_sweep()
             log.info(
-                "Playbook sweep: refreshed=%d noop=%d skipped=%d failed=%d",
-                totals["refreshed"], totals["noop"], totals["skipped"], totals["failed"],
+                "Playbook sweep",
+                refreshed=totals["refreshed"],
+                noop=totals["noop"],
+                skipped=totals["skipped"],
+                failed=totals["failed"],
             )
         except Exception as exc:
-            log.warning("Playbook sweep failed: %s", exc)
+            log.warning("Playbook sweep failed", exc=exc)
 
     return {
         "total_sessions": total,

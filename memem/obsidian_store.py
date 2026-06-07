@@ -13,7 +13,6 @@ import fcntl
 import functools
 import logging
 import os
-import pickle
 import re
 import tempfile
 import threading
@@ -22,6 +21,8 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+import msgpack
 
 
 def _atomic_write(path: Path, content: str) -> None:
@@ -71,54 +72,7 @@ _yaml: Any = None        # yaml module, loaded on first use
 _MEM_HANDLER: Any = None # _MemHandler singleton, created on first use
 
 
-_FRONTMATTER_STRICT_MODE = os.environ.get("MEMEM_FRONTMATTER_STRICT", "quarantine").lower()
-
-
-def _handle_malformed_frontmatter(md_file: Path, reason: str) -> None:
-    """Dispatch a malformed-frontmatter file per MEMEM_FRONTMATTER_STRICT.
-
-    Modes:
-      - skip       : log warning, leave the file in place
-      - quarantine : move to ~/.memem/quarantine/<original_relpath> (default)
-      - raise      : ValueError
-
-    The quarantine destination preserves the relative path under the vault root
-    so multiple files with the same name from different scopes don't collide.
-    """
-    if _FRONTMATTER_STRICT_MODE == "raise":
-        raise ValueError(f"Malformed frontmatter in {md_file}: {reason}")
-
-    if _FRONTMATTER_STRICT_MODE == "quarantine":
-        from memem.models import MEMEM_DIR
-        try:
-            quarantine_root = MEMEM_DIR / "quarantine"
-            # Preserve the file's name + a short hash of its source path so two
-            # files named "memory.md" from different folders don't clash.
-            import hashlib
-            src_hash = hashlib.sha1(str(md_file).encode()).hexdigest()[:8]
-            dest = quarantine_root / f"{src_hash}_{md_file.name}"
-            quarantine_root.mkdir(parents=True, exist_ok=True)
-            try:
-                md_file.rename(dest)
-            except OSError:
-                # Fall back to copy+unlink for cross-fs moves
-                import shutil
-                shutil.copy2(md_file, dest)
-                md_file.unlink(missing_ok=True)
-            log.warning(
-                "Quarantined malformed memory file %s → %s (%s)",
-                md_file, dest, reason,
-            )
-            return
-        except Exception as exc:  # noqa: BLE001 — quarantine must never crash the reader
-            log.warning(
-                "Quarantine failed for %s (%s); falling back to skip: %s",
-                md_file, reason, exc,
-            )
-            # Fall through to skip
-
-    # Default / skip
-    log.warning("Skipping malformed memory file %s (%s)", md_file, reason)
+from memem.quarantine import _handle_malformed_frontmatter
 
 
 def _ensure_frontmatter() -> None:
@@ -190,10 +144,11 @@ _VAULT_CACHE_FILES: dict[str, dict] = {}     # file path → {"mtime": float, "i
 _VAULT_CACHE_LOCK = threading.RLock()
 _VAULT_LAST_SWEEP: float = 0.0
 _VAULT_SWEEP_INTERVAL: float = 30.0  # seconds — tests override via _set_sweep_interval
-_VAULT_CACHE_PKL_VERSION = 1
-_VAULT_CACHE_PKL_PATH = MEMEM_DIR / ".vault-cache.pkl"
-_VAULT_PKL_LOADED: bool = False  # one-shot: only try pkl load once per process
-_VAULT_CACHE_DIRTY: bool = False  # set by event-driven updates, cleared by pkl flush
+_VAULT_CACHE_MSGPACK_VERSION = 1
+_VAULT_CACHE_MSGPACK_PATH = MEMEM_DIR / ".vault-cache.msgpack"
+_VAULT_CACHE_PKL_PATH = MEMEM_DIR / ".vault-cache.pkl"  # legacy — migration only
+_VAULT_PKL_LOADED: bool = False  # one-shot: only try cache load once per process
+_VAULT_CACHE_DIRTY: bool = False  # set by event-driven updates, cleared by flush
 
 
 def _set_sweep_interval(seconds: float) -> None:
@@ -213,10 +168,11 @@ def _trigger_sweep() -> None:
 
 
 def _reset_cache() -> None:
-    """Test hook: drop the entire cache and forget the pkl load attempt.
+    """Test hook: drop the entire cache and forget the cache load attempt.
 
-    Also removes the pkl file so a subsequent populate doesn't rehydrate
-    from stale disk state. Next read repopulates from the vault.
+    Also removes the msgpack file (and legacy pkl if present) so a subsequent
+    populate doesn't rehydrate from stale disk state. Next read repopulates
+    from the vault.
     """
     global _VAULT_LAST_SWEEP, _VAULT_PKL_LOADED
     with _VAULT_CACHE_LOCK:
@@ -224,52 +180,92 @@ def _reset_cache() -> None:
         _VAULT_CACHE_FILES.clear()
         _VAULT_LAST_SWEEP = 0.0
         _VAULT_PKL_LOADED = False
-    try:
-        if _VAULT_CACHE_PKL_PATH.exists():
-            _VAULT_CACHE_PKL_PATH.unlink()
-    except OSError:
-        pass
+    for _cache_path in (_VAULT_CACHE_MSGPACK_PATH, _VAULT_CACHE_PKL_PATH):
+        try:
+            if _cache_path.exists():
+                _cache_path.unlink()
+        except OSError:
+            pass
 
 
-def _load_pkl_cache() -> bool:
-    """Hydrate the in-memory cache from the pickle file on disk.
+def _load_vault_cache() -> bool:
+    """Hydrate the in-memory cache from the msgpack file on disk.
 
-    Returns True if the pickle was loaded successfully; False if absent,
+    Migration path: try msgpack first; if absent, attempt legacy pickle load
+    and delete the .pkl file on success so the next flush writes .msgpack.
+
+    Returns True if the cache was loaded successfully; False if absent,
     corrupt, or version-mismatched (caller should fall through to a full
-    parse). The subsequent mtime sweep corrects any drift since the pkl
-    was written, so stale-pkl risk is bounded.
+    parse). The subsequent mtime sweep corrects any drift since the cache
+    was written, so stale-cache risk is bounded.
     """
     global _VAULT_PKL_LOADED
     _VAULT_PKL_LOADED = True
-    if not _VAULT_CACHE_PKL_PATH.exists():
-        return False
-    try:
-        with open(_VAULT_CACHE_PKL_PATH, "rb") as fh:
-            payload = pickle.load(fh)
-    except (pickle.PickleError, EOFError, OSError, AttributeError, ImportError) as exc:
-        log.info("vault pkl unusable (%s); falling back to full parse", exc)
+
+    # --- Try msgpack cache ---
+    if _VAULT_CACHE_MSGPACK_PATH.exists():
+        try:
+            with open(_VAULT_CACHE_MSGPACK_PATH, "rb") as fh:
+                payload = msgpack.unpack(fh, raw=False)
+        except (msgpack.UnpackException, msgpack.UnpackValueError, EOFError, OSError, ValueError) as exc:
+            log.info("vault msgpack unusable (%s); falling back to full parse", exc)
+            try:
+                _VAULT_CACHE_MSGPACK_PATH.unlink()
+            except OSError:
+                pass
+            return False
+        if not isinstance(payload, dict) or payload.get("version") != _VAULT_CACHE_MSGPACK_VERSION:
+            return False
+        cache = payload.get("cache") or {}
+        files = payload.get("files") or {}
+        if not isinstance(cache, dict) or not isinstance(files, dict):
+            return False
+        with _VAULT_CACHE_LOCK:
+            _VAULT_CACHE.clear()
+            _VAULT_CACHE_FILES.clear()
+            _VAULT_CACHE.update(cache)
+            _VAULT_CACHE_FILES.update(files)
+        return True
+
+    # --- Legacy pickle migration ---
+    if _VAULT_CACHE_PKL_PATH.exists():
+        try:
+            import pickle  # noqa: PLC0415
+            with open(_VAULT_CACHE_PKL_PATH, "rb") as fh:
+                payload = pickle.load(fh)  # noqa: S301
+        except Exception as exc:  # noqa: BLE001
+            log.info("vault legacy pkl unusable (%s); falling back to full parse", exc)
+            try:
+                _VAULT_CACHE_PKL_PATH.unlink()
+            except OSError:
+                pass
+            return False
+        if not isinstance(payload, dict):
+            return False
+        cache = payload.get("cache") or {}
+        files = payload.get("files") or {}
+        if not isinstance(cache, dict) or not isinstance(files, dict):
+            return False
+        with _VAULT_CACHE_LOCK:
+            _VAULT_CACHE.clear()
+            _VAULT_CACHE_FILES.clear()
+            _VAULT_CACHE.update(cache)
+            _VAULT_CACHE_FILES.update(files)
+        # Delete the legacy pkl — next flush writes .msgpack
         try:
             _VAULT_CACHE_PKL_PATH.unlink()
+            log.info("Migrated vault cache from pickle to msgpack format")
         except OSError:
             pass
-        return False
-    if not isinstance(payload, dict) or payload.get("version") != _VAULT_CACHE_PKL_VERSION:
-        return False
-    cache = payload.get("cache") or {}
-    files = payload.get("files") or {}
-    if not isinstance(cache, dict) or not isinstance(files, dict):
-        return False
-    with _VAULT_CACHE_LOCK:
-        _VAULT_CACHE.clear()
-        _VAULT_CACHE_FILES.clear()
-        _VAULT_CACHE.update(cache)
-        _VAULT_CACHE_FILES.update(files)
-    return True
+        return True
+
+    return False
 
 
-def _save_pkl_cache() -> None:
+def _flush_vault_cache() -> None:
     """Write the current cache to disk for cross-process cold-start reuse.
 
+    Uses msgpack for safe, portable serialization (replaces legacy pickle).
     Atomic via tempfile + os.replace to avoid corrupting the file if the
     process dies mid-write. Called at the end of every sweep that changed
     anything; mutations within a process rely on the event-driven update
@@ -278,24 +274,24 @@ def _save_pkl_cache() -> None:
     MEMEM_DIR.mkdir(parents=True, exist_ok=True)
     with _VAULT_CACHE_LOCK:
         payload = {
-            "version": _VAULT_CACHE_PKL_VERSION,
+            "version": _VAULT_CACHE_MSGPACK_VERSION,
             "cache": dict(_VAULT_CACHE),
             "files": dict(_VAULT_CACHE_FILES),
         }
     try:
-        tmp_path = _VAULT_CACHE_PKL_PATH.with_suffix(".tmp")
+        tmp_path = _VAULT_CACHE_MSGPACK_PATH.with_suffix(".tmp")
         with open(tmp_path, "wb") as fh:
-            pickle.dump(payload, fh, protocol=pickle.HIGHEST_PROTOCOL)
-        os.replace(tmp_path, _VAULT_CACHE_PKL_PATH)
+            msgpack.pack(payload, fh, use_bin_type=True)
+        os.replace(tmp_path, str(_VAULT_CACHE_MSGPACK_PATH))
     except OSError as exc:
-        log.debug("vault pkl write failed: %s", exc)
+        log.debug("vault msgpack write failed: %s", exc)
 
 
 def _sweep_vault_cache() -> None:
     """Refresh the cache from disk: parse changed files, evict deleted ones.
 
     Cheap when nothing changed (just a stat per file). Called under
-    `_VAULT_CACHE_LOCK` by `_ensure_cache_warm`. Rewrites the pkl cache
+    `_VAULT_CACHE_LOCK` by `_ensure_cache_warm`. Rewrites the msgpack cache
     if any entries were added, changed, evicted, or the dirty flag was
     set by an event-driven update since the last sweep.
     """
@@ -308,7 +304,7 @@ def _sweep_vault_cache() -> None:
             _VAULT_CACHE_FILES.clear()
             _VAULT_CACHE_DIRTY = False
             if changed:
-                _save_pkl_cache()
+                _flush_vault_cache()
             return
         current_paths = {str(p) for p in OBSIDIAN_MEMORIES_DIR.glob("*.md")}
         changed = _VAULT_CACHE_DIRTY
@@ -338,16 +334,16 @@ def _sweep_vault_cache() -> None:
             changed = True
         _VAULT_CACHE_DIRTY = False
     if changed:
-        _save_pkl_cache()
+        _flush_vault_cache()
 
 
 def _ensure_cache_warm() -> None:
     """Populate the cache on first use; sweep periodically after that.
 
-    On cold start, tries the pickle cache first. If present and parseable,
-    the subsequent sweep only has to stat files and re-parse drifted ones
-    — an O(stat) operation — rather than paying O(parse-all) on every
-    process start.
+    On cold start, tries the msgpack cache first (with legacy pickle migration).
+    If present and parseable, the subsequent sweep only has to stat files and
+    re-parse drifted ones — an O(stat) operation — rather than paying
+    O(parse-all) on every process start.
     """
     global _VAULT_PKL_LOADED
     with _VAULT_CACHE_LOCK:
@@ -355,7 +351,7 @@ def _ensure_cache_warm() -> None:
         needs_sweep = (time.time() - _VAULT_LAST_SWEEP) >= _VAULT_SWEEP_INTERVAL
         needs_pkl_probe = needs_warm and not _VAULT_PKL_LOADED
     if needs_pkl_probe:
-        _load_pkl_cache()
+        _load_vault_cache()
     if needs_warm or needs_sweep:
         _sweep_vault_cache()
 
