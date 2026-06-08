@@ -65,10 +65,10 @@ else
     fail "exit code is $EC1, expected 0"
 fi
 
-if echo "$OUT1" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['hookSpecificOutput']['hookEventName']=='Stop'" 2>/dev/null; then
-    pass "JSON is valid with hookEventName=Stop"
+if [ -z "$OUT1" ]; then
+    pass "stdout is empty (Stop hook protocol: no JSON envelope)"
 else
-    fail "JSON invalid or hookEventName missing: $OUT1"
+    fail "stdout should be empty for Stop hook, got: $OUT1"
 fi
 
 # MEMEM_HOOK_DISABLE should short-circuit before any spawn.
@@ -97,10 +97,10 @@ else
     fail "exit code is $EC2, expected 0"
 fi
 
-if echo "$OUT2" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['hookSpecificOutput']['hookEventName']=='Stop'" 2>/dev/null; then
-    pass "JSON is valid with hookEventName=Stop"
+if [ -z "$OUT2" ]; then
+    pass "stdout is empty (Stop hook protocol: no JSON envelope)"
 else
-    fail "JSON invalid or hookEventName missing: $OUT2"
+    fail "stdout should be empty for Stop hook, got: $OUT2"
 fi
 
 # No opted-in marker → no spawn should occur.
@@ -133,10 +133,10 @@ else
     fail "exit code is $EC3, expected 0"
 fi
 
-if [ -n "$OUT3" ]; then
-    pass "output is non-empty"
+if [ -z "$OUT3" ]; then
+    pass "output is empty (Stop hook protocol)"
 else
-    fail "output is empty"
+    fail "output should be empty for Stop hook, got: $OUT3"
 fi
 
 # Give the detached subprocess a moment to write the sentinel.
@@ -153,10 +153,14 @@ else
 fi
 
 # -----------------------------------------------------------------------
-# Test 4: JSON validity — hookEventName=Stop assertion
+# Test 4: stdout empty (Stop hook protocol)
 # -----------------------------------------------------------------------
+# Stop hooks must NOT emit a hookSpecificOutput envelope. Claude Code rejects
+# the envelope shape with "Hook JSON output validation failed — (root): Invalid
+# input". Only SessionStart accepts hookSpecificOutput. The hook itself just
+# exits 0 silently; the mining work is detached background.
 echo ""
-echo "Test 4: JSON validity"
+echo "Test 4: stdout strictly empty"
 TEST_HOME4=$(mktemp -d)
 CLEANUP_DIRS+=("$TEST_HOME4")
 mkdir -p "$TEST_HOME4/.memem"
@@ -165,10 +169,10 @@ touch "$TEST_HOME4/.memem/.miner-opted-in"
 OUT4=$(echo "$STUB_JSON" | HOME="$TEST_HOME4" MEMEM_DIR="$TEST_HOME4/.memem" \
     MEMEM_PYTHON="$STUB_DIR/python3" bash "$HOOK" 2>/dev/null)
 
-if echo "$OUT4" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['hookSpecificOutput']['hookEventName']=='Stop'"; then
-    pass "python3 JSON parse + hookEventName=Stop assertion passed"
+if [ -z "$OUT4" ]; then
+    pass "Stop hook emits zero bytes on stdout"
 else
-    fail "JSON parse or assertion failed: $OUT4"
+    fail "Stop hook stdout should be empty, got: $OUT4"
 fi
 
 # -----------------------------------------------------------------------

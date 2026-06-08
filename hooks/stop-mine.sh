@@ -15,7 +15,6 @@ set -euo pipefail
 # Anti-recursion guard: skip if invoked from a memem-spawned headless claude -p call.
 # Without this, every memem mining or tournament Haiku call recursively fires memem hooks.
 if [ -n "${MEMEM_HOOK_DISABLE:-}" ]; then
-    echo '{"hookSpecificOutput":{"hookEventName":"Stop","additionalContext":""}}'
     exit 0
 fi
 
@@ -23,7 +22,6 @@ MEMEM_DIR="${MEMEM_DIR:-${CORTEX_DIR:-$HOME/.memem}}"
 
 # Opt-in check: do nothing unless the user has explicitly enabled the miner.
 if [ ! -f "$MEMEM_DIR/.miner-opted-in" ]; then
-    echo '{"hookSpecificOutput":{"hookEventName":"Stop","additionalContext":""}}'
     exit 0
 fi
 
@@ -71,6 +69,8 @@ if [ -n "$SID" ]; then
     )
 fi
 
-# Emit valid Stop hook JSON and return immediately.
-echo '{"hookSpecificOutput":{"hookEventName":"Stop","additionalContext":""}}'
+# Stop hooks should exit 0 with NO stdout (unlike SessionStart, the Stop hook
+# protocol does not accept `hookSpecificOutput` envelopes; emitting them gets
+# rejected with "Hook JSON output validation failed — (root): Invalid input").
+# The mining work is detached above; the hook itself just returns silently.
 exit 0

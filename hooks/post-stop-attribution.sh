@@ -187,52 +187,14 @@ except Exception:
     pass
 HOOKPY
 
-# 5. Mine-on-stop: trigger mine_delta for this session immediately on Stop.
-#    Uses a marker file to avoid double-mining the same session if the hook
-#    fires more than once. (v2.1.0: no daemon poll cycle anymore — the Stop
-#    hook IS the trigger; the dedicated stop-mine.sh handles the new path
-#    and this block stays as a defense-in-depth fallback.)
-if [ -n "$PLUGIN_ROOT" ] && [ "$PLUGIN_ROOT" != '${CLAUDE_PLUGIN_ROOT}' ]; then
-    # Extract session_id from the hook input we already read above.
-    _STOP_SESSION_ID=$(python3 -c "
-import json, sys
-try:
-    data = json.loads(open('$INPUT_FILE').read() or '{}')
-    print(data.get('session_id', ''))
-except Exception:
-    print('')
-" 2>/dev/null || true)
-
-    # v1.8.1: validate session_id is path-safe before using as a directory
-    # component. Hook input is normally Claude-Code-controlled, but the value
-    # is not authenticated; without this an adversarial input like "../foo"
-    # would cause `mkdir` to create directories outside the marker base.
-    if [ -n "$_STOP_SESSION_ID" ] && [[ "$_STOP_SESSION_ID" =~ ^[a-zA-Z0-9_-]+$ ]]; then
-        # H-2: use atomic mkdir as the race-free guard. Only the process that
-        # successfully creates the directory runs mine_session_delta; concurrent
-        # Stop events for the same session_id get a non-zero exit from mkdir
-        # and skip the mine call, preventing doubled Haiku cost.
-        _STOP_MARKER_DIR_BASE="$MEMEM_DIR/.stop-timestamps"
-        _STOP_LOCK_DIR="$_STOP_MARKER_DIR_BASE/$_STOP_SESSION_ID"
-        mkdir -p "$_STOP_MARKER_DIR_BASE"
-        if mkdir "$_STOP_LOCK_DIR" 2>/dev/null; then
-            # We won the race — fire mine_session_delta under a timeout.
-            # Failures are logged but never crash the hook.
-            mkdir -p "$MEMEM_DIR/logs"
-            # Pass session_id via env to avoid shell injection if the value
-            # ever contains characters that would break a Python string literal.
-            MEMEM_STOP_SESSION_ID="$_STOP_SESSION_ID" \
-            MEMEM_PLUGIN_ROOT="$PLUGIN_ROOT" \
-            setsid timeout --kill-after=5 "${MEMEM_MINE_TIMEOUT}" "${MEMEM_PYTHON:-python3}" -c '
-import os, sys
-sys.path.insert(0, os.environ["MEMEM_PLUGIN_ROOT"])
-from memem.mining import mine_session_delta
-result = mine_session_delta(os.environ["MEMEM_STOP_SESSION_ID"])
-print(result)
-' >> "$MEMEM_DIR/logs/mine-on-stop.log" 2>&1 || true
-            # Directory stays in place as the marker; future mkdir calls fail.
-        fi
-    fi
+# 5. Mine-on-stop: removed in v2.1.0. The previous block called the deleted
+#    `mine_session_delta()` function (whole module replaced by mine_delta.py).
+#    Mining now triggers via the dedicated `hooks/stop-mine.sh` Stop hook
+#    registered alongside this one in hooks.json. Keeping a placeholder here
+#    so the surrounding hook structure stays intact; this hook now does
+#    attribution only.
+if false; then :  # disabled — mining now lives in stop-mine.sh
+    :
 fi
 
 exit 0

@@ -69,12 +69,12 @@ def test_stop_hook_exits_zero_without_opt_in(tmp_path):
     assert result.returncode == 0, (
         f"hook exited non-zero without opt-in: stderr={result.stderr}"
     )
-    # Must emit valid JSON on stdout
-    payload = json.loads(result.stdout.strip())
-    assert isinstance(payload, dict), "hook must emit a JSON object"
-    # Stop hook shape
-    assert "hookSpecificOutput" in payload
-    assert payload["hookSpecificOutput"].get("hookEventName") == "Stop"
+    # Stop hooks must NOT emit hookSpecificOutput — Claude Code rejects that
+    # envelope shape for Stop with "Hook JSON output validation failed".
+    # The contract is: exit 0 silently. Only SessionStart accepts the envelope.
+    assert result.stdout == "", (
+        f"Stop hook stdout must be empty, got: {result.stdout!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -84,10 +84,12 @@ def test_stop_hook_exits_zero_without_opt_in(tmp_path):
 
 def test_stop_hook_with_opt_in_emits_valid_json(tmp_path):
     """With the .miner-opted-in marker present and a valid session_id, the hook
-    spawns a detached mine_delta child (fire-and-forget) and emits valid JSON.
+    spawns a detached mine_delta child (fire-and-forget) and exits 0 silently.
 
-    We verify: exit code 0, valid JSON output, correct Stop hook shape.
-    We do NOT wait for mine_delta since it's detached — its output is /dev/null.
+    Stop hooks must emit ZERO stdout (Claude Code rejects hookSpecificOutput
+    on Stop with "Hook JSON output validation failed — (root): Invalid input").
+    We verify: exit code 0, empty stdout, hook returns quickly. We do NOT wait
+    for mine_delta since it's detached — its output is /dev/null.
     """
     env = _base_env(tmp_path)
     memem_dir = tmp_path / ".memem"
@@ -123,10 +125,8 @@ def test_stop_hook_with_opt_in_emits_valid_json(tmp_path):
     assert result.returncode == 0, (
         f"hook exited non-zero with opt-in: stdout={result.stdout!r} stderr={result.stderr!r}"
     )
-    # Must emit valid JSON
-    payload = json.loads(result.stdout.strip())
-    assert isinstance(payload, dict), "hook must emit a JSON object"
-    assert "hookSpecificOutput" in payload
-    assert payload["hookSpecificOutput"].get("hookEventName") == "Stop"
-    # Hook must return quickly (mine_delta is detached)
-    assert "additionalContext" in payload["hookSpecificOutput"]
+    # Stop hook contract: empty stdout, exit 0. The detached mine_delta child
+    # does the actual work (we don't wait for it here).
+    assert result.stdout == "", (
+        f"Stop hook stdout must be empty, got: {result.stdout!r}"
+    )
