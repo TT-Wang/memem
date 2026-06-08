@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import importlib
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 from unittest import mock
 
@@ -64,9 +64,15 @@ def _make_procedural_mem(
 
 # ---------------------------------------------------------------------------
 # Test 1: mine_session emits a procedural suggestion when correction is found
+# (Skipped: mine_session and helpers _save_memory/_make_memory/_find_best_match
+# were removed from mining.py in the v2.1.0 slim refactor; procedural suggestion
+# logic now lives in mine_delta.py which uses a different calling convention.)
 # ---------------------------------------------------------------------------
 
+import pytest
 
+
+@pytest.mark.skip(reason="mine_session removed from mining.py in v2.1.0 slim refactor")
 def test_mine_session_emits_procedural_suggestion(tmp_vault, tmp_cortex_dir, tmp_path, monkeypatch):
     """When transcript has a clear user correction and CLAUDE.md exists,
     a kind:procedural-suggestion memory should be saved."""
@@ -152,9 +158,11 @@ def test_mine_session_emits_procedural_suggestion(tmp_vault, tmp_cortex_dir, tmp
 
 # ---------------------------------------------------------------------------
 # Test 2: No CLAUDE.md → procedural pass skipped
+# (Skipped: same reason as Test 1 — mine_session removed in v2.1.0)
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skip(reason="mine_session removed from mining.py in v2.1.0 slim refactor")
 def test_mine_session_no_claudemd_no_suggestion(tmp_vault, tmp_cortex_dir, tmp_path, monkeypatch):
     """If CLAUDE.md does not exist, the procedural pass is skipped entirely."""
     import json as _json
@@ -216,42 +224,7 @@ def test_mine_session_no_claudemd_no_suggestion(tmp_vault, tmp_cortex_dir, tmp_p
 
 # ---------------------------------------------------------------------------
 # Test 5: Old suggestions get auto-archived after TTL
+# (Removed: _archive_expired_procedural_suggestions lived in miner_daemon which
+# was deleted in the v2.1.0 daemon-removal refactor. TTL archival is no longer
+# part of the event-triggered mining pipeline.)
 # ---------------------------------------------------------------------------
-
-
-def test_old_suggestions_auto_archived(tmp_vault, tmp_cortex_dir, monkeypatch):
-    """A procedural-suggestion memory older than MEMEM_PROCEDURAL_TTL_DAYS is archived."""
-    import memem.obsidian_store as obs
-    importlib.reload(obs)
-
-    now = datetime.now(UTC)
-    old_iso = (now - timedelta(days=8)).isoformat()
-    old_mem = _make_procedural_mem(
-        title="Old suggestion to archive",
-        status="pending_review",
-        created_iso=old_iso,
-    )
-
-    # Track writes
-    updated_statuses: list[str] = []
-
-    def fake_write(mem: dict) -> None:
-        updated_statuses.append(mem.get("status", ""))
-
-    def fake_find(mem_id: str) -> dict | None:
-        if old_mem["id"] == mem_id or old_mem["id"].startswith(mem_id):
-            return dict(old_mem)
-        return None
-
-    monkeypatch.setattr("memem.miner_daemon.MEMEM_PROCEDURAL_TTL_DAYS", 7)
-
-    with mock.patch("memem.obsidian_store._obsidian_memories", return_value=[old_mem]):
-        with mock.patch("memem.obsidian_store._find_memory", side_effect=fake_find):
-            with mock.patch("memem.obsidian_store._write_obsidian_memory", side_effect=fake_write):
-                with mock.patch("memem.obsidian_store._cache_refresh_from_disk", return_value=None):
-                    from memem.miner_daemon import _archive_expired_procedural_suggestions
-
-                    count = _archive_expired_procedural_suggestions()
-
-    assert count == 1, f"Expected 1 archived suggestion, got {count}"
-    assert "expired" in updated_statuses, f"Expected status 'expired' in writes, got {updated_statuses}"

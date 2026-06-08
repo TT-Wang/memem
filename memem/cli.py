@@ -4,8 +4,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from memem.miner_protocol import FATAL_EXIT_CODE, TRANSIENT_EXIT_CODE
-from memem.mining import FatalMiningError, MiningError, mine_all, mine_session
+# v2.1.0: miner_protocol module deleted; constants inlined here.
+FATAL_EXIT_CODE = 75
+TRANSIENT_EXIT_CODE = 20
+# v2.1.0: mine_session, MiningError, FatalMiningError removed from mining.py — use mine_delta instead.
 from memem.models import INDEX_PATH
 from memem.obsidian_store import (
     _generate_index,
@@ -343,44 +345,67 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         return
 
     if cmd == "--mine-session" and len(argv) >= 3:
-        try:
-            print(json.dumps(mine_session(argv[2])))
-        except MiningError as exc:
-            print(str(exc), file=sys.stderr)
-            exit_code = FATAL_EXIT_CODE if isinstance(exc, FatalMiningError) else TRANSIENT_EXIT_CODE
-            raise SystemExit(exit_code)
+        # v2.1.0: route to mine_delta (replaces the removed mine_session function)
+        sid = argv[2]
+        # Try to find the transcript for this session id
+        projects_dir = Path.home() / ".claude" / "projects"
+        matches = list(projects_dir.rglob(f"{sid}.jsonl"))
+        if not matches:
+            print(f"No transcript found for session {sid}", file=sys.stderr)
+            raise SystemExit(TRANSIENT_EXIT_CODE)
+        result = subprocess.run(
+            [sys.executable, "-m", "memem.mine_delta", "--session-id", sid, "--transcript-path", str(matches[0])],
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            print(result.stderr.decode(errors="replace").strip(), file=sys.stderr)
+            raise SystemExit(TRANSIENT_EXIT_CODE)
+        print(json.dumps({"mined": sid}))
         return
 
     if cmd == "--mine-all":
-        from memem.session_state import clear_installed_at
+        from memem.session_state import find_settled_sessions
         from memem.storage import MINER_OPT_IN_MARKER
-        clear_installed_at()  # Mine ALL sessions, including pre-install history
-        # Explicit --mine-all is an opt-in signal; create the marker so the
-        # miner daemon will also auto-start on future server boots.
+
+        # Explicit --mine-all is an opt-in signal.
         MINER_OPT_IN_MARKER.parent.mkdir(parents=True, exist_ok=True)
         MINER_OPT_IN_MARKER.touch()
-        try:
-            print(json.dumps(mine_all()))
-        except MiningError as exc:
-            print(str(exc), file=sys.stderr)
-            exit_code = FATAL_EXIT_CODE if isinstance(exc, FatalMiningError) else TRANSIENT_EXIT_CODE
-            raise SystemExit(exit_code)
+
+        # v2.1.0: delegate to find_settled_sessions to preserve the v1.x safety
+        # filters (subagents/, -root/, memem-subprocess fossils, credential scan).
+        # bypass_settle=True so --mine-all (explicit user request) doesn't silently
+        # drop sessions whose last activity was <30 min ago.
+        eligible = find_settled_sessions(bypass_gate=True, bypass_settle=True)
+        total = len(eligible)
+        print(f"mine-all: found {total} eligible transcripts (subagent/-root/credential filters applied)")
+        ok = 0
+        failed = 0
+        for i, jsonl in enumerate(eligible, 1):
+            sid = jsonl.stem
+            print(f"  [{i}/{total}] mining {sid}...", file=sys.stderr)
+            result = subprocess.run(
+                [sys.executable, "-m", "memem.mine_delta", "--session-id", sid, "--transcript-path", str(jsonl)],
+                capture_output=True,
+            )
+            if result.returncode == 0:
+                ok += 1
+            else:
+                failed += 1
+                print(f"  [warn] mine_delta failed for {sid}: {result.stderr.decode(errors='replace').strip()}", file=sys.stderr)
+        print(json.dumps({"mined": ok, "failed": failed, "total": total}))
         return
 
     if cmd == "--miner-opt-in":
-        from memem.storage import MINER_OPT_IN_MARKER, _auto_start_miner
+        from memem.storage import MINER_OPT_IN_MARKER
         MINER_OPT_IN_MARKER.parent.mkdir(parents=True, exist_ok=True)
         MINER_OPT_IN_MARKER.touch()
-        _auto_start_miner()
-        print("memem miner opted in and started. Future server boots will auto-start it.")
+        print(f"v2.1.0: opt-in marker {MINER_OPT_IN_MARKER} created. The Stop hook will now trigger mine_delta on every conversation turn (no daemon).")
         return
 
     if cmd == "--miner-opt-out":
         from memem.storage import MINER_OPT_IN_MARKER
-        wrapper = str(Path(__file__).resolve().parent / "miner-wrapper.sh")
-        subprocess.run(["bash", wrapper, "stop"], capture_output=True)
         MINER_OPT_IN_MARKER.unlink(missing_ok=True)
-        print("memem miner opted out and stopped. It will not auto-start until you run --miner-opt-in or /memem-mine.")
+        print(f"v2.1.0: opt-in marker {MINER_OPT_IN_MARKER} removed. Mining will no longer trigger on Stop events. Re-create the marker (or run --miner-opt-in) to re-enable.")
         return
 
     if cmd == "--purge-mined":
@@ -644,22 +669,15 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         print(f"  Playbooks: {len(list(PLAYBOOK_DIR.glob('*.md')))} projects" if PLAYBOOK_DIR.exists() else "  Playbooks: none")
         print(f"  Events:    {sum(1 for _ in open(EVENT_LOG)) if EVENT_LOG.exists() else 0} logged")
 
-        # Miner status
-        wrapper = str(Path(__file__).resolve().parent / "miner-wrapper.sh")
-        miner_status = subprocess.run(["bash", wrapper, "status"], capture_output=True, text=True, timeout=5)
-        print(f"  Miner:     {miner_status.stdout.strip()}")
+        # Miner status (v2.1.0: event-triggered via Stop hook, no daemon)
+        from memem.storage import MINER_OPT_IN_MARKER
+        miner_state = "opted-in (Stop hook)" if MINER_OPT_IN_MARKER.exists() else "opted-out"
+        print(f"  Miner:     {miner_state}")
         print("=" * 40)
         return
 
-    if cmd in ("--miner-start", "--miner-stop", "--miner-status"):
-        from memem.storage import MINER_OPT_IN_MARKER
-        wrapper = str(Path(__file__).resolve().parent / "miner-wrapper.sh")
-        action = cmd.replace("--miner-", "")
-        if action == "start":
-            # Starting the miner is an opt-in signal.
-            MINER_OPT_IN_MARKER.parent.mkdir(parents=True, exist_ok=True)
-            MINER_OPT_IN_MARKER.touch()
-        subprocess.run(["bash", wrapper, action])
+    if cmd in ("--miner-start", "--miner-stop", "--miner-status", "--start-miner", "--stop-miner"):
+        print("v2.1.0: miner is now event-triggered via Stop hook; no daemon to start/stop. The opt-in marker ~/.memem/.miner-opted-in is still respected.")
         return
 
     if cmd == "--consolidate":

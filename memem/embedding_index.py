@@ -180,7 +180,7 @@ def _persist() -> None:
         # 2. Write embeddings.npy atomically: np.save → tmpfile, then os.replace.
         tmp_path = _EMB_PATH.with_suffix(_EMB_PATH.suffix + f".tmp.{os.getpid()}")
         np.save(str(tmp_path), _index_matrix)
-        os.replace(str(tmp_path), str(_EMB_PATH))
+        os.replace(str(tmp_path) + ".npy", str(_EMB_PATH))
     except Exception as exc:  # noqa: BLE001
         log.warning("embedding index persist failed: %s", exc)
 

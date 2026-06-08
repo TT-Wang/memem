@@ -158,3 +158,23 @@ print(json.dumps({
     }
 }))
 HOOKPY
+
+# v2.1.0 stale-session sweep — catch sessions where Stop hook never fired (Claude crash, kill -9, etc.)
+# Fire-and-forget detached mine_delta processes for un-mined JSONLs older than 10 min, cap at 3 parallel.
+
+MEMEM_STATE_DIR="${MEMEM_DIR:-${CORTEX_DIR:-$HOME/.memem}}"
+if [ -f "$MEMEM_STATE_DIR/.miner-opted-in" ]; then
+    MINED_LIST="$MEMEM_STATE_DIR/.mined_sessions"
+    touch "$MINED_LIST" 2>/dev/null || true
+    SPAWNED=0
+    for jsonl in $(find "$HOME/.claude/projects" -maxdepth 3 -name "*.jsonl" -type f -mmin +10 2>/dev/null); do
+        [ "$SPAWNED" -ge 3 ] && break
+        SID=$(basename "$jsonl" .jsonl)
+        # Skip if already mined
+        grep -Fxq "$SID" "$MINED_LIST" 2>/dev/null && continue
+        # Spawn detached
+        setsid nohup "${MEMEM_PYTHON:-python3}" -m memem.mine_delta --session-id "$SID" --transcript-path "$jsonl" </dev/null >/dev/null 2>&1 &
+        disown 2>/dev/null || true
+        SPAWNED=$((SPAWNED + 1))
+    done
+fi

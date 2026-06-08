@@ -10,6 +10,8 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 REPO = Path(__file__).resolve().parent.parent
 HOOKS = {
     "auto-recall": REPO / "hooks" / "auto-recall.sh",
@@ -84,6 +86,10 @@ class TestRunHaikuKnowledgeExtractionGuard:
         assert env.get("MEMEM_HOOK_DISABLE") == "1", "MEMEM_HOOK_DISABLE must be '1' in env"
 
 
+@pytest.mark.skip(
+    reason="_mine_procedural_suggestions and _detect_session_cwd removed from mining.py "
+           "in v2.1.0 slim refactor; procedural logic now lives in mine_delta.py"
+)
 class TestProceduralHaikuGuard:
     """Procedural Haiku call (_mine_procedural_suggestions) in mining.py must pass guard params."""
 

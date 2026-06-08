@@ -19,8 +19,8 @@ import threading
 import time
 from pathlib import Path
 
-from memem.miner_protocol import MINER_STATE_VERSION
 from memem.models import MEMEM_DIR, _now
+from memem.session_state import MINER_STATE_VERSION
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -149,6 +149,22 @@ def _migrate_jsonl(conn: sqlite3.Connection, jsonl_path: Path) -> None:
     except OSError:
         # Can't read — rename to legacy anyway and continue with empty DB.
         jsonl_path.rename(jsonl_path.with_suffix(".legacy"))
+        return
+
+    # v2.1.0: content-sniff guard. mine_delta._record_mined_session writes
+    # .mined_sessions as a plain list of session IDs (one per line), not as
+    # JSONL state records. Without this guard, _parse_state_line returns None
+    # for every line, the corrupt-backup logic fires, and the v2.1.0 dedup
+    # state file is destroyed on every server boot. Only skip migration when
+    # ALL non-blank lines look like session-ID strings (UUID-ish: alphanum +
+    # `.-_/`). Binary garbage and partial-JSON corruption will NOT match,
+    # so the existing corrupt-backup path still fires for real corruption.
+    import re  # noqa: PLC0415
+    _id_pat = re.compile(r"^[a-zA-Z0-9._/-]+$")
+    nonblank = [ln.strip() for ln in raw_text.splitlines() if ln.strip()]
+    if nonblank and all(_id_pat.match(ln) for ln in nonblank):
+        # All lines are session-ID-shaped — this is the v2.1.0 plain-list
+        # format, not a stale v1.x JSONL. Skip migration entirely.
         return
 
     rows = []

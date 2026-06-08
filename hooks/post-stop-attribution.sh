@@ -187,9 +187,11 @@ except Exception:
     pass
 HOOKPY
 
-# 5. Mine-on-stop: trigger incremental mining for this session immediately
-#    instead of waiting for the daemon's next poll cycle. Uses a marker file
-#    to avoid double-mining the same session if the hook fires more than once.
+# 5. Mine-on-stop: trigger mine_delta for this session immediately on Stop.
+#    Uses a marker file to avoid double-mining the same session if the hook
+#    fires more than once. (v2.1.0: no daemon poll cycle anymore — the Stop
+#    hook IS the trigger; the dedicated stop-mine.sh handles the new path
+#    and this block stays as a defense-in-depth fallback.)
 if [ -n "$PLUGIN_ROOT" ] && [ "$PLUGIN_ROOT" != '${CLAUDE_PLUGIN_ROOT}' ]; then
     # Extract session_id from the hook input we already read above.
     _STOP_SESSION_ID=$(python3 -c "

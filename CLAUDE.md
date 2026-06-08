@@ -55,7 +55,7 @@ Selective-recall tunables (v1.9.6+, env vars, all optional):
 |-----|---------|-----------|
 | `MEMEM_RECALL_MIN_CONFIDENCE` | `0.45` | Activation-confidence threshold for emitting context. Below this, slice is marked `should_emit_context=False` with `gating_reason="low_confidence"` and the hook suppresses `additionalContext`. Clamped to `[0.0, 1.0]`. |
 | `MEMEM_RECALL_MIN_ITEM_SCORE` | `0.0` | Per-item composite-score floor for recall results (0.0 = disabled). L0 project-identity anchors are always exempt. Clamped to `[0.0, 1.0]`. |
-| `MEMEM_RECALL_OOV_THRESHOLD` | `0.0` | Out-of-vault detection threshold (0.0 = disabled). When `> 0`, queries with no L0-title keyword overlap and all candidate scores below threshold return a stub with `gating_reason="out_of_vault"`. Daemon must be restarted for env-var changes to take effect. Clamped to `[0.0, 1.0]`. |
+| `MEMEM_RECALL_OOV_THRESHOLD` | `0.0` | Out-of-vault detection threshold (0.0 = disabled). When `> 0`, queries with no L0-title keyword overlap and all candidate scores below threshold return a stub with `gating_reason="out_of_vault"`. Env-var changes take effect on the next hook invocation (no daemon to restart in v2.1.0+). Clamped to `[0.0, 1.0]`. |
 
 **Graph traversal** — `memory_search` and `memory_get` automatically follow the `related[]` field one hop and include linked memories in a separate section.
 
@@ -91,30 +91,33 @@ Tag `memory_save` calls with a `type:*` tag to help recall-time grouping:
 
 **Backward compat:** these tags drive recall-time grouping only; they do not change storage. Untagged memories fall back to heuristic detection.
 
-## Starting the miner (opt-in)
+## Mining (event-triggered, opt-in)
 
-memem is **opt-in** as of v0.9.0 — install does not start any background processes. The miner daemon only runs once the user explicitly enables it. Opt-in is tracked by the marker file `~/.memem/.miner-opted-in`.
+memem mining triggers automatically on every Claude Code Stop event when the opt-in marker exists. No daemon to start or stop.
 
-When the user asks to start memem, start mining, enable memory extraction, or similar — **identify which of the two modes they want** and run the matching commands:
-
-**Mode 1 — "start mining new sessions" / "start the miner" / "enable memem" / "start memem"** (no history):
+**To enable:**
 ```bash
 mkdir -p ~/.memem && touch ~/.memem/.miner-opted-in
-bash "${CLAUDE_PLUGIN_ROOT}/memem/miner-wrapper.sh" start
 ```
-Then tell the user: the miner is running, it will mine new sessions automatically ~5 min after they end, and it will auto-start on future Claude Code launches.
 
-**Mode 2 — "mine everything" / "mine history" / "mine all my past sessions" / "include history"** (full history + ongoing):
+That's it. Each Stop event spawns a detached `mine_delta` subprocess that extracts memories from the delta of new turns since the last invocation (offset-tracked per session). Hook overhead is ~50ms; the Haiku call happens in background.
+
+**To backfill history:**
 ```bash
 mkdir -p ~/.memem && touch ~/.memem/.miner-opted-in
-nohup PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python3 -m memem.server --mine-all > ~/.memem/mine-all.log 2>&1 &
-bash "${CLAUDE_PLUGIN_ROOT}/memem/miner-wrapper.sh" start
+python3 -m memem.server --mine-all
 ```
-Then tell the user: history mining is running in the background (log at `~/.memem/mine-all.log`), the ongoing miner is also running, and they can continue working normally. Warn them if the session count is large that this may take up to an hour and uses Haiku API credits.
 
-**If unsure which mode the user wants, ask.** Don't default — the difference matters (API cost, time).
+This iterates over historic JSONL sessions and invokes mine_delta for each. Takes minutes for large histories; uses Haiku API credits.
 
-**To stop / opt out:** `python3 -m memem.server --miner-opt-out` (stops daemon and removes marker so it won't auto-start next time).
+**To opt out:**
+```bash
+rm ~/.memem/.miner-opted-in
+```
+
+(No daemon to stop — the hook just no-ops without the marker.)
+
+**Safety net:** SessionStart fires a "stale-session sweep" that scans for JSONL files older than 10 min that aren't in `~/.memem/.mined_sessions` and spawns mine_delta for up to 3 of them. Catches sessions where Stop never fired (Claude crash, kill -9, network drop).
 
 ## Available tools
 

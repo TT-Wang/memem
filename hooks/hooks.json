@@ -41,6 +41,11 @@
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/post-stop-attribution.sh\"",
             "timeout": 100
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/stop-mine.sh\"",
+            "timeout": 5
           }
         ]
       }

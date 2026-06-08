@@ -105,53 +105,19 @@ def test_codex_hook_manifest_excludes_pretooluse():
     assert "PreToolUse" in claude_hooks["hooks"]
 
 
-def test_miner_wrapper_uses_module_form():
-    """Regression guard: miner-wrapper.sh must invoke daemon via `python3 -m`."""
-    wrapper = (REPO_ROOT / "memem" / "miner-wrapper.sh").read_text()
-    assert "python3 -m memem.miner_daemon" in wrapper
-    assert "PYTHONPATH" in wrapper
-
-
-def test_miner_wrapper_status_runtime(tmp_path):
-    """Actually execute miner-wrapper.sh status — catches PYTHONPATH / import regressions."""
-    env = os.environ.copy()
-    env["MEMEM_DIR"] = str(tmp_path / ".memem")
-    env["MEMEM_OBSIDIAN_VAULT"] = str(tmp_path / "obsidian-brain")
-    (tmp_path / ".memem").mkdir()
-    result = subprocess.run(
-        ["bash", str(REPO_ROOT / "memem" / "miner-wrapper.sh"), "status"],
-        capture_output=True, text=True, timeout=15, env=env,
-    )
-    # Wrapper should not crash — either reports "not running" or "running", but exits 0
-    assert result.returncode == 0, f"wrapper failed: stdout={result.stdout} stderr={result.stderr}"
-    assert "Miner" in (result.stdout + result.stderr)
-    # Critical: the daemon invocation inside the wrapper must NOT have raised ModuleNotFoundError
-    assert "ModuleNotFoundError" not in (result.stdout + result.stderr)
-    assert "No module named" not in (result.stdout + result.stderr)
-
-
-def test_miner_wrapper_refuses_pytest_temp_state(tmp_path):
-    """Wrapper start must not leave real daemons running from pytest temp state."""
-    state = Path("/tmp/pytest-of-claude-user/pytest-999/test_wrapper/.memem")
-    env = os.environ.copy()
-    env["MEMEM_DIR"] = str(state)
-    env["MEMEM_OBSIDIAN_VAULT"] = str(tmp_path / "obsidian-brain")
-    result = subprocess.run(
-        ["bash", str(REPO_ROOT / "memem" / "miner-wrapper.sh"), "start"],
-        capture_output=True, text=True, timeout=15, env=env,
-    )
-
-    assert result.returncode == 0
-    assert "Refusing to start miner wrapper" in result.stdout
-    assert not (state / "miner-wrapper.pid").exists()
-
 
 def test_mine_cron_script_runs(tmp_path):
     """Actually execute mine-cron.sh — catches the PYTHONPATH bug that broke the cron path."""
+    import site
     env = os.environ.copy()
     env["HOME"] = str(tmp_path)  # redirect log directory into the tmpdir
     env["MEMEM_DIR"] = str(tmp_path / ".memem")
     env["MEMEM_OBSIDIAN_VAULT"] = str(tmp_path / "obsidian-brain")
+    # Preserve user site-packages in PYTHONPATH so deps like msgpack remain importable
+    # even when HOME is overridden to a temp dir (which hides ~/.local/lib/python3.11).
+    user_site = site.getusersitepackages()
+    existing_pp = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = f"{user_site}{os.pathsep}{existing_pp}" if existing_pp else user_site
     (tmp_path / "obsidian-brain" / "memem" / "memories").mkdir(parents=True)
     (tmp_path / "obsidian-brain" / "memem" / "playbooks").mkdir(parents=True)
     result = subprocess.run(

@@ -106,9 +106,9 @@ pgrep -f "memem.server --mine-all" > /dev/null && echo "MINING_HISTORY" || echo 
 
 Then show a single one-line state summary matching what the signals show:
 
-- If `OPTED_IN` + `MINING_HISTORY`: "⚙️ memem active — mining past history in background. New sessions will be mined automatically."
-- If `OPTED_IN` + `NOT_MINING_HISTORY`: "✅ memem active — miner running, new sessions mined automatically."
-- If `NOT_OPTED_IN`: "🟡 memem has N memories but the miner is stopped. Type `/memem-mine` to resume, or `/memem-welcome` to re-read the intro."
+- If `OPTED_IN` + `MINING_HISTORY`: "⚙️ memem active — backfilling past history in the background. New sessions are mined automatically on each Stop event."
+- If `OPTED_IN` + `NOT_MINING_HISTORY`: "✅ memem active — event-triggered mining enabled, new sessions extracted on each Stop event."
+- If `NOT_OPTED_IN`: "🟡 memem has N memories but mining is opted out. Type `/memem-mine` to enable, or `/memem-welcome` to re-read the intro."
 
 **B3. Tail (always, for returning users):**
 

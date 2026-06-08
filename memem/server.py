@@ -636,8 +636,9 @@ def _build_mcp():
 
         Do NOT use for:
         - Incremental per-conversation saves (use `memory_save` for single items)
-        - Mining Claude Code session logs (the background miner handles that
-          automatically; no manual import needed)
+        - Mining Claude Code session logs (the Stop-event-triggered
+          `mine_delta` subprocess handles that automatically; no manual
+          import needed)
 
         Returns: A summary like "Imported 12 memories from 18 candidates
         (rejected 6 duplicates)". Errors are returned as human-readable messages.

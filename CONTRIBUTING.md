@@ -61,7 +61,7 @@ Example: `feat: add schema_version field to memory frontmatter`
 memem has three layers:
 
 1. **Storage** — Obsidian markdown (source of truth) + SQLite FTS5 (search index)
-2. **Mining** — Background daemon extracts knowledge from session JSONL files
+2. **Mining** — Event-triggered subprocess: the Stop hook spawns a detached `mine_delta` per turn that extracts knowledge from JSONL deltas. Backfill of pre-install history is handled by `python3 -m memem.server --mine-all`.
 3. **Assembly** — Haiku synthesizes query-tailored briefings from memories
 
 Key modules:

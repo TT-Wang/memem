@@ -6,7 +6,4 @@ allowed-tools: [Bash]
 
 Run `PYTHONPATH="${CLAUDE_PLUGIN_ROOT}" python3 -m memem.server --status` and display the results.
 
-If the miner is not running, offer to start it:
-```bash
-bash "${CLAUDE_PLUGIN_ROOT}/memem/miner-wrapper.sh" start
-```
+Mining is event-triggered in v2.1.0+: it fires automatically on every Claude Code Stop event when `~/.memem/.miner-opted-in` exists. There is no daemon to start. If the opt-in marker is missing, suggest: `touch ~/.memem/.miner-opted-in`

@@ -10,6 +10,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
 
+## [2.1.0] - 2026-06-08 — v2.1.0: Event-Triggered Mining (Daemon Removal)
+
+The miner daemon is gone. Mining now triggers on every Claude Code `Stop` event via a detached subprocess, making memory extraction feel real-time. A `SessionStart` stale-session sweep provides a safety net for sessions where Stop never fired (crash, `kill -9`, network drop).
+
+### Files deleted
+- `memem/miner_daemon.py` — long-running daemon (~500 LOC)
+- `memem/miner-wrapper.sh` — wrapper/crash-guard/heartbeat script (~300 LOC)
+- `memem/miner_circuit_breaker.py` — hand-rolled circuit breaker (~200 LOC)
+- `memem/miner_errors.py` — TransientError / PermanentError taxonomy (~150 LOC)
+- `memem/miner_protocol.py` — exit codes and status constants (~100 LOC)
+- **~12 daemon test files** from `tests/` (`test_miner_daemon.py`, `test_miner_circuit_breaker.py`, `test_miner_protocol.py`, `test_miner_errors.py`, `test_miner_wrapper.py`, `test_miner_integration.py`, and related)
+- **Total daemon LOC deleted: ~1,500**
+
+### Files added
+- `memem/mine_delta.py` (~200 LOC) — event-triggered delta miner: reads JSONL from byte offset, filters new turns, calls `extract_from_text`, marks session, handles per-session flock and empty-streak backoff
+- `hooks/stop-mine.sh` — Stop event hook: checks opt-in marker, spawns detached `mine_delta` subprocess (~50ms hook overhead)
+- `tests/test_mine_delta.py` — unit tests for mine_delta module
+- `tests/test_stop_mine_hook.sh` — shell tests for stop-mine.sh hook
+- `tests/test_stop_hook_integration.py` — integration tests for Stop hook → mine_delta pipeline
+- `tests/test_stale_sweep.py` — tests for SessionStart stale-session sweep
+
+### Files modified
+- `memem/mining.py` — slimmed from 1321 → 348 LOC: daemon orchestration removed, `extract_from_text` and core Haiku prompt kept as the shared extraction primitive
+- `memem/session_state.py` — daemon-specific constants inlined and removed; session state reads simplified
+- `memem/session_state_db.py` — import updated to match slimmed session_state
+- `memem/cli.py` — daemon flags (`--miner-start`, `--miner-stop`, `--miner-status`) replaced with an informational message pointing to the new event-triggered design; flags still accepted but now no-op
+- `memem/server.py` — no changes needed (daemon auto-start path already behind dead code after mining.py slim)
+- `memem/status.py` — daemon health section replaced with event-triggered section (last Stop event time, streak counter, opt-in status)
+- `hooks/session-start.sh` — stale-session sweep added: scans JSONL files older than 10 min not in `.mined_sessions`, spawns up to 3 parallel `mine_delta` processes
+- `hooks/hooks.json` — Stop hook entry added pointing to `stop-mine.sh`
+- `skills/memem-status/SKILL.md` — updated to reflect event-triggered mining status output
+- `memem/embedding_index.py` — atomic-write bug fix for `np.save` (m0): `embeddings.npy` now written via tmpfile + `os.replace` to prevent torn writes
+
+### Design rationale
+
+The daemon pattern (miner_daemon.py + wrapper + circuit breaker + heartbeat + lock file) added ~1,500 LOC of infrastructure to solve a problem that Claude Code's native `Stop` event hook already solves natively. The EverMe-inspired event-triggered pattern eliminates all of that: no process to manage, no wrapper crash guard, no PID files, no circuit breaker. The tradeoff is token cost — many small Haiku calls (one per Stop event) vs one large call per session-end — but the realtime feel is worth it for interactive development. The stale-session sweep (up to 3 parallel `mine_delta` on SessionStart) provides the same crash-recovery guarantee the daemon's retry queue used to provide.
+
+### LOC delta
+- Deleted: ~1,500 daemon LOC + ~970 mining.py reduction = **~2,470 LOC deleted**
+- Added: ~200 LOC (mine_delta.py + stop-mine.sh + stale sweep)
+- Net: **~2,270 LOC removed**
+
+### Benchmark
+- 18-query benchmark: ≥70% precision (unchanged — same Haiku prompt + `extract_from_text`)
+- Hook latency: ~50ms (Stop hook returns immediately; Haiku call is detached)
+
 ## [2.0.0] - 2026-06-08 — "less is more" — Active Memory Slice rewrite
 
 **Breaking change**: schema rebuild from 18 sections → 2 (Working + Relevant). Retrieval pipeline rewritten from ~12,400 LOC to ~170 LOC (POC v3b architecture). Backward-incompatible by design — all v1.13 env-var flags and the legacy renderer are deleted.

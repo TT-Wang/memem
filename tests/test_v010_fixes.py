@@ -237,37 +237,6 @@ def test_find_settled_sessions_skips_lexie_project_by_default(tmp_cortex_dir, tm
     assert lexie_session not in results
 
 
-def test_miner_refuses_pytest_temp_state(monkeypatch):
-    """Miner daemons must not persist when tests point MEMEM_DIR at pytest temp state."""
-    monkeypatch.setenv(
-        "MEMEM_DIR",
-        "/tmp/pytest-of-claude-user/pytest-283/test_example/.lexie/memem-state",
-    )
-    monkeypatch.delenv("MEMEM_ALLOW_TEST_MINER", raising=False)
-
-    from memem import miner_daemon, models
-    importlib.reload(models)
-    importlib.reload(miner_daemon)
-
-    assert miner_daemon._is_ephemeral_test_state_dir()
-
-
-def test_miner_quota_limit_is_fatal(tmp_cortex_dir, tmp_path, monkeypatch):
-    """Hard Claude account limits should stop the daemon instead of retrying every poll."""
-    from memem import miner_daemon
-    importlib.reload(miner_daemon)
-
-    def fake_run_server_command(args):
-        raise miner_daemon.RetryableMinerError(
-            "You've hit your limit · resets Apr 24, 11am (UTC)"
-        )
-
-    monkeypatch.setattr(miner_daemon, "_run_server_command", fake_run_server_command)
-
-    with pytest.raises(miner_daemon.FatalMinerError):
-        miner_daemon._mine_session(tmp_path / "session.jsonl")
-
-
 def test_find_settled_sessions_skips_root_project(tmp_cortex_dir, tmp_path, monkeypatch):
     """v0.11.x fix: sessions under `.claude/projects/-root/` must be
     filtered out. That directory is where headless `claude -p` subprocess
@@ -410,8 +379,12 @@ def test_auto_recall_hook_uses_tempfile_for_large_message(tmp_path):
 
 
 # ─── v0.11.x: mine_all error handling (split Fatal vs Transient) ─────
+# (Skipped: mine_all, mine_session, TransientMiningError, FatalMiningError
+# removed from mining.py in v2.1.0 slim refactor; event-triggered path uses
+# mine_delta instead.)
 
 
+@pytest.mark.skip(reason="mine_all/TransientMiningError removed from mining.py in v2.1.0")
 def test_mine_all_logs_transient_and_continues(
     tmp_cortex_dir, tmp_path, monkeypatch
 ):
@@ -471,6 +444,7 @@ def test_mine_all_logs_transient_and_continues(
     )
 
 
+@pytest.mark.skip(reason="mine_all/FatalMiningError removed from mining.py in v2.1.0")
 def test_mine_all_aborts_on_fatal(
     tmp_cortex_dir, tmp_path, monkeypatch
 ):
@@ -535,6 +509,7 @@ class _FakeCompleted:
         self.stderr = stderr
 
 
+@pytest.mark.skip(reason="_MAX_PROMPT_CHARS and chunking removed from mining.py in v2.1.0")
 def test_chunked_mining_small_session_fast_path(tmp_cortex_dir, monkeypatch):
     """A small session (< _MAX_PROMPT_CHARS) must hit the fast path:
     exactly one subprocess.run call to Haiku, no chunking overhead.
@@ -567,6 +542,7 @@ def test_chunked_mining_small_session_fast_path(tmp_cortex_dir, monkeypatch):
     assert insights[0]["title"] == "Small session insight"
 
 
+@pytest.mark.skip(reason="_MAX_PROMPT_CHARS and chunking removed from mining.py in v2.1.0")
 def test_chunked_mining_large_session_splits_chunks(tmp_cortex_dir, monkeypatch):
     """A session larger than _MAX_PROMPT_CHARS must be split into multiple
     chunks, each sent to Haiku, and the insights aggregated across chunks.
@@ -619,6 +595,7 @@ def test_chunked_mining_large_session_splits_chunks(tmp_cortex_dir, monkeypatch)
     )
 
 
+@pytest.mark.skip(reason="TransientMiningError and chunking removed from mining.py in v2.1.0")
 def test_chunked_mining_any_chunk_failure_fails_whole_session(
     tmp_cortex_dir, monkeypatch
 ):

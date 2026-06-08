@@ -5,7 +5,14 @@ import sys
 import time
 from pathlib import Path
 
-from memem.miner_protocol import MINER_STATE_VERSION, STATUS_COMPLETE, STATUS_FAILED
+# v2.1.0: inlined from deleted miner_protocol.py
+MINER_STATE_VERSION = "2"
+STATUS_PENDING = "pending"
+STATUS_IN_PROGRESS = "in_progress"
+STATUS_COMPLETE = "complete"
+STATUS_FAILED = "failed"
+STATUS_BLOCKED = "blocked"
+STATUS_RETRYING = "retrying"
 from memem.models import (
     MEMEM_DIR,
     _env,
@@ -360,6 +367,7 @@ def _session_contains_credentials(jsonl_path: Path) -> bool:
 def find_settled_sessions(
     states: dict[str, dict] | None = None,
     bypass_gate: bool = False,
+    bypass_settle: bool = False,
 ) -> list[Path]:
     """Find session JSONLs settled long enough to mine.
 
@@ -367,6 +375,12 @@ def find_settled_sessions(
     ``--mine-all`` to process pre-install history. Default behavior respects
     the marker if present, but does NOT recreate it on first read (callers
     that want the gate must call ``_ensure_installed_at`` first).
+
+    ``bypass_settle=True`` ALSO skips the SETTLE_SECONDS mtime gate. v2.1.0:
+    --mine-all backfill is an explicit user request — there is no reason to
+    silently drop sessions whose last activity was <30 min ago. Without this
+    flag, an opted-in user invoking /memem-mine-history immediately after a
+    busy day sees "0 settled transcripts" and assumes the command is broken.
     """
     now = time.time()
     states = states or {}
@@ -402,7 +416,7 @@ def find_settled_sessions(
             # Only mine sessions created after install (unless gate cleared)
             if installed_at > 0 and stat.st_mtime < installed_at:
                 continue
-            if (now - stat.st_mtime) <= SETTLE_SECONDS:
+            if not bypass_settle and (now - stat.st_mtime) <= SETTLE_SECONDS:
                 continue
             if session_is_terminal(jsonl_path, states.get(jsonl_path.stem)):
                 continue

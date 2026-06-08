@@ -145,10 +145,10 @@ def test_real_proc_smoke():
 
 
 # ---------------------------------------------------------------------------
-# Miner integration smoke test
+# Reaper module integration smoke test
 # ---------------------------------------------------------------------------
 
-def test_miner_imports_reaper():
-    """reap_orphan_haiku_procs must be importable from miner_daemon namespace."""
-    from memem.miner_daemon import reap_orphan_haiku_procs as _fn  # noqa: PLC0415
+def test_reaper_importable_from_reaper_module():
+    """reap_orphan_haiku_procs must be importable from memem.reaper namespace."""
+    from memem.reaper import reap_orphan_haiku_procs as _fn  # noqa: PLC0415
     assert callable(_fn)

@@ -20,7 +20,10 @@ from pathlib import Path
 
 import pytest
 
-from memem.miner_protocol import STATUS_COMPLETE, STATUS_FAILED, STATUS_RETRYING
+# Status constants (previously in miner_protocol, now inlined after daemon removal)
+STATUS_COMPLETE = "complete"
+STATUS_FAILED = "failed"
+STATUS_RETRYING = "retrying"
 
 # ---------------------------------------------------------------------------
 # Helpers

@@ -25,14 +25,14 @@ Force-display the full memem welcome (the brand-new-user view), even if the user
 **Step 3 — How it works:**
 
 1. You work normally in Claude Code — nothing to do.
-2. A background miner watches for completed sessions (once you've opted in via `/memem-mine` or `/memem-mine-history`).
-3. ~5 minutes after a session ends, it extracts durable memories via Claude Haiku and writes them to `~/obsidian-brain/memem/memories/`.
+2. Once you opt in via `/memem-mine` or `/memem-mine-history`, the Stop hook fires on every conversation turn and spawns a detached `mine_delta` subprocess.
+3. `mine_delta` extracts durable memories from the new turns via Claude Haiku and writes them to `~/obsidian-brain/memem/memories/` — memories appear seconds after each turn ends. No background daemon, no 5-minute wait.
 4. Your next session starts with relevant context pre-loaded from memory — no re-explaining the project.
 
 **Step 4 — Mining options:**
 
-- **`/memem-mine`** — start the miner, mine only new sessions going forward
-- **`/memem-mine-history`** — start the miner + mine all past history (uses Haiku API credits)
+- **`/memem-mine`** — opt in to event-triggered mining (mines new sessions as they happen via the Stop hook)
+- **`/memem-mine-history`** — opt in + backfill all past history (uses Haiku API credits)
 
 Or just tell Claude:
 
@@ -48,8 +48,8 @@ If the user is unsure, recommend **`/memem-mine`** as the default.
 - `/memem-welcome` — this screen (re-show intro)
 - `/memem-status` — detailed memory system status
 - `/memem-doctor` — preflight health check with fix instructions
-- `/memem-mine` — start the miner (new sessions only)
-- `/memem-mine-history` — start the miner + mine past history
+- `/memem-mine` — opt in to event-triggered mining (new sessions only)
+- `/memem-mine-history` — opt in + backfill past history
 
 **MCP tools** (Claude calls these automatically when useful):
 - `memory_save`, `memory_recall`, `memory_list`, `memory_import`, `transcript_search`, `context_assemble`
@@ -66,4 +66,4 @@ If the user asks "what should I do now?" or seems undecided, answer with one sho
 
 **Step 8 — Opt-out:**
 
-To stop the miner and opt out: `python3 -m memem.server --miner-opt-out`
+To opt out of event-triggered mining: `rm ~/.memem/.miner-opted-in`. No daemon to stop — the Stop hook just no-ops when the marker is missing.

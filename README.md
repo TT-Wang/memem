@@ -26,9 +26,21 @@ DO NOT "fix" this URL — `glama.ai/mcp/servers/TT-Wang/memem` returns 404.
 
 ## What is memem?
 
-memem is a Claude Code plugin that gives Claude persistent memory across sessions. A background miner extracts durable lessons (decisions, conventions, bug fixes, preferences) from your completed sessions, stores them as markdown in an Obsidian vault, and automatically surfaces relevant ones as an Active Memory Slice working state. An explicit narrative assembly path still exists, but the default runtime context is slice-first.
+memem is a Claude Code plugin that gives Claude persistent memory across sessions. An event-triggered miner (Stop-hook → detached `mine_delta` subprocess) extracts durable lessons (decisions, conventions, bug fixes, preferences) from each new conversation turn, stores them as markdown in an Obsidian vault, and automatically surfaces relevant ones as an Active Memory Slice working state. An explicit narrative assembly path still exists, but the default runtime context is slice-first.
 
 It's **local-first**: no cloud services, no API keys required, no vendor lock-in. Everything lives in `~/obsidian-brain/memem/memories/` as human-readable markdown.
+
+### What's new in v2.1.0 (event-triggered mining)
+
+The miner daemon is gone. `miner_daemon.py`, `miner-wrapper.sh`, `miner_circuit_breaker.py`, `miner_errors.py`, and `miner_protocol.py` (~1,500 LOC) have been deleted. Mining now triggers on every Claude Code Stop event via a detached subprocess.
+
+- **Stop hook** (`hooks/stop-mine.sh`) spawns `mine_delta` as a detached background process on every `Stop` event. Hook overhead is ~50ms; extraction happens in background after the hook returns.
+- **`memem/mine_delta.py`** — new module (~200 LOC): reads the JSONL session file from a byte offset tracked per session, filters to new turns since the last invocation, calls the same Haiku `extract_from_text` function, and marks the session in `~/.memem/.mined_sessions`.
+- **Stale-session sweep** — the `SessionStart` hook now scans for JSONL files older than 10 min that aren't in `.mined_sessions` and spawns up to 3 parallel `mine_delta` processes. Catches sessions where Stop never fired (Claude crash, `kill -9`, network drop).
+- **Per-session flock** — `mine_delta` acquires an `fcntl.flock` on a lock file per session so concurrent Stop events on the same session don't race.
+- **Adaptive empty-streak backoff** — if the last 3 consecutive Stop events yielded zero memories, the next 5 Haiku calls are skipped. Resets on any non-empty result.
+- **Token cost** is ~5–20× higher per session vs v2.0.0's session-end batching (many small Haiku calls instead of one big one), but mining feels real-time — memories appear seconds after each conversation turn.
+- **Extraction quality unchanged** — the same Haiku prompt and `extract_from_text` function from `mining.py` are used. The 18-query benchmark still passes at ≥70% precision.
 
 ### What's new in v2.0.0 ("less is more")
 
@@ -175,7 +187,7 @@ Hybrid retrieval gating (v1.9+) — opt in to reduce hook overhead on trivial tu
 Selective recall (v1.9.6+) — suppress context injection when the slice is low-confidence or out-of-vault:
 - **`MEMEM_RECALL_MIN_CONFIDENCE=0.45`** — minimum activation confidence required to emit context. Below this, the hook emits a "0 items (low confidence)" systemMessage and suppresses `additionalContext`.
 - **`MEMEM_RECALL_MIN_ITEM_SCORE=0.0`** — per-item composite-score floor for recall results (0.0 = disabled). L0 project-identity anchors are always exempt.
-- **`MEMEM_RECALL_OOV_THRESHOLD=0.0`** — out-of-vault detection threshold (0.0 = disabled). When set (e.g. 0.3), queries with no L0 keyword overlap and all candidate scores below threshold emit "0 items (out of vault)" and suppress context. Daemon must be restarted for env-var changes to take effect.
+- **`MEMEM_RECALL_OOV_THRESHOLD=0.0`** — out-of-vault detection threshold (0.0 = disabled). When set (e.g. 0.3), queries with no L0 keyword overlap and all candidate scores below threshold emit "0 items (out of vault)" and suppress context. Env-var changes take effect on the next hook invocation (no daemon to restart in v2.1.0+).
 
 Recommended for high-frequency sessions: `export MEMEM_INJECTION_MODE=hybrid`
 
@@ -226,7 +238,7 @@ If you are unsure, start with **`/memem-mine`**. It is the safer and cheaper def
 
 At session start, the SessionStart hook tries to prime a slice-first working state for the current project scope. On each user prompt, the UserPromptSubmit hook regenerates the slice for the current query. If you just installed memem and have no relevant context yet, the hooks stay quiet and Claude proceeds normally.
 
-You work normally. The miner daemon runs silently in the background. When your session ends and settles for 5 minutes, the miner extracts memories from the transcript using Claude Haiku and writes them to your vault.
+You work normally. When each conversation turn completes, the Stop hook spawns `mine_delta` in the background to extract memories from the new turns using Claude Haiku and write them to your vault. No daemon, no 5-minute wait — memories appear seconds after each turn.
 
 **During the session:** every user prompt goes through `active_memory_slice`, which builds a structured working-state briefing from the relevant memories, playbooks, transcripts, graph neighbors, environment facts, and current artifacts. The hooks automatically pass session id and working directory, and the prompt hook infers a task mode when the host does not provide one, so ongoing work can carry constraints, artifacts, and tensions forward across slices. You see an active slice prompt with goals, constraints, background, decisions, failure patterns, open tensions, and artifacts. Claude starts with the current working state instead of a generic briefing.
 
@@ -332,8 +344,8 @@ Semantics:
 - `/memem` — welcome, status, help
 - `/memem-status` — memory count, projects, search DB size, miner health
 - `/memem-doctor` — preflight health check with fix instructions for any blocker
-- `/memem-mine` — start the miner daemon manually (normally auto-starts)
-- `/memem-mine-history` — opt-in: mine all your pre-install Claude Code sessions
+- `/memem-mine` — opt in to event-triggered mining (touches `~/.memem/.miner-opted-in`; new sessions mined automatically via the Stop hook)
+- `/memem-mine-history` — opt-in + backfill all pre-install Claude Code sessions
 
 ## What if the `claude` CLI isn't on my PATH?
 
@@ -349,8 +361,8 @@ For deeper debugging:
 
 ```bash
 tail -f ~/.memem/bootstrap.log              # first-run shim log
-tail -f ~/.memem/miner.log                  # miner daemon log
 cat ~/.memem/events.jsonl                   # memory operation audit trail
+cat ~/.memem/mine_delta.log                 # stop-hook mining log (v2.1.0+)
 python3 -m memem.server --status            # detailed status dump
 python3 -m memem.server --integrity-check   # PRAGMA integrity_check on every DB
 ```
@@ -358,14 +370,14 @@ python3 -m memem.server --integrity-check   # PRAGMA integrity_check on every DB
 ## How does the mining pipeline work?
 
 ```
-Session ends → miner daemon sees the JSONL file in ~/.claude/projects/
-  → Waits 5 minutes for the file to "settle" (no more writes)
+Claude Code Stop event fires → stop-mine.sh hook spawns mine_delta (detached, ~50ms)
+  → mine_delta reads session JSONL from byte offset (new turns only)
   → Filters to human messages + assistant prose (strips tool calls, system reminders)
-  → One Haiku call with the full context: "extract durable lessons"
+  → One Haiku call with the delta context: "extract durable lessons"
   → Haiku returns JSON array of memory candidates
   → Each candidate runs: security scan → dedup check → contradiction detection → save
-  → Index rebuilt, per-project playbooks grown and refined
-  → Session marked COMPLETE in ~/.memem/.mined_sessions
+  → Offset advanced; session marked in ~/.memem/.mined_sessions
+  → SessionStart stale-sweep catches any sessions where Stop never fired (crash, kill -9)
 ```
 
 ## How does the recall pipeline work?
@@ -398,11 +410,8 @@ memem is split into small, focused modules:
 - `storage.py` — server-lifecycle helpers (PID management, miner auto-start)
 - `server.py` — thin MCP entrypoint (FastMCP imported lazily)
 - `cli.py` — command dispatcher for non-MCP entrypoints
-- `mining.py` — session mining pipeline (Haiku extraction)
-- `miner_daemon.py` — long-running daemon with structlog JSON output, semaphore concurrency cap, heartbeat
-- `miner_protocol.py` — exit codes (FATAL=75 / TRANSIENT=20) and status constants
-- `miner_errors.py` — `TransientError` / `PermanentError` taxonomy (PermanentError default)
-- `miner_circuit_breaker.py` — hand-rolled CB; opens after 5 consecutive PermanentErrors, 5min cooldown
+- `mining.py` — session mining pipeline (Haiku extraction, `extract_from_text`)
+- `mine_delta.py` — v2.1.0: event-triggered delta miner; reads new turns since last offset, calls `extract_from_text`, marks session complete
 - `session_state.py` / `session_state_db.py` — SQLite WAL state for the miner (auto-migrates from JSONL on first run)
 
 **Multi-signal recall scoring:**
@@ -456,7 +465,7 @@ contradicts: [id1]            # flagged conflicts
 | `MEMEM_DIR` | `~/.memem` | State directory (PID files, search DB, logs) |
 | `MEMEM_OBSIDIAN_VAULT` | `~/obsidian-brain` | Vault location |
 | `MEMEM_EXTRA_SESSION_DIRS` | (none) | Colon-separated extra session dirs to mine |
-| `MEMEM_MINER_SETTLE_SECONDS` | `300` | Seconds to wait before mining a completed session |
+| `MEMEM_MINER_SETTLE_SECONDS` | `1800` | (legacy) Settle-window seconds. In v2.1.0 both the Stop hook AND `--mine-all` bypass this gate; retained only for forward-compat with future tooling that may opt into it. |
 | `MEMEM_SKIP_SYNC` | `0` | Bootstrap skips `uv sync` when set to `1` (dev only) |
 
 ## Setup Obsidian (optional, recommended)
@@ -481,7 +490,7 @@ memem works without Obsidian — it just writes markdown. But Obsidian gives you
 git clone https://github.com/TT-Wang/memem.git
 cd memem
 pip install -e ".[dev]"
-pytest             # 428 tests
+pytest             # ~391 tests (14 skipped)
 ruff check .       # lint
 mypy memem         # type check
 ```
