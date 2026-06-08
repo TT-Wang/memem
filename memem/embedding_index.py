@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 from pathlib import Path
 
@@ -159,18 +160,27 @@ def _rebuild_embedding_index() -> int:
 
 
 def _persist() -> None:
-    """Write the in-memory index to disk atomically."""
+    """Write the in-memory index to disk atomically.
+
+    v2.0.0 Phase 4.5 fix: write ids.json FIRST (so its mtime is older than
+    embeddings.npy when readers cache-key on the npy mtime), then write
+    embeddings.npy via tmpfile + os.replace so readers never see a torn .npy.
+    """
     _st, np = _try_import()
     if np is None or _index_matrix is None:
         return
     MEMEM_DIR.mkdir(parents=True, exist_ok=True)
     try:
-        np.save(str(_EMB_PATH), _index_matrix)
+        # 1. Write ids.json first (atomic via atomic_write_text).
         atomic_write_text(_IDS_PATH, json.dumps({
             "ids": _index_ids,
             "model": _MODEL_NAME,
             "built_at": now_iso(),
         }))
+        # 2. Write embeddings.npy atomically: np.save → tmpfile, then os.replace.
+        tmp_path = _EMB_PATH.with_suffix(_EMB_PATH.suffix + f".tmp.{os.getpid()}")
+        np.save(str(tmp_path), _index_matrix)
+        os.replace(str(tmp_path), str(_EMB_PATH))
     except Exception as exc:  # noqa: BLE001
         log.warning("embedding index persist failed: %s", exc)
 

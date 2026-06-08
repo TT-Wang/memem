@@ -152,42 +152,6 @@ def test_excluded_memory_ids_for_query_skips_unmatched_classes(tmp_vault, tmp_co
 
 
 # ---------------------------------------------------------------------------
-# Test 10: active_slice_engine excludes lessons-targeted memories
-# ---------------------------------------------------------------------------
-
-def test_active_slice_engine_excludes_lessoned_memories(tmp_vault, tmp_cortex_dir):
-    from memem import lessons, obsidian_store
-    importlib.reload(obsidian_store)
-    importlib.reload(lessons)
-
-    # Save a memory that would normally be recalled for "JWT auth"
-    mem = obsidian_store._make_memory(
-        content="JWT secret key for authentication must be validated carefully for auth setup.",
-        title="JWT auth secret",
-        project="general",
-        source_type="user",
-        importance=4,
-    )
-    obsidian_store._save_memory(mem)
-    memory_id = mem["id"]
-
-    # Record a lesson targeting this memory for JWT queries
-    lessons.record_lesson(
-        targeted_memory_id=memory_id,
-        query_class="JWT auth",
-        anti_pattern="Do not use JWT auth secret memory for general JWT auth queries",
-        evidence="This memory caused hallucinated JWT config",
-        source="user",
-    )
-
-    from memem.active_slice_engine import generate_candidates
-    bundle = generate_candidates("JWT auth setup guide", "general")
-    memory_candidates = bundle.get("memory_candidates", [])
-    candidate_ids = [c.get("memory_id") for c in memory_candidates]
-    assert memory_id not in candidate_ids
-
-
-# ---------------------------------------------------------------------------
 # Test 11: multiple lessons target same memory for different classes
 # ---------------------------------------------------------------------------
 

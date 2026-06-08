@@ -138,36 +138,6 @@ def test_log_slice_attribution_writes_event(tmp_cortex_dir):
 
 
 # ---------------------------------------------------------------------------
-# record_slice_attribution
-# ---------------------------------------------------------------------------
-
-def test_record_slice_attribution_iterates_all_memory_items(tmp_cortex_dir):
-    """Slice with 3 items; mock log_slice_attribution; verify called 3 times."""
-    from memem.active_slice_engine import record_slice_attribution
-
-    slice_data = {
-        "slice_id": "test-slice-001",
-        "query": "how do I test things",
-        "items": [
-            {"memory_id": "mem00001", "title": "Testing basics", "content": "Use pytest"},
-            {"memory_id": "mem00002", "title": "Fixtures guide", "content": "Use conftest"},
-            {"memory_id": "mem00003", "title": "Mocking tips", "content": "Use unittest.mock"},
-        ],
-    }
-
-    with (
-        patch("memem.telemetry.log_slice_attribution") as mock_log,
-        # Ensure judge never fires (sample_rate=0 via env already, but be explicit)
-        patch("memem.attribution.should_run_judge", return_value=False),
-    ):
-        record_slice_attribution(slice_data, "response about testing with pytest")
-
-    assert mock_log.call_count == 3
-    called_ids = {call.args[1] for call in mock_log.call_args_list}
-    assert called_ids == {"mem00001", "mem00002", "mem00003"}
-
-
-# ---------------------------------------------------------------------------
 # citation_match — semantic branch (m5)
 # ---------------------------------------------------------------------------
 

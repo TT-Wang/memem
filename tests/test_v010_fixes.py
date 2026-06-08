@@ -404,9 +404,9 @@ def test_auto_recall_hook_uses_tempfile_for_large_message(tmp_path):
     )
 
     assert result.returncode == 0, f"hook crashed on large input: {result.stderr}"
-    # Must emit valid JSON
+    # Must emit valid JSON (v2.0: hook returns {} when no vault/context available)
     data = json.loads(result.stdout)
-    assert "hookSpecificOutput" in data
+    assert isinstance(data, dict)
 
 
 # ─── v0.11.x: mine_all error handling (split Fatal vs Transient) ─────

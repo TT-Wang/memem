@@ -89,12 +89,12 @@ def test_plugin_json_points_at_bootstrap_shim():
 
 
 def test_hook_references_new_package_path():
-    """Regression guard: auto-recall.sh must reference memem and not the legacy cortex_server path."""
+    """Regression guard: auto-recall.sh must reference v2.0.0 retrieve+render path."""
     hook = (REPO_ROOT / "hooks" / "auto-recall.sh").read_text()
     assert "cortex_server" not in hook
-    assert "memem.server" in hook
-    assert "--query-file" in hook
-    assert '"slice"' in hook
+    # v2.0.0: hook imports retrieve+render directly, no slice_daemon socket
+    assert "memem.retrieve" in hook
+    assert "memem.render" in hook
 
 
 def test_codex_hook_manifest_excludes_pretooluse():
@@ -222,7 +222,9 @@ def test_auto_recall_hook_handles_large_prompt_without_argv_overflow(tmp_path):
     )
 
     assert result.returncode == 0, result.stderr
+    # v2.0.0: hook returns {} when no results (empty vault) instead of empty
+    # additionalContext. Either shape is valid — what we're testing is "no argv overflow".
     payload = json.loads(result.stdout)
-    assert payload["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
-    assert payload["hookSpecificOutput"]["additionalContext"] == ""
+    if payload:
+        assert payload["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
     assert "Argument list too long" not in result.stderr

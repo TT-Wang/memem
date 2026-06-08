@@ -92,47 +92,6 @@ def test_search_excludes_invalidated_memories(tmp_vault, tmp_cortex_dir):
 
 
 # ---------------------------------------------------------------------------
-# Test 4: _gather_l0_anchors excludes invalidated memories
-# ---------------------------------------------------------------------------
-
-
-def test_l0_anchor_excludes_invalidated(tmp_vault, tmp_cortex_dir):
-    import importlib
-
-    from memem import models, obsidian_store
-    importlib.reload(models)
-    importlib.reload(obsidian_store)
-
-    from memem.active_slice_engine import _gather_l0_anchors
-    from memem.obsidian_store import (
-        _make_memory,
-        _write_obsidian_memory,
-        invalidate_memory,
-    )
-
-    l0_mem = _make_memory(
-        content="This project is a memory system for Claude Code sessions.",
-        title="Project identity",
-        project="testproject",
-        layer=0,
-    )
-    _write_obsidian_memory(l0_mem)
-
-    # Before invalidation: anchor should be present
-    before = _gather_l0_anchors("testproject")
-    before_ids = [c.get("memory_id", "") for c in before]
-    assert l0_mem["id"] in before_ids, "L0 memory must appear as anchor before invalidation"
-
-    # Invalidate it
-    invalidate_memory(l0_mem["id"])
-
-    # After invalidation: anchor must NOT be returned
-    after = _gather_l0_anchors("testproject")
-    after_ids = [c.get("memory_id", "") for c in after]
-    assert l0_mem["id"] not in after_ids, "Invalidated L0 memory must not appear as anchor"
-
-
-# ---------------------------------------------------------------------------
 # Test 5: invalidated memory is still findable via explicit get (history preserved)
 # ---------------------------------------------------------------------------
 

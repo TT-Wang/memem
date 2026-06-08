@@ -318,42 +318,28 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         import memem.settings as _memem_settings
         if _memem_settings.MEMEM_INJECTION_MODE == "tool":
             return
-        from memem.active_slice_engine import (
-            active_slice_response,
-            generate_active_memory_slice_with_writeback,
-            generate_prompt_context,
-        )
-
-        runtime_environment = environment or None
-        if writeback_preview or auto_commit_safe:
-            writeback_result = generate_active_memory_slice_with_writeback(
-                query,
-                scope_id=scope,
-                environment=runtime_environment,
-                use_llm=use_llm,
-                auto_commit_safe=auto_commit_safe,
-                dry_run=not auto_commit_safe,
-            )
-            if raw_json:
-                print(json.dumps(writeback_result, indent=2, sort_keys=True))
-            else:
-                print(generate_prompt_context(
-                    query,
-                    scope_id=scope,
-                    environment=runtime_environment,
-                    use_llm=use_llm,
-                    mode="slice",
-                    slice_obj=writeback_result["slice"],
-                ))
+        # v2.0.0: active_slice_engine removed. The slice CLI path now calls
+        # retrieve()+render_slice() directly (same pipeline as auto-recall.sh).
+        try:
+            from memem.render import render_slice
+            from memem.retrieve import retrieve
+        except ImportError:
+            print("memem.retrieve / memem.render not available.")
             return
 
-        print(active_slice_response(
-            query,
-            scope_id=scope,
-            environment=runtime_environment,
-            use_llm=use_llm,
-            raw_json=raw_json,
-        ))
+        results = retrieve(query, k=8)
+        working: dict = {}
+        if environment:
+            if environment.get("task_mode"):
+                working["task_mode"] = environment["task_mode"]
+            if environment.get("recent_actions"):
+                working["recent_actions"] = list(environment["recent_actions"])[:3]
+
+        md = render_slice(query, results, working)
+        if raw_json:
+            print(json.dumps({"content": md, "query": query, "scope_id": scope}))
+        else:
+            print(md)
         return
 
     if cmd == "--mine-session" and len(argv) >= 3:

@@ -3,6 +3,21 @@
 import importlib
 
 import pytest
+import structlog
+
+
+@pytest.fixture(autouse=True)
+def reset_structlog_after_each_test():
+    """Reset structlog global configuration after every test.
+
+    Prevents structlog's PrintLogger from retaining a reference to a
+    capsys-captured stdout file after the capsys context ends, which
+    causes 'ValueError: I/O operation on closed file' in subsequent tests
+    that call logging code (e.g. test_attribution_hook.py contaminating
+    test_cli.py tests).
+    """
+    yield
+    structlog.reset_defaults()
 
 
 @pytest.fixture
@@ -33,14 +48,11 @@ def tmp_cortex_dir(tmp_path, monkeypatch):
     state.mkdir()
     monkeypatch.setenv("MEMEM_DIR", str(state))
     monkeypatch.delenv("CORTEX_DIR", raising=False)
-    from memem import delta_commit, graph_index, models, search_index, telemetry
+    from memem import graph_index, models, search_index, telemetry
     importlib.reload(models)
     importlib.reload(telemetry)
     importlib.reload(search_index)
     importlib.reload(graph_index)
-    # delta_commit binds DELTA_AUDIT_LOG / DELTA_STATE_DIR at import — without
-    # reload, commit_deltas in tests writes to the live ~/.memem/ paths.
-    importlib.reload(delta_commit)
     return state
 
 

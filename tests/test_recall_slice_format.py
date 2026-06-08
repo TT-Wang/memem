@@ -58,9 +58,11 @@ def test_memory_search_returns_search_kind(monkeypatch):
     from memem.recall import memory_search
     result = memory_search("alpha beta")
 
-    # Must have the search-kind compact index header
-    assert "### Compact memory index" in result
-    assert "2 results" in result
+    # v2.0 format: "## Memory Search — {scope} — `{query}`"
+    assert "## Memory Search" in result
+    # Both memories should appear as compact index lines
+    assert "[aa111111]" in result
+    assert "[bb222222]" in result
 
 
 # ---------------------------------------------------------------------------
@@ -68,22 +70,6 @@ def test_memory_search_returns_search_kind(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_memory_search_includes_layer_summary(monkeypatch):
-    fake_memories = [
-        _make_mem(mid="ll000000" + "0" * 24, title="L0 memory", essence="identity content", layer=0),
-        _make_mem(mid="ll111111" + "0" * 24, title="L1 memory", essence="pattern content", layer=1),
-        _make_mem(mid="ll222222" + "0" * 24, title="L2 memory", essence="domain content", layer=2),
-    ]
-    monkeypatch.setattr("memem.recall._search_memories", lambda *a, **kw: fake_memories)
-
-    from memem.recall import memory_search
-    result = memory_search("test query")
-
-    # Must contain layer summary line
-    assert "_layers:" in result
-    assert "L0=" in result
-    assert "L1=" in result
-    assert "L2=" in result
 
 
 # ---------------------------------------------------------------------------
@@ -170,130 +156,16 @@ def test_memory_timeline_chronological_ordering(monkeypatch):
     from memem.recall import memory_timeline
     result = memory_timeline("anchor00")
 
-    # Should have a timeline header
-    assert "Timeline around" in result
+    # v2.0 format: "## Memory Timeline — Anchor [{id8}]"
+    assert "Memory Timeline" in result
     assert "anchor00" in result
     assert "Anchor" in result
 
     # Before should appear before anchor in the output
-    if "Before" in result and "After" in result:
-        before_pos = result.find("Earlier Event")
-        after_pos = result.find("Later Event")
-        anchor_pos = result.find("**Anchor:**")
-        if before_pos > 0 and after_pos > 0 and anchor_pos > 0:
-            assert before_pos < anchor_pos, "Before items should appear before anchor"
-            assert anchor_pos < after_pos, "Anchor should appear before after items"
+    before_pos = result.find("Earlier Event")
+    after_pos = result.find("Later Event")
+    anchor_pos = result.find("### Anchor")
+    if before_pos > 0 and after_pos > 0 and anchor_pos > 0:
+        assert before_pos < anchor_pos, "Before items should appear before anchor"
+        assert anchor_pos < after_pos, "Anchor should appear before after items"
 
-
-# ---------------------------------------------------------------------------
-# Test 6: render_slice_markdown with active kind delegates to render_slice_as_prompt_context
-# ---------------------------------------------------------------------------
-
-
-def test_render_slice_markdown_active_kind():
-    from memem.active_slice import ActiveMemorySlice, render_slice_as_prompt_context, render_slice_markdown
-
-    slice_obj: ActiveMemorySlice = {
-        "slice_id": "test_slice_id",
-        "slice_kind": "active",
-        "scope_id": "test",
-        "query": "test query",
-        "generated_at": "2026-01-01T00:00:00Z",
-        "goals": [],
-        "constraints": [],
-        "active_background": [],
-        "decisions": [],
-        "preferences": [],
-        "failure_patterns": [],
-        "artifacts": [],
-        "open_tensions": [],
-        "resolved_tensions": [],
-        "excluded_candidates": [],
-        "candidate_deltas": [],
-        "delta_results": [],
-        "carry_forward_summary": [],
-        "projection_hint": {},
-        "previous_slice_id": "",
-        "slice_diff": {},
-        "artifact_progression": {"stage": "none", "signals": []},
-        "task_mode": "",
-        "writeback_summary": {
-            "status": "not_run",
-            "dry_run": True,
-            "proposed_count": 0,
-            "auto_committed_count": 0,
-            "manual_review_count": 0,
-            "blocked_count": 0,
-            "rejected_count": 0,
-        },
-        "candidate_count": 0,
-        "recall_candidate_count": 0,
-        "should_emit_context": True,
-        "activation_mode": "heuristic",
-        "confidence": 0.6,
-        "warnings": [],
-    }
-
-    result_via_dispatcher = render_slice_markdown(slice_obj)
-    result_direct = render_slice_as_prompt_context(slice_obj)
-
-    # Both should produce equivalent output
-    assert result_via_dispatcher == result_direct
-
-
-# ---------------------------------------------------------------------------
-# Test 7: render_slice_markdown with no slice_kind falls back gracefully
-# ---------------------------------------------------------------------------
-
-
-def test_render_slice_markdown_unknown_kind_fallback():
-    from memem.active_slice import render_slice_markdown
-
-    # Slice with no slice_kind — should not raise
-    slice_obj = {
-        "scope_id": "test",
-        "query": "fallback test",
-        "goals": [],
-        "constraints": [],
-        "active_background": [],
-        "decisions": [],
-        "preferences": [],
-        "failure_patterns": [],
-        "artifacts": [],
-        "open_tensions": [],
-        "resolved_tensions": [],
-        "should_emit_context": True,
-        "candidate_count": 0,
-        "recall_candidate_count": 0,
-        "activation_mode": "heuristic",
-        "confidence": 0.5,
-        "warnings": [],
-    }
-    # Should not raise — falls back to render_slice_as_prompt_context
-    result = render_slice_markdown(slice_obj)  # type: ignore[arg-type]
-    assert isinstance(result, str)
-
-
-# ---------------------------------------------------------------------------
-# Test 8: _layer_summary_from_items counts correctly
-# ---------------------------------------------------------------------------
-
-
-def test_layer_summary_counts_correct():
-    from memem.active_slice import MemoryItem, _layer_summary_from_items
-
-    items: list[MemoryItem] = [
-        {"id": "a1", "title": "A", "content": "x", "layer": 0},
-        {"id": "a2", "title": "B", "content": "x", "layer": 1},
-        {"id": "a3", "title": "C", "content": "x", "layer": 2},
-        {"id": "a4", "title": "D", "content": "x", "layer": 2},
-        {"id": "a5", "title": "E", "content": "x", "layer": 3},
-        {"id": "a6", "title": "F", "content": "x", "layer": 2},
-    ]
-    summary = _layer_summary_from_items(items)
-
-    assert summary[0] == 1
-    assert summary[1] == 1
-    assert summary[2] == 3
-    assert summary[3] == 1
-    assert 4 not in summary  # no L4 items

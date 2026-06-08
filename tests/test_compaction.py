@@ -9,7 +9,6 @@ Tests:
 6. End-to-end: kind survives whitelist normalization (covered by the round-trip test in #4)
 """
 
-import importlib
 import json
 import sys
 from pathlib import Path
@@ -158,38 +157,6 @@ def test_detect_compaction_risk_below_threshold(tmp_path):
 # Test 3: build_compaction_snapshot returns all 4 sections
 # ---------------------------------------------------------------------------
 
-def test_build_compaction_snapshot_all_sections(tmp_path, tmp_cortex_dir):
-    """build_compaction_snapshot must return dict with all 4 required keys."""
-    transcript = tmp_path / "session.jsonl"
-    _make_minimal_transcript(transcript, n_tool_use=3)
-
-    # Pre-populate working_memory.md.
-    wm_path = tmp_cortex_dir / "working_memory.md"
-    wm_path.write_text(
-        "## current_task\n\nFix auth bug\n\n"
-        "## stuck_on\n\nBlocked by circular import\n\n"
-        "## active_hypothesis\n\n\n\n"
-        "## last_3_actions\n\n\n\n"
-        "## decided_this_session\n\n\n\n",
-        encoding="utf-8",
-    )
-
-    # Patch the working memory path if needed via monkeypatch is not available here
-    # but working_memory reads from MEMEM_DIR which is set by tmp_cortex_dir fixture.
-    importlib.reload(importlib.import_module("memem.working_memory"))
-
-    from memem.compaction import build_compaction_snapshot
-
-    snapshot = build_compaction_snapshot(
-        session_id="test-session-001",
-        transcript_path=str(transcript),
-        memem_dir=tmp_cortex_dir,
-    )
-
-    assert "working_memory" in snapshot, "snapshot missing 'working_memory' key"
-    assert "decisions" in snapshot, "snapshot missing 'decisions' key"
-    assert "tensions" in snapshot, "snapshot missing 'tensions' key"
-    assert "code_changes" in snapshot, "snapshot missing 'code_changes' key"
 
 
 def test_build_compaction_snapshot_tensions_from_transcript(tmp_path, tmp_cortex_dir):

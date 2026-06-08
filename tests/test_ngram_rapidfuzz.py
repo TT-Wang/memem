@@ -105,42 +105,6 @@ def test_find_best_match_low_score_for_unrelated_content(tmp_vault, tmp_cortex_d
     assert score <= 0.5, f"Unrelated content should score <= 0.5, got {score:.3f}"
 
 
-def test_find_best_match_preserves_duplicate_reject_threshold(tmp_vault, tmp_cortex_dir):
-    """_find_best_match must return >= 0.7 for true duplicates so that
-    delta_policy._DUPLICATE_REJECT_THRESHOLD=0.7 still gates writeback correctly.
-
-    This is the key regression guard for the rapidfuzz swap.
-    """
-    from memem import delta_policy, obsidian_store
-
-    importlib.reload(obsidian_store)
-    importlib.reload(delta_policy)
-
-    existing = obsidian_store._make_memory(
-        content="Persist delta audit entries in an append-only jsonl trail under the memem state directory.",
-        title="Delta audit trail",
-        project="memem",
-    )
-    obsidian_store._save_memory(existing)
-
-    # Feed the exact same essence text back — this should be blocked as a duplicate.
-    decision = delta_policy.evaluate_delta_proposal({
-        "delta_id": "delta_regression_dup",
-        "delta_type": "save_new_memory",
-        "proposed_title": "Delta audit trail duplicate",
-        "proposed_content": existing["essence"],
-        "confidence": 0.94,
-        "source_slice_id": "slice_regression_dup",
-        "scope_id": "memem",
-    })
-
-    assert decision["decision"] == "reject", (
-        "True duplicate should be rejected by delta_policy"
-    )
-    assert decision["commit_policy"] == "blocked"
-    assert any("too close to existing memory" in e for e in decision["validation_errors"]), (
-        "Rejection should cite duplicate match, got: " + str(decision["validation_errors"])
-    )
 
 
 def test_find_best_match_returns_none_for_empty_vault(tmp_vault, tmp_cortex_dir):

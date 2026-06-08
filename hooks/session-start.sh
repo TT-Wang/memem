@@ -114,7 +114,7 @@ environment = {
 }
 
 try:
-    from memem.active_slice_engine import generate_session_start_slice
+    from memem.active_slice_engine import generate_session_start_slice  # noqa: F401
 
     content = generate_session_start_slice(
         scope_id=scope,
@@ -122,29 +122,16 @@ try:
         memem_dir=str(memem_dir),
     )
 except ImportError:
-    # Fallback: generate_session_start_slice not available — use legacy function
-    try:
-        from memem.active_slice_engine import generate_prompt_context
-
-        content = generate_prompt_context(
-            query,
-            scope_id=scope,
-            environment=environment,
-            use_llm=False,
-            mode="slice",
-        )
-    except Exception:
-        content = ""
+    # v2.0.0: active_slice_engine deleted — session-start emits empty context.
+    # The UserPromptSubmit hook (auto-recall.sh) handles per-prompt retrieval.
+    content = ""
 except Exception:
     content = ""
 
-if not content:
-    emit_empty()
-
-banner = ""
-if os.environ.get("MEMEM_SHOW_BANNER", "0") == "1":
-    banner = f"[memem] {memory_count()} memories · slice-first runtime active\n\n"
-
+# v2.0.0 Phase 4.5 fix: write .last-brief.json BEFORE the emit_empty() check.
+# Otherwise the marker file is never written when content is empty (the v2.0.0
+# default for session-start), and recall.py:_get_current_session_id always
+# returns "", silently killing session-scoped recall telemetry across MCP tools.
 if session_id:
     try:
         memem_dir.mkdir(parents=True, exist_ok=True)
@@ -156,6 +143,13 @@ if session_id:
         }))
     except OSError:
         pass
+
+if not content:
+    emit_empty()
+
+banner = ""
+if os.environ.get("MEMEM_SHOW_BANNER", "0") == "1":
+    banner = f"[memem] {memory_count()} memories · slice-first runtime active\n\n"
 
 print(json.dumps({
     "hookSpecificOutput": {

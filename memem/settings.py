@@ -1,4 +1,4 @@
-"""Single source of truth for memem v1.9 gating constants.
+"""Single source of truth for memem v2.0 gating constants.
 
 All constants are read from environment variables at import time.
 Tests that need to override values should patch the attribute directly:
@@ -36,7 +36,7 @@ MEMEM_RECALL_OOV_THRESHOLD: float = min(1.0, max(0.0, float(os.getenv("MEMEM_REC
 MEMEM_EMPTY_STREAK_MAX: int = max(0, int(os.getenv("MEMEM_EMPTY_STREAK_MAX", "8")))
 
 # ---------------------------------------------------------------------------
-# Trivial-query regex patterns
+# Trivial-query regex patterns (hybrid mode)
 # ---------------------------------------------------------------------------
 
 # English trivial queries — short acknowledgements, affirmations, negations, etc.
@@ -61,66 +61,3 @@ MEMEM_TRIVIAL_REGEX_ZH: re.Pattern[str] = re.compile(
     r")$",
 )
 
-# ---------------------------------------------------------------------------
-# LLM judge gate (v1.13.0)
-# ---------------------------------------------------------------------------
-
-# Enable/disable the LLM (Haiku) activation judge. Default ON ('1').
-# Set MEMEM_USE_LLM_JUDGE=0 to force the heuristic path on all entry points.
-# CRITICAL: read from os.environ at import time — NOT from the per-call environment
-# dict (which is filtered by normalize_runtime_environment whitelist).
-MEMEM_USE_LLM_JUDGE: bool = os.getenv("MEMEM_USE_LLM_JUDGE", "1") != "0"
-
-# Hard timeout (seconds) for the LLM judge subprocess on the hook hot path.
-# Default 2s — the hook cannot block longer or prompt injection is delayed.
-# Clamped to >= 0.5 to avoid pathological values.
-MEMEM_LLM_JUDGE_TIMEOUT: float = max(0.5, float(os.getenv("MEMEM_LLM_JUDGE_TIMEOUT", "2.0")))
-
-# ---------------------------------------------------------------------------
-# Embedding retrieval gate (v1.13.0)
-# ---------------------------------------------------------------------------
-
-# Enable/disable embedding-based retrieval in the hybrid recall pipeline.
-# Default ON ('1'). Set MEMEM_USE_EMBEDDINGS=0 to fall back to FTS-only recall.
-# CRITICAL: read from os.environ at import time — NOT from the per-call environment
-# dict (which is filtered by normalize_runtime_environment whitelist).
-# Tests override this via monkeypatch.setattr(settings, 'MEMEM_USE_EMBEDDINGS', ...).
-MEMEM_USE_EMBEDDINGS: bool = os.getenv("MEMEM_USE_EMBEDDINGS", "1") != "0"
-
-
-def _embeddings_enabled() -> bool:
-    """Return True if embedding retrieval is enabled.
-
-    Re-reads `MEMEM_USE_EMBEDDINGS` from os.environ on every call so that
-    runtime env changes (e.g. emergency rollback against a long-running
-    daemon) take effect immediately. Falls back to the module attribute if
-    the env var is unset, so monkeypatch.setattr-based tests still work.
-    """
-    raw = os.environ.get("MEMEM_USE_EMBEDDINGS")
-    if raw is None:
-        return bool(MEMEM_USE_EMBEDDINGS)
-    return raw != "0"
-
-
-def _llm_judge_enabled() -> bool:
-    """Return True if the LLM activation judge is enabled.
-
-    Re-reads `MEMEM_USE_LLM_JUDGE` from os.environ on every call so that
-    runtime env changes (e.g. emergency rollback against a long-running
-    daemon) take effect immediately. Falls back to the module attribute if
-    the env var is unset, so monkeypatch.setattr-based tests still work.
-    """
-    raw = os.environ.get("MEMEM_USE_LLM_JUDGE")
-    if raw is None:
-        return bool(MEMEM_USE_LLM_JUDGE)
-    return raw != "0"
-
-
-def _render_legacy_enabled() -> bool:
-    """Return True if the v1.12.0 legacy renderer should be used.
-
-    Re-reads `MEMEM_RENDER_LEGACY` from os.environ on every call so users
-    can flip the flag at runtime to roll back the v1.13.0 schema without
-    restarting the slice daemon.
-    """
-    return os.environ.get("MEMEM_RENDER_LEGACY") == "1"

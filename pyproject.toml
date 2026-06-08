@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memem"
-version = "1.13.0"
+version = "2.0.0"
 description = "Persistent, self-evolving memory for Claude Code — local-first, browsable Obsidian vault."
 readme = "README.md"
 license = {text = "MIT"}
@@ -101,4 +101,5 @@ python_classes = "Test*"
 python_functions = "test_*"
 markers = [
     "slow: marks tests that download models or run heavy inference (deselect with '-m not slow')",
+    "benchmark: marks tests requiring real vault + embeddings (deselect with '-m not benchmark')",
 ]

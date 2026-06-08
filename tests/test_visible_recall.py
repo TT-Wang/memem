@@ -80,26 +80,32 @@ def test_default_env_is_on(monkeypatch):
 
 
 def test_hook_python_body_matches():
-    """Guard: the in-test copy of _build_system_message must match the
-    one defined inside hooks/auto-recall.sh. If the hook is updated, this
-    test reminds the developer to update the test copy too.
+    """Guard: the v2.0.0 auto-recall.sh hook uses retrieve+render_slice (no daemon).
+
+    v2.0.0 redesigned the hook to call memem.retrieve + memem.render directly,
+    replacing the daemon-based active_slice pipeline. The old _build_system_message
+    was removed as part of this simplification.
     """
     from pathlib import Path
     hook = Path("/home/claude-user/cortex-plugin/hooks/auto-recall.sh").read_text()
-    # Anchor check: the function MUST be present in the hook source
-    assert "def _build_system_message" in hook, (
-        "auto-recall.sh missing _build_system_message function — visible-recall fix removed?"
+    # v2.0.0 hook must use the new retrieve+render pipeline
+    assert "from memem.retrieve import retrieve" in hook, (
+        "auto-recall.sh v2.0.0 must use memem.retrieve.retrieve"
     )
-    # Anchor check: opt-out env var present
-    assert "MEMEM_VISIBLE_RECALL" in hook, (
-        "auto-recall.sh missing MEMEM_VISIBLE_RECALL env var — opt-out removed?"
+    assert "from memem.render import render_slice" in hook, (
+        "auto-recall.sh v2.0.0 must use memem.render.render_slice"
     )
-    # Anchor check: the original three brand-line labels
-    for label in ("slice cached", "gated", "items ·"):
-        assert label in hook, f"auto-recall.sh missing brand label: {label!r}"
-    # Anchor check: the two new C1 gating labels (v1.9.6)
-    for label in ("out of vault", "low confidence"):
-        assert label in hook, f"auto-recall.sh missing C1 gating label: {label!r}"
+    # Must still honor injection mode opt-out
+    assert "MEMEM_INJECTION_MODE" in hook, (
+        "auto-recall.sh must still honor MEMEM_INJECTION_MODE=tool opt-out"
+    )
+    # Must still return hookSpecificOutput JSON
+    assert "hookSpecificOutput" in hook, (
+        "auto-recall.sh must return hookSpecificOutput JSON"
+    )
+    assert "additionalContext" in hook, (
+        "auto-recall.sh must include additionalContext in hookSpecificOutput"
+    )
 
 
 def test_low_confidence_shows_label(monkeypatch):

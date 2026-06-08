@@ -63,8 +63,8 @@ def _active_items_to_memory_items(slice_obj: Mapping[str, Any]) -> "list[dict]":
 
 
 def _merge_slices(sub_slices: "list[dict]", query: str, project: str) -> "dict":
-    """Fold N ActiveMemorySlice-sourced item lists into one composite MemorySlice."""
-    from memem.active_slice import _layer_summary_from_items, _stable_id
+    """Fold N item lists into one composite slice dict."""
+    from memem.recall import _layer_summary_from_items, _stable_id
 
     seen_ids: set[str] = set()
     merged_items: list[dict] = []
@@ -78,7 +78,7 @@ def _merge_slices(sub_slices: "list[dict]", query: str, project: str) -> "dict":
                 seen_ids.add(item_id)
             merged_items.append(item)
 
-    layer_summary = _layer_summary_from_items(merged_items)  # type: ignore[arg-type]
+    layer_summary = _layer_summary_from_items(merged_items)
 
     n_subs = len(sub_slices)
     strategy = "primary-only" if n_subs == 1 else "primary+general-augmentation"
@@ -97,25 +97,29 @@ def _merge_slices(sub_slices: "list[dict]", query: str, project: str) -> "dict":
 
 
 def context_assemble(query: str, project: str = "default") -> str:
-    """Assemble a composite briefing by composing active slice projections.
+    """Assemble a composite briefing using the v2.0.0 recall pipeline.
 
-    This is the secondary projection path. It calls the active slice engine
-    once for the active project scope, and optionally a second time for the
-    "general" scope when the primary result is sparse. The resulting slices
-    are merged into a single composite "assembled" MemorySlice and rendered
-    via render_slice_markdown.
+    Calls memory_search for the active project scope, and optionally augments
+    with general scope results when the primary result is sparse. Renders via
+    the inline recall markdown renderer.
     """
-    from memem.active_slice import render_slice_markdown
-    from memem.active_slice_engine import build_slice
+    from memem.recall import (
+        _memory_to_item,
+        _render_recall_markdown,
+        _search_memories,
+        _stable_id,
+    )
 
     normalized = _normalize_scope_id(project)
 
-    # Primary slice: active project scope
-    primary_slice = build_slice(query, scope_id=normalized, use_llm=False)
-    primary_items = _active_items_to_memory_items(primary_slice)
+    # Primary slice: search active project scope
+    primary_mems = _search_memories(
+        query, scope_id=normalized, limit=10, record_access=False, expand_links=False
+    )
+    primary_items = [_memory_to_item(m, include_snippet=True) for m in primary_mems]
     primary_as_sub: dict = {
         "scope_id": normalized,
-        "slice_id": primary_slice.get("slice_id", ""),
+        "slice_id": _stable_id("assembled-primary", {"query": query, "project": normalized}),
         "items": primary_items,
     }
 
@@ -123,12 +127,14 @@ def context_assemble(query: str, project: str = "default") -> str:
 
     # Cross-project augmentation when primary is sparse
     if len(primary_items) < _SPARSE_THRESHOLD and normalized != "general":
-        general_slice = build_slice(query, scope_id="general", use_llm=False)
-        general_items = _active_items_to_memory_items(general_slice)
+        general_mems = _search_memories(
+            query, scope_id="general", limit=10, record_access=False, expand_links=False
+        )
+        general_items = [_memory_to_item(m, include_snippet=True) for m in general_mems]
         if general_items:
             sub_slices.append({
                 "scope_id": "general",
-                "slice_id": general_slice.get("slice_id", ""),
+                "slice_id": _stable_id("assembled-general", {"query": query}),
                 "items": general_items,
             })
 
@@ -138,7 +144,9 @@ def context_assemble(query: str, project: str = "default") -> str:
     if not composite.get("items"):
         return ""
 
-    return render_slice_markdown(composite)  # type: ignore[arg-type]
+    composite["slice_kind"] = "search"
+    composite["query"] = query
+    return _render_recall_markdown(composite)
 
 
 _CONSOLIDATION_SYSTEM = (

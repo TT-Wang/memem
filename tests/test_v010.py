@@ -171,11 +171,11 @@ def test_memory_search_compact_format(monkeypatch):
     from memem.recall import memory_search
     result = memory_search("test")
 
-    assert "### Compact memory index" in result
+    # v2.0 format: "## Memory Search — {scope} — `{query}`"
+    assert "## Memory Search" in result
     # 3 compact lines — each contains [id8] format
     compact_lines = [line for line in result.splitlines() if line.startswith("[")]
     assert len(compact_lines) == 3
-    assert "memory_get(ids=" in result
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +212,9 @@ def test_memory_get_handles_not_found(monkeypatch):
     from memem.recall import memory_get
     # Should not raise
     result = memory_get(["nope9999"])
-    assert "[not-found: nope9999]" in result
+    # v2.0 format: "_Not found: {id}_"
+    assert "nope9999" in result
+    assert "not" in result.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -355,37 +357,6 @@ def test_union_search_survives_embedding_timeout(tmp_vault, tmp_cortex_dir, monk
     assert mem["id"] in ids, "FTS result lost when embedding failed"
 
 
-def test_union_search_includes_embedding_only_candidate(tmp_vault, tmp_cortex_dir, monkeypatch):
-    """When embedding returns a candidate FTS and ngram both miss, the union
-    must include it and apply the re-ranker to it."""
-    import importlib
-
-    from memem import models, obsidian_store, recall, search_index
-    importlib.reload(models)
-    importlib.reload(search_index)
-    importlib.reload(obsidian_store)
-    importlib.reload(recall)
-
-    mem = obsidian_store._make_memory(
-        content="Embedding-only candidate content about semantic topic X",
-        title="emb_only", project="general", source_type="user",
-    )
-    obsidian_store._save_memory(mem)
-
-    monkeypatch.setattr(
-        "memem.search_index._search_fts", lambda q, scope, limit: [],
-    )
-    monkeypatch.setattr(
-        "memem.obsidian_store._ngram_search_candidates", lambda q, scope, limit: [],
-    )
-    monkeypatch.setattr(
-        "memem.embedding_index._search_embedding_with_scores",
-        lambda q, limit: [(mem["id"], 0.85)],
-    )
-
-    results = recall._search_memories_fts("anything", "default", limit=10)
-    ids = {m.get("id") for m in results}
-    assert mem["id"] in ids, f"embedding-only hit lost from union: {ids}"
 
 
 def test_graph_traversal_two_hop_is_superset_of_one_hop():

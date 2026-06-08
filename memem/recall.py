@@ -1,16 +1,8 @@
+import hashlib
 import logging
 from collections import Counter
 from datetime import UTC, datetime
 
-import memem.settings as _memem_settings
-from memem.active_slice import (
-    ActiveMemorySlice,
-    MemoryItem,
-    _layer_summary_from_items,
-    _stable_id,
-    render_slice_markdown,
-)
-from memem.kind_classifier import infer_kind as _infer_kind
 from memem.models import DEFAULT_LAYER, LAST_BRIEF_PATH, LAYER_L0, now_iso, parse_iso_dt
 from memem.obsidian_store import (
     _find_memory,
@@ -43,6 +35,145 @@ def _parse_ts(ts: str) -> float:
     return dt.timestamp() if dt is not None else 0.0
 
 
+def _stable_id(kind: str, payload: object) -> str:
+    """Deterministic 12-char hex id from kind + payload repr."""
+    raw = f"{kind}:{payload!r}"
+    return hashlib.md5(raw.encode(), usedforsecurity=False).hexdigest()[:12]  # noqa: S324
+
+
+def _layer_summary_from_items(items: list[dict]) -> dict:
+    """Return a {layer: count} summary dict from a list of item dicts."""
+    summary: dict[int, int] = {}
+    for item in items:
+        layer = int(item.get("layer") or DEFAULT_LAYER)
+        summary[layer] = summary.get(layer, 0) + 1
+    return {str(k): v for k, v in sorted(summary.items())}
+
+
+def _render_recall_markdown(slice_data: dict) -> str:
+    """Inline renderer: convert a slice dict to markdown for recall/search/get tools.
+
+    Replaces the old render_slice_markdown dependency on active_slice.py.
+    Renders a compact but complete markdown representation.
+    """
+    slice_kind = slice_data.get("slice_kind", "search")
+    scope_id = slice_data.get("scope_id", "default")
+    query = slice_data.get("query", "")
+    items = slice_data.get("items", [])
+    linked = slice_data.get("linked", [])
+    missing_ids = slice_data.get("missing_ids", [])
+    anchor_id = slice_data.get("anchor_id", "")
+    anchor_title = slice_data.get("anchor_title", "")
+    before_items = slice_data.get("before_items", [])
+    after_items = slice_data.get("after_items", [])
+
+    lines: list[str] = []
+
+    if slice_kind == "timeline":
+        lines.append(f"## Memory Timeline — {anchor_title} [{anchor_id}]")
+        lines.append("")
+        if before_items:
+            lines.append("### Before")
+            for item in before_items:
+                lines.append(_format_compact_index_line(item))
+            lines.append("")
+        lines.append("### Anchor")
+        anchor_item = next((i for i in items if i.get("id", "")[:8] == anchor_id), None)
+        if anchor_item:
+            lines.append(_format_full_memory(anchor_item))
+        else:
+            lines.append(f"[{anchor_id}] {anchor_title}")
+        lines.append("")
+        if after_items:
+            lines.append("### After")
+            for item in after_items:
+                lines.append(_format_compact_index_line(item))
+            lines.append("")
+    elif slice_kind == "get":
+        if query:
+            lines.append(f"## Memory Get — {scope_id}")
+            lines.append(f"> query: {query}")
+        else:
+            lines.append(f"## Memory Get — {scope_id}")
+        lines.append("")
+        for item in items:
+            lines.append(_format_full_memory(item))
+        if missing_ids:
+            lines.append(f"_Not found: {', '.join(missing_ids)}_")
+            lines.append("")
+    else:
+        # search / recall
+        header = f"## Memory {'Recall' if slice_kind == 'recall' else 'Search'} — {scope_id}"
+        if query:
+            header += f" — `{query}`"
+        lines.append(header)
+        lines.append("")
+        for item in items:
+            lines.append(_format_compact_index_line(item))
+        lines.append("")
+
+    if linked:
+        lines.append("### Related")
+        for item in linked:
+            lines.append(_format_compact_index_line(item))
+        lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _memory_to_item(
+    mem: dict,
+    score: float | None = None,
+    include_snippet: bool = False,
+    position: int | None = None,
+    parent_id: str | None = None,
+) -> dict:
+    """Convert a raw memory dict to a plain dict for slice output."""
+    essence = mem.get("essence") or mem.get("full_record", "") or ""
+    snippet = " ".join(essence.split())[:80] if include_snippet else ""
+    raw_layer = mem.get("layer")
+    layer = int(raw_layer) if raw_layer is not None else DEFAULT_LAYER
+    item: dict = {
+        "id": mem.get("id", ""),
+        "title": mem.get("title", "Untitled"),
+        "content": essence,
+        "layer": layer,
+        "project": mem.get("project", "general"),
+        "tags": mem.get("domain_tags") or mem.get("tags") or [],
+        "created_at": mem.get("created_at", ""),
+        "updated_at": mem.get("updated_at", ""),
+        "related": mem.get("related", []),
+    }
+    # source_type — validate or default
+    raw_source = mem.get("source_type", "user")
+    if raw_source in ("user", "mined", "import", "transcript", "playbook"):
+        item["source_type"] = raw_source
+    if score is not None:
+        item["score"] = float(score)
+    if snippet:
+        item["snippet"] = snippet
+    if position is not None:
+        item["position"] = position
+    if parent_id is not None:
+        item["parent_id"] = parent_id
+    if mem.get("importance") is not None:
+        item["importance"] = int(mem.get("importance", 3) or 3)
+    # v2 schema fields
+    if mem.get("valid_at"):
+        item["valid_at"] = mem["valid_at"]
+    if mem.get("invalid_at") is not None:
+        item["invalid_at"] = mem["invalid_at"]
+    if mem.get("replaced_by") is not None:
+        item["replaced_by"] = mem["replaced_by"]
+    if mem.get("last_accessed_at"):
+        item["last_accessed_at"] = mem["last_accessed_at"]
+    if mem.get("access_count") is not None:
+        item["access_count"] = int(mem.get("access_count", 0) or 0)
+    if mem.get("decay_immune") is not None:
+        item["decay_immune"] = bool(mem.get("decay_immune", False))
+    return item
+
+
 def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 10, rerank_model: str | None = None) -> list[dict]:
     """Candidate-union search: parallel FTS + ngram → dedupe → re-rank → top-N.
 
@@ -53,12 +184,8 @@ def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 1
 
     Takes the union of candidate IDs (preserving FTS order for FTS hits,
     appending ngram-only hits at the end). Loads full memories from the
-    cache, then applies the 5-signal re-ranker (FTS rank, recency, access
-    telemetry, importance, feedback) to the full union BEFORE truncation —
-    so ngram-only candidates compete on equal footing with FTS hits and
-    don't get silently dropped by an early FTS limit. Strict superset of
-    the old FTS-only behavior: every memory FTS would have returned is
-    still present in the union.
+    cache, then applies a 5-signal re-ranker (FTS rank, recency, access
+    telemetry, importance, feedback) to the full union BEFORE truncation.
     """
     from concurrent.futures import ThreadPoolExecutor
 
@@ -69,16 +196,9 @@ def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 1
         from memem.obsidian_store import _ngram_search_candidates
         from memem.search_index import _search_fts
 
-        _use_emb = _memem_settings._embeddings_enabled()
-        log.debug("embedding_retrieval_enabled=%s", _use_emb)
-
-        _max_workers = 3 if _use_emb else 2
-        with ThreadPoolExecutor(max_workers=_max_workers) as pool:
+        with ThreadPoolExecutor(max_workers=2) as pool:
             fts_future = pool.submit(_search_fts, query, scope, candidate_limit)
             ngram_future = pool.submit(_ngram_search_candidates, query, scope, candidate_limit)
-            if _use_emb:
-                from memem.embedding_index import _search_embedding_with_scores
-                emb_future = pool.submit(_search_embedding_with_scores, query, candidate_limit)
             try:
                 fts_ids = fts_future.result(timeout=10) or []
             except Exception as exc:
@@ -89,40 +209,21 @@ def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 1
             except Exception as exc:
                 log.debug("ngram candidate generation failed: %s", exc)
                 ngram_ids = []
-            if _use_emb:
-                try:
-                    # Embedding has a longer budget — model encode dominates.
-                    emb_results = emb_future.result(timeout=30) or []  # type: ignore[possibly-undefined]
-                except Exception as exc:
-                    log.debug("embedding candidate generation failed: %s", exc)
-                    emb_results = []
-            else:
-                emb_results = []
 
-        # Build embedding-score lookup AND id list for the union step.
-        # Cosine values are in [-1, 1] but for natural-language sentence
-        # embeddings they typically land in [0, 1]; clamp negatives to 0.
-        emb_score_by_id: dict[str, float] = {
-            mid: max(0.0, score) for mid, score in emb_results
-        }
-        emb_ids = [mid for mid, _score in emb_results]
-
-        if not fts_ids and not ngram_ids and not emb_ids:
+        if not fts_ids and not ngram_ids:
             return []
 
-        # Preserve FTS rank for its hits; other sources get a neutral
-        # FTS-rank later so they aren't penalized in the re-rank.
+        # Preserve FTS rank for its hits; ngram-only hits get a neutral FTS-rank.
         fts_rank_by_id = {mid: i for i, mid in enumerate(fts_ids)}
         total_fts = len(fts_ids)
         union_ids: list[str] = list(fts_ids)
         seen = set(fts_ids)
-        for source in (ngram_ids, emb_ids):
-            for mid in source:
-                if mid not in seen:
-                    union_ids.append(mid)
-                    seen.add(mid)
+        for mid in ngram_ids:
+            if mid not in seen:
+                union_ids.append(mid)
+                seen.add(mid)
 
-        # Load full memories from cache (O(1) per lookup after m1)
+        # Load full memories from cache
         mems: list[dict] = []
         for mid in union_ids:
             mem = _find_memory(mid)
@@ -134,12 +235,8 @@ def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 1
         if not mems:
             return []
 
-        # 6-signal re-rank across the FULL union (not after any truncation).
-        # Weights: FTS 0.30 + embedding 0.20 + recency 0.15 + access 0.10 +
-        # importance 0.15 + feedback 0.10 = 1.00. Reduced FTS weight from
-        # 0.45 → 0.30 to make room for embedding cosine (which was previously
-        # computed but discarded). Embedding gets 0.20 — meaningful but not
-        # dominant; FTS still leads on direct keyword matches.
+        # 5-signal re-rank across the FULL union.
+        # Weights: FTS 0.35 + recency 0.20 + access 0.10 + importance 0.20 + feedback 0.15 = 1.00
         from memem.feedback import get_relevance_score
 
         scored: list[tuple[float, dict]] = []
@@ -164,33 +261,23 @@ def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 1
                 rank_pos = fts_rank_by_id[mem_id]
                 fts_rank = 1.0 - (rank_pos / total_fts)
             else:
-                # ngram-only / embedding-only hit — give a neutral FTS score
-                # so non-FTS signals aren't forced to beat a "0 FTS rank"
-                # penalty.
                 fts_rank = 0.5
-
-            # Embedding cosine in [0, 1]. Candidates outside the embedding
-            # top-K (FTS-only / ngram-only hits) get 0 — "no semantic signal
-            # detected" is itself information, not a neutral 0.5 guess.
-            embedding_score = emb_score_by_id.get(mem_id, 0.0)
 
             feedback_raw = get_relevance_score(mem_id)
             feedback_norm = (feedback_raw + 1.0) / 2.0
 
             score = (
-                0.30 * fts_rank
-                + 0.20 * embedding_score
-                + 0.15 * recency
+                0.35 * fts_rank
+                + 0.20 * recency
                 + 0.10 * access_boost
-                + 0.15 * importance
-                + 0.10 * feedback_norm
+                + 0.20 * importance
+                + 0.15 * feedback_norm
             )
             scored.append((score, mem))
 
         scored.sort(key=lambda x: x[0], reverse=True)
 
-        # C3: per-item score floor — drop low-scoring items, but NEVER drop L0
-        # anchors (project-identity memories are always injected regardless of score).
+        import memem.settings as _memem_settings
         _min_item_score = _memem_settings.MEMEM_RECALL_MIN_ITEM_SCORE
         if _min_item_score > 0.0:
             scored = [
@@ -198,8 +285,7 @@ def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 1
                 if s >= _min_item_score or m.get("layer") == LAYER_L0
             ]
 
-        # Optional cross-encoder rerank: take top-50, score with cross-encoder,
-        # then reorder. Final truncation to `limit` happens after this step.
+        # Optional cross-encoder rerank: take top-50, score with cross-encoder.
         if rerank_model:
             top50 = [mem for _, mem in scored[:50]]
             try:
@@ -208,22 +294,15 @@ def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 1
                 ce_pairs = rerank_pairs(query, top50, model_name=rerank_model)
                 id_to_mem = {mem.get("id", ""): mem for mem in top50}
                 reranked = [id_to_mem[mid] for mid, _score in ce_pairs if mid in id_to_mem]
-                # Append any top50 members that didn't make it into the reranked list
-                # (shouldn't happen but guard against it)
-                seen = {mem.get("id", "") for mem in reranked}
+                seen_reranked = {mem.get("id", "") for mem in reranked}
                 for mem in top50:
-                    if mem.get("id", "") not in seen:
+                    if mem.get("id", "") not in seen_reranked:
                         reranked.append(mem)
-                for mem in reranked:
-                    _infer_kind(mem)
                 return reranked[:limit]
             except Exception as exc:  # noqa: BLE001
                 log.warning("cross-encoder rerank failed, using heuristic order: %s", exc)
 
-        results_out = [mem for _, mem in scored[:limit]]
-        for mem in results_out:
-            _infer_kind(mem)
-        return results_out
+        return [mem for _, mem in scored[:limit]]
     except Exception as exc:
         log.debug("Union search failed, falling back to file scan: %s", exc)
         return []  # Fallback: caller will use file scan
@@ -353,12 +432,6 @@ def _search_memories(
                         from memem.telemetry import record_session_recall
 
                         record_session_recall(session_id, mem_id)
-        # Apply kind classification unconditionally — idempotent, cheap, and
-        # the "already classified" gate caused stale inferred_kind when a user
-        # later added type:* tags to a memory only reachable via graph expansion
-        # (Phase 4.5 Lens B finding).
-        for mem in results:
-            _infer_kind(mem)
         return results
 
     # Fallback to file scan (existing code continues below)
@@ -443,10 +516,6 @@ def _search_memories(
 
                     record_session_recall(session_id, mem_id)
 
-    # Classify untagged memories (fallback file-scan path).
-    for mem in results:
-        _infer_kind(mem)
-
     return results
 
 
@@ -459,7 +528,7 @@ def _format_compact_index_line(mem: dict) -> str:
     mem_id = mem.get("id", "")[:8]
     layer = mem.get("layer", DEFAULT_LAYER)
     title = mem.get("title", "Untitled")
-    essence = mem.get("essence") or mem.get("full_record", "") or ""
+    essence = mem.get("essence") or mem.get("content") or mem.get("full_record", "") or ""
     essence_line = " ".join(essence.split())[:80]
     return f"[{mem_id}] L{layer} {title} — {essence_line}"
 
@@ -476,7 +545,7 @@ def _format_full_memory(mem: dict) -> str:
     related = mem.get("related", [])
     source = mem.get("source_type", "unknown")
     project = mem.get("project", "general")
-    essence = mem.get("essence") or mem.get("full_record", "") or ""
+    essence = mem.get("essence") or mem.get("content") or mem.get("full_record", "") or ""
 
     lines = [
         f"### [{mid}] {title}",
@@ -508,59 +577,6 @@ def _linked_memories(primary: list[dict], hops: int = 2) -> list[dict]:
     return [m for m in expanded if m.get("id", "")[:8] not in primary_ids]
 
 
-def _memory_to_item(
-    mem: dict,
-    score: float | None = None,
-    include_snippet: bool = False,
-    position: int | None = None,
-    parent_id: str | None = None,
-) -> MemoryItem:
-    """Convert a raw memory dict to a universal MemoryItem for slice output."""
-    essence = mem.get("essence") or mem.get("full_record", "") or ""
-    snippet = " ".join(essence.split())[:80] if include_snippet else ""
-    raw_layer = mem.get("layer")
-    layer = int(raw_layer) if raw_layer is not None else DEFAULT_LAYER
-    item: MemoryItem = {
-        "id": mem.get("id", ""),
-        "title": mem.get("title", "Untitled"),
-        "content": essence,
-        "layer": layer,
-        "project": mem.get("project", "general"),
-        "tags": mem.get("domain_tags") or mem.get("tags") or [],
-        "created_at": mem.get("created_at", ""),
-        "updated_at": mem.get("updated_at", ""),
-        "related": mem.get("related", []),
-    }
-    # source_type must match the Literal — validate or default
-    raw_source = mem.get("source_type", "user")
-    if raw_source in ("user", "mined", "import", "transcript", "playbook"):
-        item["source_type"] = raw_source  # type: ignore[typeddict-item]
-    if score is not None:
-        item["score"] = float(score)
-    if snippet:
-        item["snippet"] = snippet
-    if position is not None:
-        item["position"] = position
-    if parent_id is not None:
-        item["parent_id"] = parent_id
-    if mem.get("importance") is not None:
-        item["importance"] = int(mem.get("importance", 3) or 3)
-    # v2 schema fields — propagate so MemoryItem consumers see real values
-    if mem.get("valid_at"):
-        item["valid_at"] = mem["valid_at"]
-    if mem.get("invalid_at") is not None:
-        item["invalid_at"] = mem["invalid_at"]
-    if mem.get("replaced_by") is not None:
-        item["replaced_by"] = mem["replaced_by"]
-    if mem.get("last_accessed_at"):
-        item["last_accessed_at"] = mem["last_accessed_at"]
-    if mem.get("access_count") is not None:
-        item["access_count"] = int(mem.get("access_count", 0) or 0)
-    if mem.get("decay_immune") is not None:
-        item["decay_immune"] = bool(mem.get("decay_immune", False))
-    return item
-
-
 def memory_search(query: str, limit: int = 10, scope_id: str = "default") -> str:
     """Layer 1 (compact index) search — the 3-tier recall entry point.
 
@@ -589,7 +605,7 @@ def memory_search(query: str, limit: int = 10, scope_id: str = "default") -> str
     linked_items = [_memory_to_item(m, include_snippet=True) for m in linked]
     layer_summary = _layer_summary_from_items(items)
 
-    slice_data: ActiveMemorySlice = {
+    slice_data: dict = {
         "slice_id": _stable_id("search", (query, scope_id, limit)),
         "slice_kind": "search",
         "scope_id": scope_id,
@@ -600,7 +616,7 @@ def memory_search(query: str, limit: int = 10, scope_id: str = "default") -> str
         "linked": linked_items,
         "layer_summary": layer_summary,
     }
-    return render_slice_markdown(slice_data)
+    return _render_recall_markdown(slice_data)
 
 
 def memory_get(ids: list[str], scope_id: str = "default") -> str:
@@ -629,7 +645,7 @@ def memory_get(ids: list[str], scope_id: str = "default") -> str:
     if not items and not missing:
         return f"No memories found for ids: {ids}"
 
-    slice_data: ActiveMemorySlice = {
+    slice_data: dict = {
         "slice_id": _stable_id("get", (tuple(ids), scope_id)),
         "slice_kind": "get",
         "scope_id": scope_id,
@@ -640,7 +656,7 @@ def memory_get(ids: list[str], scope_id: str = "default") -> str:
         "linked": linked_items,
         "layer_summary": _layer_summary_from_items(items),
     }
-    return render_slice_markdown(slice_data)
+    return _render_recall_markdown(slice_data)
 
 
 def memory_timeline(
@@ -717,7 +733,7 @@ def memory_timeline(
     after_items = [_memory_to_item(m, include_snippet=True, position=i) for i, m in enumerate(after)]
     all_items = [anchor_item, *before_items, *after_items]
 
-    slice_data: ActiveMemorySlice = {
+    slice_data: dict = {
         "slice_id": _stable_id("timeline", (memory_id, scope_id, depth_before, depth_after)),
         "slice_kind": "timeline",
         "scope_id": scope_id,
@@ -730,7 +746,7 @@ def memory_timeline(
         "after_items": after_items,
         "layer_summary": _layer_summary_from_items(all_items),
     }
-    return render_slice_markdown(slice_data)
+    return _render_recall_markdown(slice_data)
 
 
 def _format_memory_as_bullet(mem: dict) -> str:
@@ -762,9 +778,9 @@ def memory_recall(query: str, scope_id: str = "default", limit: int = 10, rerank
     items = [_memory_to_item(m, include_snippet=True) for m in memories]
     layer_summary = _layer_summary_from_items(items)
 
-    slice_data: ActiveMemorySlice = {
+    slice_data: dict = {
         "slice_id": _stable_id("recall", (query, scope_id, limit)),
-        "slice_kind": "search",
+        "slice_kind": "recall",
         "scope_id": scope_id,
         "query": query,
         "generated_at": now_iso(),
@@ -773,7 +789,7 @@ def memory_recall(query: str, scope_id: str = "default", limit: int = 10, rerank
         "linked": [],
         "layer_summary": layer_summary,
     }
-    result = render_slice_markdown(slice_data) if memories else ""
+    result = _render_recall_markdown(slice_data) if memories else ""
 
     sections = []
     if result:
@@ -802,4 +818,3 @@ def memory_list(scope_id: str = "default") -> str:
             f"- [{mem.get('id', '')[:8]}] {mem.get('title', 'Untitled')[:50]} | project:{mem.get('project', 'general')}"
         )
     return "\n".join(lines)
-

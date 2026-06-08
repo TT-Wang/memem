@@ -128,10 +128,12 @@ except OSError:
 if not response_text:
     sys.exit(0)
 
-# 3. Compute + log attribution
+# 3. Compute + log attribution (active_slice_engine removed in v2.0.0 — no-op)
 try:
-    from memem.active_slice_engine import record_slice_attribution
+    from memem.active_slice_engine import record_slice_attribution  # noqa: F401
     record_slice_attribution(slice_to_attribute, response_text)
+except ImportError:
+    pass  # v2.0.0: active_slice_engine deleted
 except Exception:
     # never break — this is best-effort
     pass
@@ -164,19 +166,22 @@ try:
             user_messages.append(text_val)
 
     if user_messages:
-        from memem.working_memory import update_section
+        try:
+            from memem.working_memory import update_section  # noqa: F401
 
-        # current_task: last user message, truncated to 200 chars
-        last_user = user_messages[-1]
-        current_task = last_user[:200] if len(last_user) > 200 else last_user
-        update_section("current_task", current_task)
+            # current_task: last user message, truncated to 200 chars
+            last_user = user_messages[-1]
+            current_task = last_user[:200] if len(last_user) > 200 else last_user
+            update_section("current_task", current_task)
 
-        # last_3_actions: 3 most recent user message snippets as bullet list
-        recent = user_messages[-3:]
-        bullets = "\n".join(
-            f"- {m[:100].replace(chr(10), ' ')}" for m in recent
-        )
-        update_section("last_3_actions", bullets)
+            # last_3_actions: 3 most recent user message snippets as bullet list
+            recent = user_messages[-3:]
+            bullets = "\n".join(
+                f"- {m[:100].replace(chr(10), ' ')}" for m in recent
+            )
+            update_section("last_3_actions", bullets)
+        except ImportError:
+            pass  # v2.0.0: working_memory deleted
 except Exception:
     # never break — this is best-effort
     pass

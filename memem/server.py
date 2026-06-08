@@ -12,7 +12,6 @@ minimal diagnostic environment). ``mcp`` remains a required dependency
 declared in ``pyproject.toml`` — this is purely an import-time deferral.
 """
 
-import json
 import sys
 
 from memem.cli import dispatch_cli
@@ -30,15 +29,6 @@ def _build_mcp():
     from mcp.server.fastmcp import FastMCP
     from pydantic import Field
 
-    from memem.active_slice_engine import (
-        active_slice_response as _active_slice_response,
-    )
-    from memem.active_slice_engine import (
-        generate_active_memory_slice_with_writeback as _generate_active_memory_slice_with_writeback,
-    )
-    from memem.active_slice_engine import (
-        generate_prompt_context as _generate_prompt_context,
-    )
     from memem.cross_vault import load_vault_registry as _load_vault_registry
     from memem.cross_vault import search_across_vaults as _search_across_vaults
     from memem.graph_index import (
@@ -374,232 +364,40 @@ def _build_mcp():
             str,
             Field(
                 description=(
-                    "Current work request. The engine turns vault recall candidates "
-                    "into a structured runtime working state: goals, constraints, "
-                    "background, decisions, risks, artifacts, open tensions, and "
-                    "non-mutating delta proposals."
+                    "Current work request. memem retrieves relevant memories via "
+                    "cosine similarity and returns a focused working-state slice."
                 ),
                 min_length=1,
                 max_length=2000,
             ),
         ],
-        scope_id: Annotated[
-            str,
-            Field(description='Project scope. Default "default".'),
-        ] = "default",
-        raw_json: Annotated[
-            bool,
-            Field(
-                description=(
-                    "Return raw structured JSON instead of the markdown projection. "
-                    "The JSON includes excluded_candidates, candidate_deltas, "
-                    "warnings, and slice metrics."
-                ),
-            ),
-        ] = False,
-        use_llm: Annotated[
-            bool,
-            Field(description="Use bounded Haiku activation when available; fallback is deterministic heuristic mode. Defaults to the MEMEM_USE_LLM_JUDGE env-var setting."),
-        ] = True,
-        session_id: Annotated[
-            str,
-            Field(
-                description=(
-                    "Optional runtime session identifier. When supplied with a task mode, "
-                    "memem can carry continuity across multiple slices in the same session."
-                ),
-                max_length=200,
-            ),
-        ] = "",
         task_mode: Annotated[
-            str,
+            str | None,
             Field(
+                default=None,
                 description=(
-                    "Optional runtime task preset. Supported values include coding, proposal, "
-                    "debug, research, maintenance, and session_start."
+                    "Current task mode (optional, surfaced in Working section)."
                 ),
-                max_length=40,
             ),
-        ] = "",
-        repo_path: Annotated[
-            str,
-            Field(
-                description=(
-                    "Optional current working directory or repository root. Used for artifact "
-                    "resolution and scope-aware continuity."
-                ),
-                max_length=4000,
-            ),
-        ] = "",
-        current_file: Annotated[
-            str,
-            Field(
-                description="Optional current file path for artifact-aware activation.",
-                max_length=4000,
-            ),
-        ] = "",
-        open_files: Annotated[
-            list[str] | None,
-            Field(description="Optional list of currently open files for artifact-aware activation."),
         ] = None,
-        modified_files: Annotated[
-            list[str] | None,
-            Field(description="Optional list of modified files for artifact-aware activation."),
-        ] = None,
-        artifact_path: Annotated[
-            str,
-            Field(
-                description="Optional draft/proposal/artifact path associated with the current work.",
-                max_length=4000,
-            ),
-        ] = "",
-        branch: Annotated[
-            str,
-            Field(
-                description="Optional current git branch name.",
-                max_length=200,
-            ),
-        ] = "",
-        writeback_preview: Annotated[
-            bool,
-            Field(
-                description=(
-                    "Run the delta validation/commit pipeline in dry-run mode and include "
-                    "preview writeback results. Still non-mutating."
-                ),
-            ),
-        ] = False,
-        auto_commit_safe: Annotated[
-            bool,
-            Field(
-                description=(
-                    "Opt in to committing only auto-safe deltas. Default is false, so the "
-                    "runtime remains read-side unless explicitly elevated."
-                ),
-            ),
-        ] = False,
-        scope_strict: Annotated[
-            bool,
-            Field(
-                description=(
-                    "Penalize cross-project candidates whose project differs from scope_id. "
-                    "Lowers their score so same-project memories rank higher; cross-project "
-                    "memories still appear (visible-but-secondary). Default false."
-                ),
-            ),
-        ] = False,
-        scope_strict_evict: Annotated[
-            bool,
-            Field(
-                description=(
-                    "More aggressive than scope_strict: drops cross-project candidates whose "
-                    "best role score falls below MEMEM_CROSS_PROJECT_EVICT_THRESHOLD (default "
-                    "0.5). Reduces cross-project PRESENCE in the slice, not just rank. Default false."
-                ),
-            ),
-        ] = False,
-        rerank_model: Annotated[
-            str,
-            Field(
-                description=(
-                    "Optional cross-encoder reranker model applied to the recall candidates "
-                    "before activation. When non-empty, the top-50 heuristic candidates are "
-                    "scored by the named cross-encoder and reordered. Default empty string "
-                    "means heuristic-only. Example: 'cross-encoder/ms-marco-MiniLM-L-12-v2'."
-                ),
-                max_length=200,
-            ),
-        ] = "",
-    ) -> str:
-        """Generate an Active Memory Slice runtime working state for ongoing work.
+    ) -> dict:
+        """v2.0.0: simplified retrieve()+render_slice() pipeline.
 
-        This is memem's default runtime context path. Recall produces bounded
-        candidates, then the slice engine activates only the working-state items
-        needed now. By default it returns the rendered markdown slice; set
-        `raw_json=True` to inspect the underlying structure, including
-        excluded_candidates, candidate_deltas, warnings, and confidence.
+        Replaces the v1.13 active_slice_engine chain with a two-step call:
+          1. retrieve(query, k=8) — cosine top-K + FTS supplement
+          2. render_slice(query, results, working) — 2-section markdown
 
-        `context_assemble` remains available as an explicit secondary projection
-        when you specifically want a narrative briefing instead of the working
-        state slice. Safe writeback is available only through the explicit
-        `writeback_preview` / `auto_commit_safe` opt-in flags.
-
-        Note: when `MEMEM_INJECTION_MODE` is set to `hybrid` or `tool`, this
-        MCP tool DOES still honor the gating layers (trivial-query, turn
-        cadence, topic-shift) — the implementation shares one call path with
-        the hook. Result: explicit calls with trivial queries like "yes" may
-        return an empty stub. Workaround until v1.10: pass a non-trivial query
-        string, or temporarily unset MEMEM_INJECTION_MODE for the session.
-        `MEMEM_INJECTION_MODE=tool` still silences the automatic
-        UserPromptSubmit hook injection — use this mode when you want
-        on-demand recall via this tool without the hook chatting on every prompt.
+        Benchmark-validated at 75% precision on 18-query × 6-category eval
+        (vs v1.13.0's 24%). Returns rendered markdown under the ``result`` key
+        for MCP client compatibility.
         """
-        # Respect MEMEM_USE_LLM_JUDGE: if the env var disables the judge,
-        # override the caller-supplied use_llm=True default. An explicit
-        # use_llm=False from the caller is always honoured.
-        from memem import settings as _settings
-        effective_use_llm = use_llm and _settings._llm_judge_enabled()
+        from memem.render import render_slice
+        from memem.retrieve import retrieve
 
-        environment: dict[str, object] = {}
-        if session_id:
-            environment["session_id"] = session_id
-        if task_mode:
-            environment["task_mode"] = task_mode
-        if repo_path:
-            environment["repo_path"] = repo_path
-            environment["cwd"] = repo_path
-        if current_file:
-            environment["current_file"] = current_file
-        if open_files:
-            environment["open_files"] = open_files
-        if modified_files:
-            environment["modified_files"] = modified_files
-        if artifact_path:
-            environment["artifact_path"] = artifact_path
-        if branch:
-            environment["branch"] = branch
-        if scope_strict:
-            environment["scope_strict"] = True
-        if scope_strict_evict:
-            environment["scope_strict_evict"] = True
-            environment["scope_strict"] = True  # eviction implies the score penalty
-        if rerank_model:
-            environment["rerank_model"] = rerank_model
-
-        runtime_environment = environment or None
-        if writeback_preview or auto_commit_safe:
-            result = _generate_active_memory_slice_with_writeback(
-                query,
-                scope_id=scope_id,
-                environment=runtime_environment,
-                use_llm=effective_use_llm,
-                auto_commit_safe=auto_commit_safe,
-                dry_run=not auto_commit_safe,
-            )
-            if raw_json:
-                return json.dumps(result, indent=2, sort_keys=True)
-            # Note: rendered markdown surfaces only the slice. Delta results
-            # (proposed writebacks + their commit/dry-run outcomes) are
-            # computed but not folded into the prompt context. Callers that
-            # need the writeback outcome must pass raw_json=True. This is
-            # intentional — prompt context stays human-narrative; structured
-            # delta state belongs in the JSON envelope.
-            return _generate_prompt_context(
-                query,
-                scope_id=scope_id,
-                environment=runtime_environment,
-                use_llm=effective_use_llm,
-                mode="slice",
-                slice_obj=result["slice"],
-            )
-
-        return _active_slice_response(
-            query,
-            scope_id=scope_id,
-            environment=runtime_environment,
-            raw_json=raw_json,
-            use_llm=effective_use_llm,
-        )
+        results = retrieve(query, k=8)
+        working = {"task_mode": task_mode} if task_mode else {}
+        md = render_slice(query, results, working)
+        return {"result": md}
 
     @mcp.tool()
     def memory_save(

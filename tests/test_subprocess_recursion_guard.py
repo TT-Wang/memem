@@ -127,51 +127,6 @@ class TestProceduralHaikuGuard:
         assert env.get("MEMEM_HOOK_DISABLE") == "1", "MEMEM_HOOK_DISABLE must be '1' in env"
 
 
-class TestTournamentJudgeGuard:
-    """Tournament pairwise judge (_tournament_break_ties) in candidate_generation.py must pass guard params."""
-
-    def test_env_and_session_flag(self, tmp_path):
-        from memem import candidate_generation
-
-        captured: list[dict] = []
-
-        def fake_run(args, **kwargs):
-            captured.append(kwargs)
-            m = MagicMock()
-            m.returncode = 0
-            m.stdout = "A"
-            m.stderr = ""
-            return m
-
-        # Candidates are TypedDicts (plain dicts)
-        c1: dict = {
-            "memory_id": "mem1",
-            "title": "Alpha memory",
-            "content": "Alpha content about Python programming",
-            "score": 0.8,
-        }
-        c2: dict = {
-            "memory_id": "mem2",
-            "title": "Beta memory",
-            "content": "Beta content about SQL databases",
-            "score": 0.75,
-        }
-
-        with patch.object(candidate_generation.subprocess, "run", side_effect=fake_run):
-            try:
-                candidate_generation._tournament_break_ties(
-                    query="test query about code",
-                    candidates=[c1, c2],  # type: ignore[arg-type]
-                    cache_dir=tmp_path,
-                )
-            except Exception:
-                pass
-
-        assert captured, "subprocess.run was not called in _tournament_break_ties"
-        kw = captured[0]
-        assert kw.get("start_new_session") is True, "start_new_session must be True"
-        env = kw.get("env", {})
-        assert env.get("MEMEM_HOOK_DISABLE") == "1", "MEMEM_HOOK_DISABLE must be '1' in env"
 
 
 # ---------------------------------------------------------------------------
