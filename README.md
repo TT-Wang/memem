@@ -30,6 +30,20 @@ memem is a Claude Code plugin that gives Claude persistent memory across session
 
 It's **local-first**: no cloud services, no API keys required, no vendor lock-in. Everything lives in `~/obsidian-brain/memem/memories/` as human-readable markdown.
 
+### What's new in v2.0.0 ("less is more")
+
+BREAKING — schema rebuild from 18 sections → 2 (Working + Relevant). Retrieval pipeline rewritten from ~12,400 LOC to ~210 LOC (POC v3b architecture). Net delete: **87 files, +915 / -19,941 LOC**.
+
+- **NEW `memem/retrieve.py` (~145 LOC) + `memem/render.py` (~65 LOC)** — query → embed → cosine top-K + FTS-conditional supplement for version/date literals, then a 2-section renderer. Pure embedding similarity, no scope filter, no kind classifier, no LLM judge, no daemon.
+- **Slice schema collapsed to 2 sections**: `## Working` (current state) + `## Relevant` (ranked list). The v1.13 schema (Anchors / Episodic / Skills / Cases / Working / Pending) is gone.
+- **`active_memory_slice` MCP tool slimmed** from 8 params to 2 (`query`, `task_mode`). Backward-incompatible.
+- **Deleted (~14,500 LOC)**: 15 memem modules (active_slice*, activation, candidate_generation, kind_classifier, slice_daemon, slice_client, slice_history, delta*, working_memory, boundaries, artifact_context, environment_context), 36 legacy test files, all v1.13 env-var flags (`MEMEM_USE_LLM_JUDGE`, `MEMEM_USE_EMBEDDINGS`, `MEMEM_RENDER_LEGACY`, `MEMEM_LLM_JUDGE_TIMEOUT`, `MEMEM_AUTO_SLICE_DAEMON` — all no-op now).
+- **Preserved**: all 14 MCP tools (same names + return shapes), all 7 CLI flags, mining pipeline, vault format, embedding model + cache.
+- **Benchmark (18 queries × 6 categories)**: 74% precision (vs v1.13's 24% — 3× improvement) | 98ms warm latency (vs v1.13's 675ms — 6× faster) | 24/8 cross-scope hits (lexie/SSH/HFT queries that v1.13 returned 0 results for).
+- **Daemon retired**: `slice_daemon` and `MEMEM_AUTO_SLICE_DAEMON` removed. Retrieval is now in-process via `memem.retrieve`; the hook spawns python directly per prompt. After upgrade run `pkill -f slice_daemon` once to clear any old process.
+- **Hook envelope** now uses tempfile (avoids ARG_MAX on large prompts).
+- **Embedding writes are atomic**: `embeddings.npy` via tmpfile + `os.replace`, `embedding_ids.json` written first so readers never see torn-write or shape mismatch.
+
 ### What's new in v1.9.4 (data correctness pass)
 
 Two release pair (v1.9.3 + v1.9.4) targeting silent-corruption paths. All changes are no-ops on the happy path.
@@ -124,7 +138,7 @@ Token efficiency: session start injects L0 verbatim plus a compact index for L1-
 
 **Active Memory Slice runtime kernel:**
 
-For ongoing work, `active_memory_slice(query, scope_id, ...)` is the default
+For ongoing work, `active_memory_slice(query, task_mode?)` is the default
 runtime path. It uses `memory_search`/FTS/graph/playbooks/transcripts plus
 runtime environment and current artifacts as candidate generation, then
 activates a structured working state:
@@ -295,7 +309,7 @@ All recall tools return **slice-formatted markdown** via a unified `render_slice
 | `memory_graph(memory_id)` | Inspect typed/scored graph neighbors for one memory. |
 | `memory_graph_audit()` | Report graph quality issues: orphans, dead links, hubs, stale edges. |
 | `memory_graph_rebuild(scope_id)` | Rebuild the graph side index from the Obsidian vault. |
-| `active_memory_slice(query, scope_id, session_id?, task_mode?, repo_path?, writeback_preview?, auto_commit_safe?)` | Build a structured runtime working state for current work, with optional continuity and controlled writeback. |
+| `active_memory_slice(query, task_mode?)` | v2.0.0: thin wrapper over `retrieve()` + `render_slice()`. Returns markdown with `## Working` + `## Relevant` (top-K by cosine + FTS supplement for version/date literals). |
 
 ## How do I inspect slices or writeback manually?
 
@@ -374,15 +388,12 @@ memem is split into small, focused modules:
 - `telemetry.py` — access tracking, event log (atomic writes, fcntl-locked)
 - `search_index.py` — SQLite FTS5 index
 - `graph_index.py` — typed/scored related-memory graph side index
-- `active_slice.py` — `MemoryItem` + `ActiveMemorySlice` schemas, `render_slice_markdown` dispatcher
-- `activation.py` — heuristic + bounded LLM activation judgement
-- `boundaries.py` — scope/deprecated/budget/redundancy filters
-- `delta.py` — non-mutating candidate delta proposals
-- `active_slice_engine.py` — candidate generation, layer-aware (L0 anchors + L3 gating), `build_slice` public entry
+- `retrieve.py` — v2.0.0: cosine top-K + FTS-conditional supplement for version/date literals. Mtime-invalidated vault index + embedding caches.
+- `render.py` — v2.0.0: 2-section renderer (`## Working` + `## Relevant`).
 - `obsidian_store.py` — memory I/O, dedup scoring, contradiction detection, layer auto-classification on save
-- `recall.py` — slice-format recall tools (`memory_search`/`memory_get`/`memory_timeline`/`memory_recall`)
+- `recall.py` — slice-format recall tools (`memory_search`/`memory_get`/`memory_timeline`/`memory_recall`) — surgically rewritten in v2.0.0 with inline `_render_recall_markdown` (the legacy `active_slice` renderer is gone)
 - `playbook.py` — per-project playbook grow + refine
-- `assembly.py` — `context_assemble` composes via `active_memory_slice`
+- `assembly.py` — `context_assemble` composes via `recall` pipeline
 - `capabilities.py` — runtime feature detection for degraded mode
 - `storage.py` — server-lifecycle helpers (PID management, miner auto-start)
 - `server.py` — thin MCP entrypoint (FastMCP imported lazily)
