@@ -30,6 +30,10 @@ memem is a Claude Code plugin that gives Claude persistent memory across session
 
 It's **local-first**: no cloud services, no API keys required, no vendor lock-in. Everything lives in `~/obsidian-brain/memem/memories/` as human-readable markdown.
 
+### What's new in v2.2.0 (episodic seeds)
+
+Two architectural additions targeting the episodic-query gap vs everme. (a) `retrieve.py` parses temporal phrases in queries ("yesterday" / "last week" / "N days ago") and re-ranks candidates by `created:` proximity (+0.2 boost). Zero behavior change for non-temporal queries. (b) `mine_delta.py` emits one per-session "episode" memory after substantive Stop events (tagged `type:episodic`, Haiku-generated 100-word narrative). Benchmark is unchanged at 74% in this release — the gains are forward-looking and accrue as the vault accumulates v2.2.0-shaped episodes. Backward-compat is 100%.
+
 ### What's new in v2.1.0 (event-triggered mining)
 
 The miner daemon is gone. `miner_daemon.py`, `miner-wrapper.sh`, `miner_circuit_breaker.py`, `miner_errors.py`, and `miner_protocol.py` (~1,500 LOC) have been deleted. Mining now triggers on every Claude Code Stop event via a detached subprocess.

@@ -387,7 +387,7 @@ def _build_mcp():
           1. retrieve(query, k=8) — cosine top-K + FTS supplement
           2. render_slice(query, results, working) — 2-section markdown
 
-        Benchmark-validated at 75% precision on 18-query × 6-category eval
+        Benchmark-validated at 74% precision on 18-query × 6-category eval
         (vs v1.13.0's 24%). Returns rendered markdown under the ``result`` key
         for MCP client compatibility.
         """

@@ -16,11 +16,12 @@ import fcntl
 import json
 import os
 import re
+import subprocess
 from pathlib import Path
 
 import structlog
 
-from memem.haiku_prompts import HAIKU_TIMEOUT_SECONDS  # noqa: F401 — used indirectly
+from memem.haiku_prompts import HAIKU_TIMEOUT_SECONDS
 from memem.mining import extract_from_text
 from memem.models import MEMEM_DIR
 from memem.obsidian_store import _make_memory, _save_memory
@@ -35,6 +36,13 @@ _MIN_DELTA_CHARS = 100
 _ACK_ONLY_RE = re.compile(r"^\s*(ok|yes|go|thanks|sure|nope|no)\s*\.?\s*$", re.IGNORECASE)
 _EMPTY_STREAK_THRESHOLD = 3
 _EMPTY_STREAK_SKIP = 5
+
+_EPISODE_HAIKU_SYSTEM = (
+    "You are summarizing a Claude Code conversation into a single 100-word "
+    "narrative paragraph that captures: (1) what the user was working on, "
+    "(2) what was decided or accomplished, (3) any open questions or next steps. "
+    "Write in third person past tense. Output ONLY the 100-word paragraph, no preamble."
+)
 
 
 # -----------------------------------------------------------------------
@@ -233,6 +241,89 @@ def _is_trivial_delta(delta_text: str) -> bool:
 
 
 # -----------------------------------------------------------------------
+# Episode emission
+# -----------------------------------------------------------------------
+
+
+def _emit_session_episode(
+    session_id: str,
+    turns: list[dict],
+    first_user_msg: str,
+) -> bool:
+    """Emit a single per-session episodic memory summarising the full turn list.
+
+    Calls Haiku with _EPISODE_HAIKU_SYSTEM as the system prompt.
+    Returns True if the episode was successfully written, False otherwise.
+    """
+    messages = _turns_to_messages(turns)
+    body = (
+        "=== BEGIN CONVERSATION ===\n"
+        + "\n\n".join(messages)
+        + "\n=== END CONVERSATION ===\n\n"
+        "Summarize per the system instructions above."
+    )
+
+    try:
+        result = subprocess.run(
+            [
+                "claude", "-p",
+                "--model", "haiku",
+                "--tools", "",
+                "--system-prompt", _EPISODE_HAIKU_SYSTEM,
+            ],
+            input=body,
+            capture_output=True,
+            text=True,
+            timeout=HAIKU_TIMEOUT_SECONDS,
+            env={**os.environ, "MEMEM_HOOK_DISABLE": "1"},
+            start_new_session=True,
+        )
+    except Exception as exc:
+        log.warning("mine_delta: episode Haiku call failed", session_id=session_id, error=str(exc))
+        return False
+
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or f"exit code {result.returncode}"
+        log.warning("mine_delta: episode Haiku non-zero exit", session_id=session_id, detail=detail)
+        return False
+
+    summary = result.stdout.strip()
+    if not summary:
+        log.warning("mine_delta: episode Haiku returned empty output", session_id=session_id)
+        return False
+
+    # Detect project from cwd if available
+    try:
+        project = os.path.basename(os.getcwd()) or "general"
+    except Exception:
+        project = "general"
+
+    # Strip-then-slice; fall back to placeholder if empty (e.g. all-assistant
+    # turns or whitespace-only first user message) so titles never end in a
+    # dangling em-dash.
+    title_suffix = first_user_msg.strip()[:80] or "(no user prompt)"
+    title = f"Session {session_id[:8]} — {title_suffix}"
+    tags = ["type:episodic", f"session:{session_id}"]
+
+    try:
+        mem = _make_memory(
+            content=summary,
+            title=title,
+            tags=tags,
+            project=project,
+            source_type="mined-episode",
+            source_session=session_id,
+            importance=3,
+        )
+        _save_memory(mem)
+        log.info("mine_delta: saved episode memory", session_id=session_id, title=title)
+        return True
+    except Exception as exc:
+        log.warning("mine_delta: failed to save episode memory", session_id=session_id, error=str(exc))
+        return False
+
+
+# -----------------------------------------------------------------------
 # Main logic
 # -----------------------------------------------------------------------
 
@@ -304,6 +395,7 @@ def run(session_id: str, transcript_path: str) -> None:
             _write_empty_streak(session_id, 0, 0)
 
         # 8. Write memories to vault
+        memories_written = 0
         for mem_dict in memories:
             try:
                 content = mem_dict.get("content") or mem_dict.get("essence") or ""
@@ -323,8 +415,26 @@ def run(session_id: str, transcript_path: str) -> None:
                 )
                 _save_memory(mem)
                 log.info("mine_delta: saved memory", session_id=session_id, title=title)
+                memories_written += 1
             except Exception as exc:
                 log.warning("mine_delta: failed to save memory", session_id=session_id, error=str(exc))
+
+        # 8b. Emit per-session episode if session was substantive
+        if memories_written >= 1 and len(turns) >= 3:
+            first_user_msg = ""
+            for t in turns:
+                role, text = _extract_role_text(t)
+                if role == "user" and text.strip():
+                    first_user_msg = text
+                    break
+            try:
+                _emit_session_episode(session_id, turns, first_user_msg)
+            except Exception as exc:
+                log.warning(
+                    "mine_delta: episode emission raised unexpectedly",
+                    session_id=session_id,
+                    error=str(exc),
+                )
 
         # 9. Update offset
         _write_offset(session_id, eof)

@@ -10,6 +10,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
 
+## [2.2.0] - 2026-06-08 — Episodic memory seeds (architectural prep for future improvement)
+
+Two architectural additions targeting the long-standing episodic-query weakness vs everme (memem 8/28, everme ~70% on the same queries). **Benchmark unchanged at 74% in this release** — the gains are forward-looking (require an accumulated vault of episode-shaped memories which v2.2.0 starts emitting on every substantive Stop event). Honest accounting up-front: this is a seed, not a measurable lift.
+
+### Added
+
+- `memem/retrieve.py` — `_extract_temporal_range(query)` parses "yesterday" / "today" / "this morning" / "last week" / "this week" / "N days ago" / "N hours ago" from queries into `(start_dt, end_dt)` tuples. Returns `None` for non-temporal queries (zero behavior change).
+- `memem/retrieve.py` — date-aware re-ranking: when a query has a temporal phrase, candidate memories whose `created:` falls in the range get `+0.2` to cosine score before final sort. Reorders existing top-K only — does not expand the result set. Zero impact on non-temporal queries; zero benchmark cost.
+- `memem/mine_delta.py` — `_emit_session_episode()` writes one per-session "episode" memory after substantive sessions (≥1 regular memory written + ≥3 turns in delta). Episode shape: `title="Session {sid8} — {first_user_msg[:80]}"`, `tags=["type:episodic", f"session:{sid}"]`, content = Haiku-generated 100-word narrative summary. Trivial sessions skip emission. One extra Haiku call per substantive Stop event (~$0.001-0.002, ~3-5s in detached subprocess — invisible to user).
+- `tests/test_retrieve_temporal.py` (18 tests) and `tests/test_episode_emission.py` (3 tests).
+
+### Prototyped but disabled before release
+
+- `_fts_temporal_search()` was built as an additive FTS supplement returning ≤3 memories from the query's time window. In benchmarking it expanded the precision denominator without contributing keyword-matching hits (74% → 73% regression). Helper retained in the module and exercised by tests, but never wired into `retrieve()` — currently dead-but-tested code. May be re-enabled in a future release once we have a benchmark that scores temporal relevance directly (the current 18-query benchmark scores by topic keywords only).
+
+### Why benchmark didn't move
+
+The 18-query benchmark scores retrieval against the **existing** vault. v2.2.0's episode emission only seeds **future** memories. Until the vault has accumulated v2.2.0-shaped episodes (weeks of use), the benchmark cannot measure m2's benefit. The date-aware rerank does fire on the 3 episodic queries with "yesterday" / "v1.12.0" patterns but only reorders within the top-K — it doesn't surface new relevant memories.
+
+### Backward-compat
+
+100%. Queries without temporal phrases retrieve identically to v2.1.1. Trivial sessions don't emit episodes. PRECISION_GATE in benchmark stays at 70%.
+
+### Tests
+
+- 391 passed + 21 new = **412 passed / 14 skipped** (memem total)
+- ruff clean
+- 18-query benchmark: 74.0% precision, 105ms warm latency (unchanged from v2.1.1)
+
 ## [2.1.1] - 2026-06-08 — Stop hook fixes
 
 Patch release fixing two issues discovered after v2.1.0 reload:
