@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
 
+## [2.1.1] - 2026-06-08 — Stop hook fixes
+
+Patch release fixing two issues discovered after v2.1.0 reload:
+
+- **Stop hook JSON validation failure** — `hooks/stop-mine.sh` emitted `{"hookSpecificOutput":{"hookEventName":"Stop","additionalContext":""}}`, but Claude Code's Stop hook protocol does NOT accept the `hookSpecificOutput` envelope (only SessionStart does). Symptom: `Hook JSON output validation failed — (root): Invalid input`. Fix: hook now exits 0 silently with zero stdout. Mining still runs detached.
+- **`post-stop-attribution.sh` still called deleted `mine_session_delta`** — v2.1.0 removed this function from `mining.py` but the mine-on-stop block in `post-stop-attribution.sh` still tried to import it, breaking every Stop hook fire with `ImportError`. Fix: block removed; mining now lives exclusively in `stop-mine.sh`.
+
+Tests updated: `tests/test_stop_mine_hook.sh` and `tests/test_stop_hook_integration.py` now assert empty stdout (was previously asserting the invalid envelope shape, which passed unit tests but failed in production). 391 passed / 14 skipped. ruff clean.
+
 ## [2.1.0] - 2026-06-08 — v2.1.0: Event-Triggered Mining (Daemon Removal)
 
 The miner daemon is gone. Mining now triggers on every Claude Code `Stop` event via a detached subprocess, making memory extraction feel real-time. A `SessionStart` stale-session sweep provides a safety net for sessions where Stop never fired (crash, `kill -9`, network drop).
