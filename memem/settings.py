@@ -61,3 +61,23 @@ MEMEM_TRIVIAL_REGEX_ZH: re.Pattern[str] = re.compile(
     r")$",
 )
 
+# ---------------------------------------------------------------------------
+# Access writeback (telemetry sidecar)
+# ---------------------------------------------------------------------------
+
+# When enabled, retrieve() fires a daemon thread to record access counts for
+# each cosine hit via telemetry._record_access. Default ON (set to "0" to disable).
+MEMEM_WRITEBACK_ENABLED: bool = os.getenv("MEMEM_WRITEBACK_ENABLED", "1") not in ("0", "false", "False", "no")
+
+# ---------------------------------------------------------------------------
+# Recency decay scoring (v2.3.0 scaffolded, currently no-op)
+# ---------------------------------------------------------------------------
+
+# v2.3.0: NO-OP. Decay scoring was prototyped during v2.3.0 (m4) but reverted
+# after a 74% → 70% benchmark regression caused by multiplying negative cosine
+# scores. The scaffold (this setting + decay tests + commented call site in
+# retrieve.py) is retained for v2.4.0 follow-up, which will land negative-score
+# clamping before re-enabling the multiplier. Default is OFF — flipping to "1"
+# today has zero effect; flipping it post v2.4.0 will activate decay scoring.
+MEMEM_DECAY_ENABLED: bool = os.getenv("MEMEM_DECAY_ENABLED", "0") not in ("0", "false", "False", "no")
+

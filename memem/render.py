@@ -56,7 +56,7 @@ def render_slice(
         lines.append("")
 
     # Relevant section
-    lines.append(f"## Relevant ({len(results_list)} by cosine)")
+    lines.append(f"## Relevant ({len(results_list)} hits)")
     if not results_list:
         lines.append("(no matches)")
     for i, hit in enumerate(results_list, 1):

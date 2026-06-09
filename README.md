@@ -30,6 +30,10 @@ memem is a Claude Code plugin that gives Claude persistent memory across session
 
 It's **local-first**: no cloud services, no API keys required, no vendor lock-in. Everything lives in `~/obsidian-brain/memem/memories/` as human-readable markdown.
 
+### What's new in v2.3.0 (hybrid retrieval)
+
+`active_memory_slice` now uses a two-stage hybrid retrieval pipeline: BM25 + cosine Reciprocal Rank Fusion (RRF) builds a top-20 candidate pool, then Maximal Marginal Relevance (MMR, λ=0.7) selects the final 8 results to suppress near-duplicate memories. Access writeback is on by default (`MEMEM_WRITEBACK_ENABLED=1`); each recall fires a daemon thread that increments `access_count` in a JSON sidecar at `~/.memem/telemetry.json` (NOT in memory frontmatter — deliberate, to keep `load_vault_index`'s mtime cache stable). Net benchmark result: **75.3% precision** (+1.3 pp vs v2.0.0 baseline), 133ms warm latency. Recency decay scoring was prototyped but reverted due to a negative-cosine ranking regression — see CHANGELOG for details.
+
 ### What's new in v2.2.0 (episodic seeds)
 
 Two architectural additions targeting the episodic-query gap vs everme. (a) `retrieve.py` parses temporal phrases in queries ("yesterday" / "last week" / "N days ago") and re-ranks candidates by `created:` proximity (+0.2 boost). Zero behavior change for non-temporal queries. (b) `mine_delta.py` emits one per-session "episode" memory after substantive Stop events (tagged `type:episodic`, Haiku-generated 100-word narrative). Benchmark is unchanged at 74% in this release — the gains are forward-looking and accrue as the vault accumulates v2.2.0-shaped episodes. Backward-compat is 100%.
@@ -325,7 +329,7 @@ All recall tools return **slice-formatted markdown** via a unified `render_slice
 | `memory_graph(memory_id)` | Inspect typed/scored graph neighbors for one memory. |
 | `memory_graph_audit()` | Report graph quality issues: orphans, dead links, hubs, stale edges. |
 | `memory_graph_rebuild(scope_id)` | Rebuild the graph side index from the Obsidian vault. |
-| `active_memory_slice(query, task_mode?)` | v2.0.0: thin wrapper over `retrieve()` + `render_slice()`. Returns markdown with `## Working` + `## Relevant` (top-K by cosine + FTS supplement for version/date literals). |
+| `active_memory_slice(query, task_mode?)` | v2.3.0: thin wrapper over `retrieve()` + `render_slice()`. Returns markdown with `## Working` + `## Relevant`. Retrieval uses BM25 + cosine RRF fusion (top-20 pool) followed by MMR diversification (λ=0.7) to select the final 8 results. FTS supplement retained for version/date literals. L0 project-identity memories are exempt from MMR diversity penalty. |
 
 ## How do I inspect slices or writeback manually?
 

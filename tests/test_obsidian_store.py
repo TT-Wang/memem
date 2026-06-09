@@ -503,3 +503,31 @@ def test_make_memory_rejects_invalid_layer(tmp_vault, tmp_cortex_dir):
             title="Test invalid layer",
             layer=5,
         )
+
+
+def test_full_iso_timestamps_roundtrip(tmp_vault, tmp_cortex_dir):
+    """created and updated frontmatter fields must store the full ISO timestamp, not just the date."""
+    import importlib
+
+    from memem import obsidian_store
+    importlib.reload(obsidian_store)
+
+    mem = obsidian_store._make_memory(
+        content="Some valid content that is long enough to pass checks.",
+        title="Full ISO timestamp test",
+        project="general",
+        source_type="user",
+    )
+    mem["created_at"] = "2026-04-18T15:30:00+00:00"
+    mem["updated_at"] = "2026-04-20T10:00:00+00:00"
+
+    obsidian_store._write_obsidian_memory(mem)
+
+    vault = tmp_vault / "memem" / "memories"
+    files = list(vault.glob("*.md"))
+    assert files, "Expected at least one memory file to be written"
+    result = obsidian_store._parse_obsidian_memory_file(files[0])
+    assert result is not None
+    # _parse_obsidian_memory_file maps frontmatter "created" -> "created_at" and "updated" -> "updated_at"
+    assert "T" in result["created_at"], f"created_at should contain 'T' (full ISO), got: {result['created_at']!r}"
+    assert "T" in result["updated_at"], f"updated_at should contain 'T' (full ISO), got: {result['updated_at']!r}"

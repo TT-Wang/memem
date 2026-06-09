@@ -97,9 +97,9 @@ class TestRoundTrip:
         assert parsed["source_session"] == mem["source_session"]
         assert parsed["schema_version"] == mem["schema_version"]
         assert parsed["layer"] == mem["layer"]
-        # Dates are stored as YYYY-MM-DD ([:10] slice), so compare that way
-        assert parsed["created_at"] == mem["created_at"][:10]
-        assert parsed["updated_at"] == mem["updated_at"][:10]
+        # Dates are stored as full ISO timestamps (no truncation)
+        assert parsed["created_at"] == mem["created_at"]
+        assert parsed["updated_at"] == mem["updated_at"]
         # Body
         assert parsed["essence"] == mem["essence"]
 

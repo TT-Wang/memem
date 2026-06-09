@@ -562,8 +562,8 @@ def _write_obsidian_memory(mem: dict):
     }
     if safe_related:
         meta["related"] = safe_related
-    meta["created"] = mem.get("created_at", "")[:10]
-    meta["updated"] = mem.get("updated_at", "")[:10]
+    meta["created"] = mem.get("created_at", "")
+    meta["updated"] = mem.get("updated_at", "")
     meta["source_type"] = mem.get("source_type", "user")
     meta["source_session"] = mem.get("source_session", "") or ""
     meta["importance"] = mem.get("importance", 3)

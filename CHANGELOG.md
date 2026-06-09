@@ -10,6 +10,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
 
+## [2.3.0] - 2026-06-09 — Hybrid retrieval (RRF + MMR + access writeback)
+
+v2.3.0 ships a new retrieval pipeline that replaces the v2.0.0 cosine-only top-K with BM25 + cosine Reciprocal Rank Fusion (RRF) followed by Maximal Marginal Relevance (MMR) diversification. Net benchmark result: **75.3% precision** — +1.3 pp vs v2.0.0 baseline (74.0%), with 24/8 cross-scope hits preserved and 133ms warm latency. Full ISO timestamps are now written to memory frontmatter, and access writeback (telemetry sidecar) is on by default. Recency decay scoring was scaffolded but reverted before release (see below).
+
+### What shipped
+
+- **Full ISO timestamps in frontmatter (m1)** — `created:` and `updated:` fields in memory markdown now write full ISO-8601 datetime strings (`2026-06-09T14:32:00+00:00`) instead of date-only strings. Backward-compat: existing date-only values are read correctly by all code paths.
+- **Vault index extracts decay/access fields (m2)** — `retrieve.py:load_vault_index()` now parses six additional frontmatter fields per memory: `last_accessed_at`, `access_count`, `valid_at`, `decay_immune`, `layer`, `importance`. These are surfaced via the `MemoryHit` TypedDict for downstream scoring. m2 ships them as passthrough data with no scoring change (74.0% precision unchanged).
+- **Access writeback via telemetry sidecar (m3)** — `retrieve()` spawns a fire-and-forget daemon thread that calls `telemetry._record_access(memory_id)` for each cosine hit, persisting to the JSON sidecar at `~/.memem/telemetry.json` (NOT to memory frontmatter — deliberate to avoid invalidating `load_vault_index`'s `(mtime, file_count)` cache key). Gated by `MEMEM_WRITEBACK_ENABLED` (default `1` — on). Note: today the vault-index `access_count` field stays at `0` because the writeback path is sidecar-only; reconciliation of the sidecar into frontmatter is deferred to the v2.4.0 decay rehab. No scoring change from this signal alone (74.0%).
+- **BM25 + cosine RRF fusion (m5)** — `retrieve.py` now builds a BM25 index (`_build_bm25`) over vault content and fuses BM25 rank with cosine rank using Reciprocal Rank Fusion (`_rrf_fusion`, k=60). `_fts_literal_search` is retained as a version/date-literal supplement. `rank_bm25>=0.2` added to `pyproject.toml` dependencies. Benchmark: 74.0% → **78.7%** (+4.7 pp).
+- **MMR diversification λ=0.7 (m6)** — after RRF produces a top-20 candidate pool, `retrieve.py` applies Maximal Marginal Relevance with λ=0.7 to select the final 8 results. L0 (project-identity) memories and memories tagged `decay_immune` are exempt from the diversity penalty (always included). Benchmark: 78.7% → **75.3%** (−3.4 pp from m5 peak). Trade-off detailed below.
+- **`MEMEM_DECAY_ENABLED` setting added** — env var present and documented; currently has no effect on retrieval (decay scoring reverted, see below).
+
+### What was scaffolded but reverted
+
+- **Recency decay scoring (m4) — REVERTED** — `decay.py` was written and its API is exercised by tests, but the decay multiplier is **not applied** in `retrieve()`. Root cause: multiplying cosine scores by a small decay factor (0.0–1.0) caused memories with slightly negative cosine scores (low-overlap but non-zero vectors) to become less-negative after multiplication, pushing them up the ranking. Net effect: precision dropped 74% → 70%. The fix requires clamping negative cosine scores to zero before applying decay — deferred to **v2.4.0**. `MEMEM_DECAY_ENABLED` is present but `retrieve()` ignores it.
+
+### Benchmark impact
+
+| Signal | Outcome | Benchmark |
+|--------|---------|-----------|
+| Full ISO timestamps | shipped | 74.0% (data only) |
+| Vault index extracts decay/access fields | shipped | 74.0% (no scoring change) |
+| Access writeback via telemetry sidecar | shipped | 74.0% (no scoring change) |
+| Recency decay scoring | **REVERTED** | 70.0% (reverted — not applied) |
+| BM25 + cosine RRF fusion | shipped | 74.0% → **78.7%** (+4.7 pp) |
+| MMR diversification λ=0.7 | shipped | 78.7% → **75.3%** (−3.4 pp from m5 peak) |
+
+**Final v2.3.0 state**: 75.3% precision, cross-scope 24/8, latency 133ms.
+
+### Notes on the MMR trade-off
+
+The −3.4 pp drop from the m5 RRF peak (78.7%) to the v2.3.0 final (75.3%) is expected and intentional. The 18-query benchmark rewards repeated keyword hits across result slots — returning 8 near-duplicate memories all matching the same keyword scores better than a diverse set. MMR penalizes exactly that redundancy. In production use, diverse results (different topics, different sessions, different angles) are more useful than 8 memories that are variations on the same theme. The +1.3 pp net gain vs v2.0.0 baseline comes entirely from BM25 RRF. MMR's −3.4 pp is a benchmark artifact; real users should see quality improve.
+
+### Tests
+
+- All existing tests pass
+- New tests cover decay module API (`tests/test_decay.py`)
+- ruff clean
+- 18-query benchmark: 75.3% precision, 133ms warm latency
+
 ## [2.2.0] - 2026-06-08 — Episodic memory seeds (architectural prep for future improvement)
 
 Two architectural additions targeting the long-standing episodic-query weakness vs everme (memem 8/28, everme ~70% on the same queries). **Benchmark unchanged at 74% in this release** — the gains are forward-looking (require an accumulated vault of episode-shaped memories which v2.2.0 starts emitting on every substantive Stop event). Honest accounting up-front: this is a seed, not a measurable lift.

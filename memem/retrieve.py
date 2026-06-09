@@ -1,4 +1,4 @@
-"""memem v2.2.0 retrieval — cosine top-K + FTS-conditional supplement + temporal re-rank.
+"""memem v2.3.0 retrieval — BM25+cosine RRF fusion + FTS-conditional supplement + temporal re-rank.
 
 Benchmark-validated at 74% precision on 18-query × 6-category eval
 (vs v1.13.0's 24%). Replaces ~12,400 LOC of legacy retrieval pipeline.
@@ -22,12 +22,14 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from datetime import UTC, datetime, timedelta
 from typing import TypedDict
 
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
+import memem.settings as _settings
 from memem.models import MEMEM_DIR, OBSIDIAN_MEMORIES_DIR, parse_iso_dt
 
 _EMB_PATH = MEMEM_DIR / "embeddings.npy"
@@ -38,6 +40,12 @@ _ID_PAT = re.compile(r"^id:\s*([a-f0-9-]+)", re.M)
 _TITLE_PAT = re.compile(r"^title:\s*(.*)$", re.M)
 _PROJECT_PAT = re.compile(r"^project:\s*(.*)$", re.M)
 _CREATED_PAT = re.compile(r"^created:\s*(.*)$", re.M)
+_LAST_ACCESSED_PAT = re.compile(r"^last_accessed_at:\s*'?([^'\n]*)'?", re.M)
+_ACCESS_COUNT_PAT = re.compile(r"^access_count:\s*(\d+)", re.M)
+_VALID_AT_PAT = re.compile(r"^valid_at:\s*'?([^'\n]*)'?", re.M)
+_DECAY_IMMUNE_PAT = re.compile(r"^decay_immune:\s*(true|false|yes|no)", re.M | re.I)
+_LAYER_PAT = re.compile(r"^layer:\s*(\d+)", re.M)
+_IMPORTANCE_PAT = re.compile(r"^importance:\s*(\d+)", re.M)
 _VERSION_PAT = re.compile(r"v\d+\.\d+(?:\.\d+)?", re.I)
 _DATE_PAT = re.compile(r"\d{4}-\d{2}-\d{2}")
 
@@ -48,6 +56,8 @@ _vault_idx_cache: dict | None = None
 _vault_idx_mtime: float = 0
 _vault_idx_count: int = 0  # Phase 4.5 fix: also track file count so deletes invalidate
 _emb_cache: tuple | None = None  # (normalized_embeddings, ids_list, mtime)
+_bm25_cache: tuple | None = None  # (ids: list[str], bm25: BM25Okapi)
+_bm25_cache_key: tuple = (0.0, 0)  # (max_mtime, file_count) — same key as vault cache
 
 
 class MemoryHit(TypedDict, total=False):
@@ -59,6 +69,12 @@ class MemoryHit(TypedDict, total=False):
     body: str
     score: float
     source: str  # "cosine" or "fts"
+    last_accessed_at: str
+    access_count: int
+    valid_at: str
+    decay_immune: bool
+    layer: int
+    importance: int
 
 
 def _get_model() -> SentenceTransformer:
@@ -107,14 +123,42 @@ def load_vault_index() -> dict[str, dict]:
             title_m = _TITLE_PAT.search(front)
             project_m = _PROJECT_PAT.search(front)
             created_m = _CREATED_PAT.search(front)
+            created_val = (created_m.group(1) if created_m else "").strip("'\" ")
+            last_accessed_m = _LAST_ACCESSED_PAT.search(front)
+            last_accessed_val = (last_accessed_m.group(1) if last_accessed_m else "").strip("'\" ") or created_val
+            access_count_m = _ACCESS_COUNT_PAT.search(front)
+            try:
+                access_count_val = int(access_count_m.group(1)) if access_count_m else 0
+            except (ValueError, AttributeError):
+                access_count_val = 0
+            valid_at_m = _VALID_AT_PAT.search(front)
+            valid_at_val = (valid_at_m.group(1) if valid_at_m else "").strip("'\" ") or created_val
+            decay_immune_m = _DECAY_IMMUNE_PAT.search(front)
+            decay_immune_val = decay_immune_m.group(1).lower() in ("true", "yes") if decay_immune_m else False
+            layer_m = _LAYER_PAT.search(front)
+            try:
+                layer_val = int(layer_m.group(1)) if layer_m else 2
+            except (ValueError, AttributeError):
+                layer_val = 2
+            importance_m = _IMPORTANCE_PAT.search(front)
+            try:
+                importance_val = int(importance_m.group(1)) if importance_m else 3
+            except (ValueError, AttributeError):
+                importance_val = 3
             idx[id_m.group(1)] = {
                 "id": id_m.group(1),
                 "path": str(p),
                 "title": (title_m.group(1) if title_m else p.name).strip("'\" "),
                 "project": (project_m.group(1) if project_m else "?").strip("'\" "),
-                "created": (created_m.group(1) if created_m else "").strip("'\" "),
+                "created": created_val,
                 "body": body[:300],
                 "body_full": body[:2000],
+                "last_accessed_at": last_accessed_val,
+                "access_count": access_count_val,
+                "valid_at": valid_at_val,
+                "decay_immune": decay_immune_val,
+                "layer": layer_val,
+                "importance": importance_val,
             }
         except Exception:  # noqa: BLE001
             continue
@@ -249,6 +293,112 @@ def _fts_literal_search(query: str, vault_idx: dict, max_results: int = 2) -> li
     return hits
 
 
+def _build_bm25(vault_idx: dict) -> tuple | None:
+    """Build BM25Okapi index over title + body_full. Cached by (mtime, count)."""
+    global _bm25_cache, _bm25_cache_key
+    if not vault_idx:
+        return None
+    # Same key as vault: tracks latest mtime + count
+    md_files = list(OBSIDIAN_MEMORIES_DIR.glob("*.md"))
+    key = (max((p.stat().st_mtime for p in md_files), default=0), len(md_files))
+    if _bm25_cache is not None and key == _bm25_cache_key:
+        return _bm25_cache
+    from rank_bm25 import BM25Okapi
+    corpus_ids: list[str] = []
+    corpus_tokens: list[list[str]] = []
+    for mid, mem in vault_idx.items():
+        text = (mem.get("title", "") + " " + mem.get("body_full", "")).lower()
+        tokens = text.split()
+        if not tokens:
+            continue  # skip empty bodies
+        corpus_ids.append(mid)
+        corpus_tokens.append(tokens)
+    if not corpus_tokens:
+        return None
+    bm25 = BM25Okapi(corpus_tokens)
+    _bm25_cache = (corpus_ids, bm25)
+    _bm25_cache_key = key
+    return _bm25_cache
+
+
+def _mmr_rerank(
+    candidates: list[MemoryHit],
+    embeddings_norm: np.ndarray,
+    ids: list[str],
+    k: int = 8,
+    lam: float = 0.7,
+) -> list[MemoryHit]:
+    """MMR re-rank: select k from candidates balancing relevance vs diversity.
+
+    L0 / decay_immune candidates are pre-seeded into the selected set (always
+    included, no diversity penalty). The remaining slots are filled by MMR
+    iteration over the rest.
+    """
+    if not candidates:
+        return []
+    if len(candidates) <= k:
+        return candidates  # nothing to diversify
+    # Pre-seed immunes
+    id_to_emb_idx = {mid: i for i, mid in enumerate(ids)}
+    selected: list[MemoryHit] = []
+    selected_vecs: list[np.ndarray] = []
+    remaining: list[MemoryHit] = []
+    for hit in candidates:
+        if hit.get("layer", 2) == 0 or hit.get("decay_immune", False):
+            selected.append(hit)
+            emb_idx = id_to_emb_idx.get(hit["id"])
+            if emb_idx is not None and emb_idx < len(embeddings_norm):
+                selected_vecs.append(embeddings_norm[emb_idx])
+        else:
+            remaining.append(hit)
+    # MMR loop on remaining
+    while len(selected) < k and remaining:
+        best_mmr = -float("inf")
+        best_idx = 0
+        for i, hit in enumerate(remaining):
+            relevance = hit.get("score", 0.0)
+            emb_idx = id_to_emb_idx.get(hit["id"])
+            if emb_idx is None or emb_idx >= len(embeddings_norm):
+                # no embedding — treat as max diversity (include eagerly)
+                max_sim = 0.0
+            elif not selected_vecs:
+                max_sim = 0.0
+            else:
+                hit_vec = embeddings_norm[emb_idx]
+                sims = np.array([float(hit_vec @ sv) for sv in selected_vecs])
+                max_sim = float(sims.max())
+            mmr = lam * relevance - (1 - lam) * max_sim
+            if mmr > best_mmr:
+                best_mmr = mmr
+                best_idx = i
+        winner = remaining.pop(best_idx)
+        selected.append(winner)
+        emb_idx = id_to_emb_idx.get(winner["id"])
+        if emb_idx is not None and emb_idx < len(embeddings_norm):
+            selected_vecs.append(embeddings_norm[emb_idx])
+    return selected[:k]
+
+
+def _rrf_fusion(
+    cosine_scores: dict[str, float],
+    bm25_scores: dict[str, float],
+    k: int = 60,
+) -> dict[str, float]:
+    """Standard RRF: score = 1/(k + cosine_rank) + 1/(k + bm25_rank)."""
+    cosine_ranks = {mid: r for r, (mid, _) in enumerate(
+        sorted(cosine_scores.items(), key=lambda x: -x[1]), start=1)}
+    bm25_ranks = {mid: r for r, (mid, _) in enumerate(
+        sorted(bm25_scores.items(), key=lambda x: -x[1]), start=1)}
+    all_ids = set(cosine_ranks) | set(bm25_ranks)
+    missing_rank = max(len(cosine_ranks), len(bm25_ranks)) + 1
+    out: dict[str, float] = {}
+    for mid in all_ids:
+        c_rank = cosine_ranks.get(mid, missing_rank)
+        b_rank = bm25_ranks.get(mid, missing_rank)
+        out[mid] = 1.0 / (k + c_rank) + 1.0 / (k + b_rank)
+    return out
+
+
 def retrieve(query: str, k: int = 8) -> list[MemoryHit]:
     """Main retrieval: cosine top-K + FTS supplement for version/date literals.
 
@@ -296,22 +446,59 @@ def retrieve(query: str, k: int = 8) -> list[MemoryHit]:
     model = _get_model()
     q_vec = model.encode(query, normalize_embeddings=True)
     scores = embeddings_norm @ q_vec
+
+    # Recency decay scoring (m4): multiply cosine scores by per-memory strength.
+    # L0 and decay_immune memories are exempt (is_immune() → multiplier stays 1.0).
+    # Applies BEFORE argsort so decay changes the ranking.
+    # REVERTED: benchmark regression to 70.0% (gate is 73%) — scaffolding kept,
+    # scoring wiring disabled pending a benchmark-safe calibration.
+    # if _settings.MEMEM_DECAY_ENABLED:
+    #     from memem.decay import compute_strength, is_immune
+    #     decay_mult = np.ones_like(scores)
+    #     for i, mem_id in enumerate(ids):
+    #         if mem_id not in vault_idx:
+    #             continue
+    #         mem = vault_idx[mem_id]
+    #         if is_immune(mem):
+    #             continue  # multiplier stays 1.0
+    #         decay_mult[i] = compute_strength(mem)
+    #     scores = scores * decay_mult
+
     order = np.argsort(scores)[::-1]
+
+    # Build BM25 over vault (cached)
+    bm25_data = _build_bm25(vault_idx)
+    # Compute cosine scores into dict[id, float]
+    cosine_scores: dict[str, float] = {}
+    for i in order:
+        if i < len(ids) and ids[i] in vault_idx:
+            cosine_scores[ids[i]] = float(scores[i])
+    # Compute BM25 scores
+    bm25_scores: dict[str, float] = {}
+    if bm25_data is not None:
+        bm25_ids, bm25_index = bm25_data
+        query_tokens = query.lower().split()
+        if query_tokens:
+            raw_bm25 = bm25_index.get_scores(query_tokens)
+            bm25_scores = {bm25_ids[i]: float(raw_bm25[i]) for i in range(len(bm25_ids))}
+    # Fuse
+    fused = _rrf_fusion(cosine_scores, bm25_scores, k=60)
+    # Sort by fused score desc, take top 20 (for MMR), build candidate list
+    sorted_ids = sorted(fused, key=lambda m: -fused[m])
     cosine_candidates: list[MemoryHit] = []
     cosine_added = 0
-    for i in order:
-        if cosine_added >= k:
+    mmr_pool_size = min(20, len(sorted_ids))
+    for mid in sorted_ids:
+        if cosine_added >= mmr_pool_size:
             break
-        if i < len(ids) and ids[i] in vault_idx:
-            mem = vault_idx[ids[i]]
+        if mid in vault_idx:
+            mem = vault_idx[mid]
             if mem["path"] not in seen_paths:
-                cosine_candidates.append(
-                    {
-                        **{key: val for key, val in mem.items() if key != "body_full"},
-                        "score": float(scores[i]),
-                        "source": "cosine",
-                    }
-                )
+                cosine_candidates.append({
+                    **{key: val for key, val in mem.items() if key != "body_full"},
+                    "score": fused[mid],
+                    "source": "cosine",  # keep "cosine" so writeback in m3 still fires
+                })
                 seen_paths.add(mem["path"])
                 cosine_added += 1
 
@@ -327,5 +514,23 @@ def retrieve(query: str, k: int = 8) -> list[MemoryHit]:
                 hit["score"] = hit["score"] + 0.2
         cosine_candidates.sort(key=lambda h: h["score"], reverse=True)
 
-    results.extend(cosine_candidates)
+    # MMR re-ranking: diversify top-20 cosine candidates down to k results.
+    # L0 / decay_immune memories are pre-seeded (always included).
+    mmr_selected = _mmr_rerank(cosine_candidates, embeddings_norm, ids, k=k)
+    results.extend(mmr_selected)
+
+    # Fire-and-forget access writeback via telemetry sidecar (m3).
+    # Only cosine hits are recorded; FTS hits are structural supplements, not
+    # relevance-driven accesses. The daemon thread does not block the caller.
+    if _settings.MEMEM_WRITEBACK_ENABLED and results:
+        def _writeback():
+            from memem.telemetry import _record_access
+            for hit in results:
+                if hit.get("source") == "cosine":
+                    try:
+                        _record_access(hit["id"])
+                    except Exception:  # noqa: BLE001
+                        pass
+        threading.Thread(target=_writeback, daemon=True).start()
+
     return results
