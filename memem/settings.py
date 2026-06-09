@@ -15,7 +15,7 @@ import re
 # Injection mode
 # ---------------------------------------------------------------------------
 
-MEMEM_INJECTION_MODE: str = os.getenv("MEMEM_INJECTION_MODE", "auto")
+MEMEM_INJECTION_MODE: str = os.getenv("MEMEM_INJECTION_MODE", "tool")
 
 # ---------------------------------------------------------------------------
 # Cadence and backoff

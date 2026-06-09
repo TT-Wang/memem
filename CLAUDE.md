@@ -33,13 +33,15 @@ Memories are organized into layers:
 
 **Injection mode (`MEMEM_INJECTION_MODE`)** — controls whether the hook auto-injects context into every prompt (v1.9+):
 
+**As of v2.4.0, `tool` is the default.** Existing users with `MEMEM_INJECTION_MODE=auto` in their shell profile keep auto behavior unchanged.
+
 | Value | Behaviour |
 |-------|-----------|
-| `auto` | Default. Hook injects the active memory slice on every prompt. Equivalent to pre-v1.9 behaviour. |
-| `hybrid` | Hook applies gating heuristics (trivial-query filter, turn cadence, empty-streak backoff, topic-shift detection) before injecting. Recommended for high-frequency sessions — reduces noise without losing recall. Enable with `MEMEM_INJECTION_MODE=hybrid`. |
-| `tool` | Hook produces no auto-injection. You control recall entirely via the `active_memory_slice` MCP tool. Zero hook overhead; no passive context. |
+| `auto` | Hook injects the active memory slice on every prompt. Equivalent to pre-v2.4.0 behaviour. To restore: `export MEMEM_INJECTION_MODE=auto`. |
+| `hybrid` | Hook applies gating heuristics (trivial-query filter, turn cadence, empty-streak backoff, topic-shift detection) before injecting. Reduces noise without losing recall. Enable with `MEMEM_INJECTION_MODE=hybrid`. |
+| `tool` | **Default (v2.4.0+).** Hook produces no auto-injection. You control recall entirely via the `active_memory_slice` MCP tool. Zero hook overhead; no passive context. |
 
-Set this in your Claude Code environment or shell profile (e.g. `export MEMEM_INJECTION_MODE=hybrid`).
+Set this in your Claude Code environment or shell profile (e.g. `export MEMEM_INJECTION_MODE=auto`).
 
 Hybrid-mode tunables (env vars, all optional):
 
@@ -133,6 +135,9 @@ rm ~/.memem/.miner-opted-in
 | `transcript_search` | Search raw Claude Code session logs |
 | `context_assemble` | On-demand query-tailored briefing from all knowledge |
 | `active_memory_slice` | On-demand runtime working-state slice from active recall candidates |
+
+**CLI commands** (run in your terminal, not via MCP):
+- `python3 -m memem.server --analyze-recalls` — summarize recall telemetry from `~/.memem/.recall_log.jsonl`: which tools were called, which memories retrieved most often, recall frequency per session. Use this to understand how Claude is (or isn't) pulling memory.
 
 ## Episodic consolidation (v1.7)
 

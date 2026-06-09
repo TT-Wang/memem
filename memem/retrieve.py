@@ -23,12 +23,14 @@ from __future__ import annotations
 import json
 import re
 import threading
+import time
 from datetime import UTC, datetime, timedelta
 from typing import TypedDict
 
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
+import memem.recall_log as _recall_log
 import memem.settings as _settings
 from memem.models import MEMEM_DIR, OBSIDIAN_MEMORIES_DIR, parse_iso_dt
 
@@ -412,6 +414,7 @@ def retrieve(query: str, k: int = 8) -> list[MemoryHit]:
         score. Each hit has keys: id, path, title, project, created, body,
         score, source.
     """
+    t0 = time.monotonic()
     vault_idx = load_vault_index()
     if not vault_idx:
         return []
@@ -533,4 +536,15 @@ def retrieve(query: str, k: int = 8) -> list[MemoryHit]:
                         pass
         threading.Thread(target=_writeback, daemon=True).start()
 
+    # v2.4.0 telemetry — log every retrieve() call (called from hook in auto/hybrid mode)
+    try:
+        _recall_log.log_recall(
+            call_type="hook_auto",
+            query=query,
+            returned_ids=[h.get("id", "") for h in results],
+            latency_ms=int((time.monotonic() - t0) * 1000),
+            source="hook",
+        )
+    except Exception:  # noqa: BLE001
+        pass
     return results

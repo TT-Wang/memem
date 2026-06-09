@@ -24,11 +24,13 @@ def _build_mcp():
     Importing ``mcp.server.fastmcp`` here keeps non-MCP commands free of the
     dependency.
     """
+    import time
     from typing import Annotated
 
     from mcp.server.fastmcp import FastMCP
     from pydantic import Field
 
+    import memem.recall_log as _recall_log
     from memem.cross_vault import load_vault_registry as _load_vault_registry
     from memem.cross_vault import search_across_vaults as _search_across_vaults
     from memem.graph_index import (
@@ -65,11 +67,9 @@ def _build_mcp():
             str,
             Field(
                 description=(
-                    "Natural-language query describing what you want to find. "
-                    "Can be a question (\"how did we handle auth?\"), a topic "
-                    "(\"jwt rotation\"), or a fragment of a decision you vaguely "
-                    "remember. Keyword match is fuzzy (FTS5 + synonym expansion) "
-                    "so approximate terms work."
+                    "Deprecated: prefer memory_search + memory_get for token efficiency. "
+                    "This legacy alias combines compact search and full-content fetch in "
+                    "one call. Still functional for backward compatibility."
                 ),
                 min_length=1,
                 max_length=500,
@@ -114,50 +114,20 @@ def _build_mcp():
             ),
         ] = "",
     ) -> str:
-        """Search memem memories for durable knowledge relevant to a query.
-
-        Use this when you need to recall prior decisions, conventions, bug fixes,
-        user preferences, or lessons learned from past Claude Code sessions. It
-        searches the full Obsidian-backed memory store via SQLite FTS5, ranks
-        results with a multi-signal scorer (relevance + recency + usage + importance),
-        and expands related-memory links.
-
-        Behaviour:
-          - Read-only. Does not modify any memory, index, or sidecar file.
-            Only side effect is a bump to the access-count telemetry sidecar
-            (~/.memem/telemetry.json), which influences future ranking.
-          - No authentication required. memem is local-first; there are no
-            credentials, tokens, or API keys.
-          - No rate limits. Typical latency is under 100ms on corpora up to
-            ~10k memories; pathological queries can take up to ~500ms.
-          - Data access scope: reads from ~/obsidian-brain/memem/memories/
-            and ~/.memem/search.db. Nothing leaves the local machine.
-          - Idempotent: calling twice with the same query returns the same
-            results (modulo the access-count telemetry bump).
-          - Failure modes: returns "No memories found for: <query>" on empty
-            result sets. Never raises to the caller; internal errors fall
-            back to a slower file-scan path.
-
-        Use `memory_recall` when:
-        - You need specific facts ("what auth library did we pick?")
-        - You want to check if a topic has prior context before making a decision
-        - You're debugging and want to find if this bug was fixed before
-
-        Do NOT use for:
-        - Session-level what-I-did-today logs (use `transcript_search` instead)
-        - Slice-first working context (use `active_memory_slice`)
-        - Listing every memory (use `memory_list` instead)
-
-        Returns: Markdown-formatted memory entries, grouped under a "### Memories"
-        header. Each entry has the memory title and body excerpt. If no matches
-        are found, returns "No memories found for: <query>".
-
-        Example:
-            memory_recall(query="jwt auth algorithm", limit=5)
-            → returns the top 5 memories mentioning JWT auth, such as a memory
-              documenting the decision to use RS256 in production.
-        """
-        return _memory_recall(query, scope_id=scope_id, limit=limit, rerank_model=rerank_model or None)
+        """Deprecated: prefer memory_search + memory_get for token efficiency. This legacy alias combines compact search and full-content fetch in one call. Still functional for backward compatibility."""
+        t0 = time.monotonic()
+        result = _memory_recall(query, scope_id=scope_id, limit=limit, rerank_model=rerank_model or None)
+        try:
+            _recall_log.log_recall(
+                call_type="tool_memory_recall",
+                query=query,
+                returned_ids=[],
+                latency_ms=int((time.monotonic() - t0) * 1000),
+                source="mcp",
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return result
 
     @mcp.tool()
     def memory_search(
@@ -165,9 +135,10 @@ def _build_mcp():
             str,
             Field(
                 description=(
-                    "Natural-language query describing what you want to find. "
-                    "Returns a compact index — IDs, titles, layer, and a 1-line "
-                    "essence snippet — not full content."
+                    "Compact-index search (~50 tok/result). Use FIRST to narrow candidates "
+                    "before pulling full content. Returns IDs + titles + 1-line snippets. "
+                    "Call this when the user references a topic, person, project, or "
+                    "decision that isn't already in conversation context."
                 ),
                 min_length=1,
                 max_length=500,
@@ -182,38 +153,20 @@ def _build_mcp():
             Field(description='Project scope to search within. Default "default".'),
         ] = "default",
     ) -> str:
-        """Layer-1 compact index search — the entry point to the 3-tier recall workflow.
-
-        Use this FIRST when you need to find memories. Returns ~50 tokens per
-        result (ID + layer + title + snippet) plus a one-hop graph-traversed
-        section of related memories. Then drill into specific IDs via
-        `memory_get` for full content, or trace the narrative around one via
-        `memory_timeline`.
-
-        Behaviour:
-          - Read-only, idempotent, no access-count bump (unlike memory_recall)
-          - Local-only SQLite FTS5 + Obsidian vault reads
-          - One-hop graph traversal via the `related` field — linked memories
-            are included under a separate "Related memories" section
-          - No authentication, no rate limits, no network I/O
-
-        Use when:
-          - You want to scan many candidates cheaply before committing tokens
-          - You're not sure exactly which memory you need and want to see titles
-          - Session start or topic shift — claude-mem pattern
-
-        Do NOT use for:
-          - Fetching full content when you already know the ID — use `memory_get`
-          - Chronological narrative — use `memory_timeline`
-
-        Returns: Markdown with `### Compact memory index` header, compact lines,
-        and optionally a `### Related memories` section.
-
-        Example:
-            memory_search(query="jwt auth", limit=5)
-            → returns 5 compact lines + any related memories linked by graph
-        """
-        return _memory_search(query, limit=limit, scope_id=scope_id)
+        """Compact-index search (~50 tok/result). Use FIRST to narrow candidates before pulling full content. Returns IDs + titles + 1-line snippets. Call this when the user references a topic, person, project, or decision that isn't already in conversation context."""
+        t0 = time.monotonic()
+        result = _memory_search(query, limit=limit, scope_id=scope_id)
+        try:
+            _recall_log.log_recall(
+                call_type="tool_memory_search",
+                query=query,
+                returned_ids=[],
+                latency_ms=int((time.monotonic() - t0) * 1000),
+                source="mcp",
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return result
 
     @mcp.tool()
     def memory_get(
@@ -221,8 +174,9 @@ def _build_mcp():
             list[str],
             Field(
                 description=(
-                    "List of memory IDs (8-char prefix supported). Fetch the "
-                    "full content of these specific memories."
+                    "Full content fetch by IDs (~500 tok/result). Use AFTER memory_search "
+                    "to retrieve specific memories. Or call directly with an 8-character ID prefix "
+                    "from the SessionStart episode catalog."
                 ),
                 min_length=1,
                 max_length=50,
@@ -233,34 +187,20 @@ def _build_mcp():
             Field(description='Project scope. Default "default".'),
         ] = "default",
     ) -> str:
-        """Layer-2 full content fetch — drill into specific memories by ID.
-
-        Use this AFTER `memory_search` has given you a compact index and you
-        want the full content of specific candidates. ~500 tokens per result.
-        Follows the `related` graph one hop and includes linked memories.
-
-        Behaviour:
-          - Read-only, idempotent, no telemetry side effects
-          - Accepts 8-char ID prefixes (same format as the compact index)
-          - IDs that can't be resolved produce a `[not-found: <id>]` marker,
-            the call never fails
-
-        Use when:
-          - You've seen titles via `memory_search` and want full bodies
-          - You need specific known memories by ID (e.g. from a prior brief)
-
-        Do NOT use for:
-          - Open-ended search — use `memory_search`
-          - Chronological context — use `memory_timeline`
-
-        Returns: Markdown with full content per requested memory, then a
-        `### Related memories` section via one-hop graph traversal.
-
-        Example:
-            memory_get(ids=["abc12345", "def67890"])
-            → returns full bodies of those 2 memories + any linked ones
-        """
-        return _memory_get(ids, scope_id=scope_id)
+        """Full content fetch by IDs (~500 tok/result). Use AFTER memory_search to retrieve specific memories. Or call directly with an 8-character ID prefix from the SessionStart episode catalog."""
+        t0 = time.monotonic()
+        result = _memory_get(ids, scope_id=scope_id)
+        try:
+            _recall_log.log_recall(
+                call_type="tool_memory_get",
+                query=" ".join(ids),
+                returned_ids=list(ids),
+                latency_ms=int((time.monotonic() - t0) * 1000),
+                source="mcp",
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return result
 
     @mcp.tool()
     def memory_timeline(
@@ -268,8 +208,9 @@ def _build_mcp():
             str,
             Field(
                 description=(
-                    "Anchor memory ID (8-char prefix supported). The timeline "
-                    "is built around this memory."
+                    "Chronological thread via related[] graph + same-project window. "
+                    "Use when you need the narrative around a memory (what led to it, "
+                    "what came after) — typically for understanding a decision's history."
                 ),
                 min_length=8,
                 max_length=64,
@@ -288,36 +229,25 @@ def _build_mcp():
             Field(description='Project scope. Default "default".'),
         ] = "default",
     ) -> str:
-        """Layer-3 chronological thread — narrative context around a memory.
-
-        Builds a chronological thread around an anchor memory using:
-          1. The anchor's `related[]` list (forward links)
-          2. Any memory whose `related[]` points back at the anchor (reverse links)
-          3. Same-project memories in the chronological window before/after
-
-        Use when:
-          - You found a memory via `memory_search` and want to understand
-            what led to it (decisions before) and what came after (consequences)
-          - Reconstructing the history of a decision or design evolution
-          - Debugging "why did we end up here?" questions
-
-        Do NOT use for:
-          - Open-ended search — use `memory_search`
-          - Fetching specific known memories — use `memory_get`
-
-        Returns: Markdown with `### Timeline around ...` header, **Before**
-        section (chronological), the anchor, and **After** section.
-
-        Example:
-            memory_timeline(memory_id="abc12345", depth_before=5, depth_after=5)
-            → returns 5 memories that led to abc12345 + abc12345 itself + 5 that followed
-        """
-        return _memory_timeline(
+        """Chronological thread via related[] graph + same-project window. Use when you need the narrative around a memory (what led to it, what came after) — typically for understanding a decision's history."""
+        t0 = time.monotonic()
+        result = _memory_timeline(
             memory_id,
             depth_before=depth_before,
             depth_after=depth_after,
             scope_id=scope_id,
         )
+        try:
+            _recall_log.log_recall(
+                call_type="tool_memory_timeline",
+                query=memory_id,
+                returned_ids=[memory_id],
+                latency_ms=int((time.monotonic() - t0) * 1000),
+                source="mcp",
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return result
 
     @mcp.tool()
     def memory_graph(
@@ -364,8 +294,13 @@ def _build_mcp():
             str,
             Field(
                 description=(
-                    "Current work request. memem retrieves relevant memories via "
-                    "cosine similarity and returns a focused working-state slice."
+                    "Call this when you encounter unfamiliar references (version numbers "
+                    "like v1.10.1, project names, bug shortcodes the user expects you to "
+                    "know), when about to make a decision the user might have already made "
+                    "in a prior session, OR when the user uses retrieval-language "
+                    "('remember', 'we discussed', 'did we agree'). ~150ms latency. The "
+                    "first call in a session is recommended if you don't have project "
+                    "context from CLAUDE.md."
                 ),
                 min_length=1,
                 max_length=2000,
@@ -381,22 +316,24 @@ def _build_mcp():
             ),
         ] = None,
     ) -> dict:
-        """v2.0.0: simplified retrieve()+render_slice() pipeline.
-
-        Replaces the v1.13 active_slice_engine chain with a two-step call:
-          1. retrieve(query, k=8) — cosine top-K + FTS supplement
-          2. render_slice(query, results, working) — 2-section markdown
-
-        Benchmark-validated at 74% precision on 18-query × 6-category eval
-        (vs v1.13.0's 24%). Returns rendered markdown under the ``result`` key
-        for MCP client compatibility.
-        """
+        """Call this when you encounter unfamiliar references (version numbers like v1.10.1, project names, bug shortcodes the user expects you to know), when about to make a decision the user might have already made in a prior session, OR when the user uses retrieval-language ('remember', 'we discussed', 'did we agree'). ~150ms latency. The first call in a session is recommended if you don't have project context from CLAUDE.md."""
+        t0 = time.monotonic()
         from memem.render import render_slice
         from memem.retrieve import retrieve
 
         results = retrieve(query, k=8)
         working = {"task_mode": task_mode} if task_mode else {}
         md = render_slice(query, results, working)
+        try:
+            _recall_log.log_recall(
+                call_type="tool_active_slice",
+                query=query,
+                returned_ids=[],
+                latency_ms=int((time.monotonic() - t0) * 1000),
+                source="mcp",
+            )
+        except Exception:  # noqa: BLE001
+            pass
         return {"result": md}
 
     @mcp.tool()

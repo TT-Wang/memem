@@ -14,7 +14,18 @@ set -euo pipefail
 INPUT=$(cat)
 
 # Honor user opt-out
-if [ "${MEMEM_INJECTION_MODE:-auto}" = "tool" ]; then
+if [ "${MEMEM_INJECTION_MODE:-tool}" = "tool" ]; then
+    # v2.4.0 Phase 4.5 fix: telemetry skip log written directly via bash
+    # (NOT python3 -c) to avoid 80-200ms cold-start subprocess on every
+    # UserPromptSubmit. POSIX guarantees atomic O_APPEND for writes under
+    # PIPE_BUF (4096B); this 160-byte line is well within bounds.
+    {
+        TS=$(date -u +%Y-%m-%dT%H:%M:%S.%6NZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
+        MEMEM_DIR_RESOLVED="${MEMEM_DIR:-$HOME/.memem}"
+        mkdir -p "$MEMEM_DIR_RESOLVED" 2>/dev/null
+        printf '{"ts":"%s","call_type":"hook_hybrid_skip","query":"","returned_ids":[],"latency_ms":0,"source":"hook"}\n' \
+            "$TS" >> "$MEMEM_DIR_RESOLVED/.recall_log.jsonl" 2>/dev/null
+    } 2>/dev/null || true
     echo '{}'
     exit 0
 fi

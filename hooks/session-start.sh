@@ -128,6 +128,39 @@ except ImportError:
 except Exception:
     content = ""
 
+# Episode catalog (v2.4.0) — list recent episodic memories so LLM
+# knows what stories it can pull via memory_get(id).
+try:
+    from memem.obsidian_store import _obsidian_memories
+    all_mems = _obsidian_memories()
+    # Sort all memories by created desc
+    all_mems_sorted = sorted(
+        all_mems,
+        key=lambda m: m.get("created_at") or m.get("created") or "",
+        reverse=True,
+    )
+    # Prefer type:episodic, then fill to 50 with most-recent of any type
+    episodic = [m for m in all_mems_sorted
+                if "type:episodic" in (m.get("domain_tags") or [])]
+    if len(episodic) < 50:
+        seen_ids = {m["id"] for m in episodic}
+        for m in all_mems_sorted:
+            if m["id"] not in seen_ids:
+                episodic.append(m)
+                if len(episodic) >= 50:
+                    break
+    episodic = episodic[:50]
+    if episodic:
+        cat_lines = ["", "## Episode index"]
+        for m in episodic:
+            mid = (m.get("id") or "")[:8]
+            date = (m.get("created_at") or m.get("created") or "")[:10] or "----"
+            title = (m.get("title") or "(untitled)")[:80]
+            cat_lines.append(f"- {mid} [{date}]: {title}")
+        content += "\n" + "\n".join(cat_lines)
+except Exception:  # noqa: BLE001 — never break SessionStart on catalog failure
+    pass
+
 # v2.0.0 Phase 4.5 fix: write .last-brief.json BEFORE the emit_empty() check.
 # Otherwise the marker file is never written when content is empty (the v2.0.0
 # default for session-start), and recall.py:_get_current_session_id always

@@ -807,6 +807,26 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         print(f"Lesson recorded: {lesson_id}")
         return
 
+    if cmd == "--analyze-recalls":
+        from memem.recall_log import analyze_recalls
+        summary = analyze_recalls(days=7)
+        print(f"=== Recall log summary (last {summary['days']} days) ===")
+        print(f"Total calls: {summary['total']}")
+        if summary['total'] == 0:
+            print("(no calls logged yet)")
+            return
+        print("\nBy call type:")
+        for ct, n in sorted(summary['by_call_type'].items(), key=lambda x: -x[1]):
+            lat = summary['median_latency_per_type'].get(ct, 0)
+            print(f"  {ct:25} {n:5} calls   median {lat}ms")
+        print("\nTop queries:")
+        for q, n in summary['top_queries']:
+            print(f"  {n:3}× {q}")
+        print("\nCalls per day:")
+        for day, n in sorted(summary['calls_per_day'].items()):
+            print(f"  {day}  {n}")
+        return
+
     if cmd is None:
         _register_server_pid()
         mcp.run(transport="stdio")

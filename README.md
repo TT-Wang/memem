@@ -30,6 +30,10 @@ memem is a Claude Code plugin that gives Claude persistent memory across session
 
 It's **local-first**: no cloud services, no API keys required, no vendor lock-in. Everything lives in `~/obsidian-brain/memem/memories/` as human-readable markdown.
 
+### What's new in v2.4.0 (passive mode + episode catalog + telemetry)
+
+v2.4.0 flips the default injection mode from `auto` to `tool`: Claude no longer receives memory context on every prompt automatically. Instead, it pulls memory on demand via `memory_search`, `memory_get`, and `active_memory_slice`. This eliminates ~85% per-turn noise that was masking v2.3.0's ranking improvements. At session start, Claude now receives a `## Episode index` section listing up to 50 episodic memories by title — a clean menu without a full content dump. Every retrieval is logged to `~/.memem/.recall_log.jsonl`; run `python3 -m memem.server --analyze-recalls` to inspect recall patterns. All 5 MCP tool descriptions have been rewritten to be trigger-explicit so Claude knows *when* to call each tool. Existing users with `MEMEM_INJECTION_MODE=auto` in their shell profile are unaffected; see the [CHANGELOG breaking change banner](CHANGELOG.md) to restore old behavior.
+
 ### What's new in v2.3.0 (hybrid retrieval)
 
 `active_memory_slice` now uses a two-stage hybrid retrieval pipeline: BM25 + cosine Reciprocal Rank Fusion (RRF) builds a top-20 candidate pool, then Maximal Marginal Relevance (MMR, λ=0.7) selects the final 8 results to suppress near-duplicate memories. Access writeback is on by default (`MEMEM_WRITEBACK_ENABLED=1`); each recall fires a daemon thread that increments `access_count` in a JSON sidecar at `~/.memem/telemetry.json` (NOT in memory frontmatter — deliberate, to keep `load_vault_index`'s mtime cache stable). Net benchmark result: **75.3% precision** (+1.3 pp vs v2.0.0 baseline), 133ms warm latency. Recency decay scoring was prototyped but reverted due to a negative-cosine ranking regression — see CHANGELOG for details.
@@ -186,8 +190,8 @@ Opt-in features:
 - **`MEMEM_SHOW_BANNER=1`** — show a one-line status banner at session start (off by default)
 - **`MEMEM_PRETOOL_GATING=1`** — enrich Read tool calls with memories about the target file (off by default)
 
-Hybrid retrieval gating (v1.9+) — opt in to reduce hook overhead on trivial turns:
-- **`MEMEM_INJECTION_MODE`** — `auto` (default — no gating, current behavior), `hybrid` (apply gating heuristics), `tool` (silence hook, MCP only)
+Injection mode (v1.9+, default changed in v2.4.0) — controls auto-injection behavior:
+- **`MEMEM_INJECTION_MODE`** — `tool` (**default since v2.4.0** — silence hook, LLM pulls via MCP tools), `hybrid` (apply gating heuristics on auto-inject), `auto` (pre-v2.4.0 behavior — inject on every prompt). To restore the old default: `export MEMEM_INJECTION_MODE=auto`.
 - **`MEMEM_INJECT_CADENCE=2`** — when `hybrid` is on, run full slice every Nth turn
 - **`MEMEM_TOPIC_SHIFT_THRESHOLD=0.85`** — cosine-similarity threshold for reusing the previous turn's slice (`hybrid` only)
 - **`MEMEM_EMPTY_STREAK_MAX=8`** — cap on the exponential backoff after consecutive empty slices
@@ -197,7 +201,7 @@ Selective recall (v1.9.6+) — suppress context injection when the slice is low-
 - **`MEMEM_RECALL_MIN_ITEM_SCORE=0.0`** — per-item composite-score floor for recall results (0.0 = disabled). L0 project-identity anchors are always exempt.
 - **`MEMEM_RECALL_OOV_THRESHOLD=0.0`** — out-of-vault detection threshold (0.0 = disabled). When set (e.g. 0.3), queries with no L0 keyword overlap and all candidate scores below threshold emit "0 items (out of vault)" and suppress context. Env-var changes take effect on the next hook invocation (no daemon to restart in v2.1.0+).
 
-Recommended for high-frequency sessions: `export MEMEM_INJECTION_MODE=hybrid`
+Migration note (v2.4.0): if you previously relied on per-turn auto-injection, set `export MEMEM_INJECTION_MODE=auto` in your shell profile. The new `tool` default reduces token overhead ~85% but requires the LLM to pull memory via the MCP tools when it judges context is needed.
 
 ## How do I install memem?
 

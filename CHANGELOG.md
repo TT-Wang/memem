@@ -10,6 +10,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
 
+## v2.4.0 — Passive mode + episode catalog + telemetry (2026-06-09)
+
+v2.3.0 fixed ranking (74% → 75.3%); v2.4.0 fixes how the LLM consumes context. Zero algorithmic retrieval changes. The 18-query benchmark stays at 75.3%. This release is a consumption-pattern fix, not a ranking improvement.
+
+### Why this release exists
+
+v2.3.0's hybrid retrieval (BM25 + cosine RRF + MMR) gave +1.3 pp on the 18-query benchmark — a real improvement, but users didn't feel any quality change in practice. Post-release analysis pointed at a different root cause: the problem was never ranking. It was that mechanical per-turn auto-injection was producing ~85% noise. Claude was receiving memory context on every single prompt regardless of relevance, including trivial greetings, confirmations, and one-liners that had nothing to do with any stored knowledge. Better ranking didn't help when the primary issue was volume and timing.
+
+v2.4.0 addresses this directly. Auto-injection is off by default. Claude now receives a clean session-start menu (episode index) and pulls memory on demand via `memory_search`, `memory_get`, and `active_memory_slice` when it actually needs context. Every pull and every skip is logged to `~/.memem/.recall_log.jsonl` so v2.5 can make data-driven injection decisions instead of speculative ones.
+
+### What shipped
+
+- **Recall telemetry module + CLI (m1)** — new `~/.memem/.recall_log.jsonl` sidecar records every memory retrieval event (tool, query, memory IDs retrieved, timestamp). Inspect with `python3 -m memem.server --analyze-recalls` for a summary of retrieval patterns across sessions.
+- **Tool description rewrites (m2)** — all 5 MCP tools now have trigger-explicit descriptions that tell Claude *when* to call each tool (not just what it does). `memory_search` description now says "call when you need context about X"; `active_memory_slice` description prompts Claude to call it at session start or when context is needed.
+- **SessionStart episode catalog (m3)** — `## Episode index` section is now appended to the SessionStart `additionalContext`. Up to 50 episodic memories are listed by title, giving Claude a session-opening menu of what's in the vault without dumping full content.
+- **Default mode flip `auto` → `tool` (m4)** — `MEMEM_INJECTION_MODE` default is now `tool`. Zero per-turn auto-injection. Claude pulls memory on demand. See **Breaking change** below.
+- **Telemetry wired into 6 call sites (m5)** — `retrieve()` and all 5 MCP tools now log every call to the recall telemetry sidecar. Provides complete observability over when Claude is and isn't pulling memory.
+
+### Breaking change — `MEMEM_INJECTION_MODE` default flipped
+
+> Existing users with `MEMEM_INJECTION_MODE=auto` (or `=hybrid`) in their shell profile keep their behavior unchanged. Users with no env var set will now default to `tool` mode: zero per-turn auto-injection. The LLM pulls memory on demand via `memory_search`, `memory_get`, `active_memory_slice`. To restore old behavior, `export MEMEM_INJECTION_MODE=auto`.
+
+To revert to per-turn auto-injection:
+
+```bash
+export MEMEM_INJECTION_MODE=auto
+```
+
+### No benchmark gates
+
+This release is intentionally algorithm-free. The 18-query benchmark is unchanged at **75.3%**.
+
 ## [2.3.0] - 2026-06-09 — Hybrid retrieval (RRF + MMR + access writeback)
 
 v2.3.0 ships a new retrieval pipeline that replaces the v2.0.0 cosine-only top-K with BM25 + cosine Reciprocal Rank Fusion (RRF) followed by Maximal Marginal Relevance (MMR) diversification. Net benchmark result: **75.3% precision** — +1.3 pp vs v2.0.0 baseline (74.0%), with 24/8 cross-scope hits preserved and 133ms warm latency. Full ISO timestamps are now written to memory frontmatter, and access writeback (telemetry sidecar) is on by default. Recency decay scoring was scaffolded but reverted before release (see below).
