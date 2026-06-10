@@ -38,3 +38,105 @@ def test_normalize_scope_id_alias():
     assert _normalize_scope_id("default") == "general"
     assert _normalize_scope_id("") == "general"
     assert _normalize_scope_id("substrate") == "substrate"
+
+
+# ---------------------------------------------------------------------------
+# C2: keys validation in _mine_one_chunk
+# ---------------------------------------------------------------------------
+
+def test_mine_one_chunk_keys_cap_and_sanitize(monkeypatch):
+    """_mine_one_chunk caps keys to 8 items and 60 chars each, discards non-strings."""
+    import json
+    from memem import mining
+
+    raw_keys = [
+        "short",
+        "a" * 70,   # over 60 chars — should be truncated to 60
+        123,         # non-string — should be discarded
+        None,        # non-string — should be discarded
+        "auth",
+        "oauth2",
+        "pkce",
+        "openid",
+        "jwt",       # 9th item — should be dropped (cap 8)
+    ]
+    haiku_output = json.dumps([{
+        "title": "OAuth keys test",
+        "content": "Details about OAuth flow with PKCE",
+        "project": "general",
+        "importance": 3,
+        "keys": raw_keys,
+    }])
+
+    monkeypatch.setattr(mining, "_run_haiku", lambda _prompt: haiku_output)
+    results = mining._mine_one_chunk(["some conversation text"])
+
+    assert len(results) == 1
+    entry = results[0]
+    keys = entry["keys"]
+    assert isinstance(keys, list), "keys should be a list"
+    # Non-strings (123, None) discarded; remaining: short, a*70, auth, oauth2, pkce, openid, jwt (cap 8 means first 8 str)
+    # After discarding non-strings: short(1), a*70(2), auth(3), oauth2(4), pkce(5), openid(6), jwt(7) = 7 items → all fit in 8
+    assert len(keys) <= 8, f"Expected ≤8 keys, got {len(keys)}"
+    # Check that the long key was truncated to 60
+    for k in keys:
+        assert len(k) <= 60, f"Key '{k[:20]}...' exceeds 60 chars"
+        assert isinstance(k, str), f"Key should be str, got {type(k)}"
+    # Numeric/None items discarded
+    assert 123 not in keys
+    assert None not in keys
+    assert "short" in keys
+
+
+def test_mine_one_chunk_keys_missing_gives_empty(monkeypatch):
+    """_mine_one_chunk sets keys=[] when the field is missing from Haiku output."""
+    import json
+    from memem import mining
+
+    haiku_output = json.dumps([{
+        "title": "No keys field",
+        "content": "Some content without keys",
+        "project": "general",
+        "importance": 3,
+        # No "keys" field
+    }])
+
+    monkeypatch.setattr(mining, "_run_haiku", lambda _prompt: haiku_output)
+    results = mining._mine_one_chunk(["conversation"])
+    assert results[0]["keys"] == []
+
+
+def test_mine_one_chunk_keys_null_gives_empty(monkeypatch):
+    """_mine_one_chunk sets keys=[] when keys is explicitly null."""
+    import json
+    from memem import mining
+
+    haiku_output = json.dumps([{
+        "title": "Null keys field",
+        "content": "Some content with null keys",
+        "project": "general",
+        "importance": 3,
+        "keys": None,
+    }])
+
+    monkeypatch.setattr(mining, "_run_haiku", lambda _prompt: haiku_output)
+    results = mining._mine_one_chunk(["conversation"])
+    assert results[0]["keys"] == []
+
+
+def test_mine_one_chunk_keys_over_8_capped(monkeypatch):
+    """_mine_one_chunk caps keys to max 8 items."""
+    import json
+    from memem import mining
+
+    haiku_output = json.dumps([{
+        "title": "Many keys",
+        "content": "Content with too many keys",
+        "project": "general",
+        "importance": 3,
+        "keys": [f"key{i}" for i in range(15)],  # 15 keys, should be capped to 8
+    }])
+
+    monkeypatch.setattr(mining, "_run_haiku", lambda _prompt: haiku_output)
+    results = mining._mine_one_chunk(["conversation"])
+    assert len(results[0]["keys"]) == 8

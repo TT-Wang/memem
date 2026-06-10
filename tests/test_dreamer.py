@@ -647,3 +647,178 @@ def test_handles_sonnet_timeout():
 
     # Must not raise; cluster is skipped
     assert proposals == []
+
+
+# ---------------------------------------------------------------------------
+# Tests 23-27: _recent_attribution reads citation rows from .recall_log.jsonl
+# ---------------------------------------------------------------------------
+
+def _write_recall_log(log_path, rows: list[dict]) -> None:
+    """Helper: write JSONL rows to the given log path."""
+    import json as _json
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(log_path, "w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(_json.dumps(row) + "\n")
+
+
+def _citation_row(cited_ids: list[str], days_ago: float = 1.0) -> dict:
+    """Build a citation row with a timestamp N days ago."""
+    ts = (datetime.now(UTC) - timedelta(days=days_ago)).isoformat()
+    return {
+        "ts": ts,
+        "type": "citation",
+        "session_id": "sess-test",
+        "cited_ids": cited_ids,
+        "source": "mine_delta",
+    }
+
+
+def _recall_row(returned_ids: list[str]) -> dict:
+    """Build a recall row (no 'type' field)."""
+    return {
+        "ts": datetime.now(UTC).isoformat(),
+        "call_type": "tool",
+        "query": "test query",
+        "returned_ids": returned_ids,
+        "latency_ms": 42,
+        "source": "test",
+    }
+
+
+# Test 23: cited memory (2 citation rows) → attr above threshold → not demoted
+def test_recent_attribution_cited_memory_above_threshold(tmp_cortex_dir):
+    """A memory cited in 2 recent citation rows scores above LOW_ATTRIBUTION_THRESHOLD."""
+    import importlib
+
+    import memem.dreamer as dreamer_mod
+    import memem.recall_log as recall_log_mod
+    importlib.reload(recall_log_mod)
+    importlib.reload(dreamer_mod)
+
+    log_path = recall_log_mod._LOG_PATH
+    rows = [
+        _citation_row(cited_ids=["aabbccdd", "11223344"], days_ago=1),
+        _citation_row(cited_ids=["aabbccdd", "55667788"], days_ago=3),
+        _recall_row(returned_ids=["aabbccdd"]),
+    ]
+    _write_recall_log(log_path, rows)
+
+    attr = dreamer_mod._recent_attribution("aabbccddEEFF1122")  # full uuid, id8="aabbccdd"
+    assert attr is not None
+    assert attr >= dreamer_mod.LOW_ATTRIBUTION_THRESHOLD, (
+        f"Expected attr >= {dreamer_mod.LOW_ATTRIBUTION_THRESHOLD}, got {attr}"
+    )
+    # 2 citations → min(1.0, 2/3.0) ≈ 0.667
+    assert abs(attr - 2 / 3.0) < 1e-6
+
+
+# Test 24: cited memory guard fires → not in demotion candidates
+def test_cited_memory_not_demoted(tmp_cortex_dir):
+    """A memory with citation rows above threshold is excluded from demotion candidates."""
+    import importlib
+
+    import memem.dreamer as dreamer_mod
+    import memem.recall_log as recall_log_mod
+    importlib.reload(recall_log_mod)
+    importlib.reload(dreamer_mod)
+
+    log_path = recall_log_mod._LOG_PATH
+    rows = [
+        _citation_row(cited_ids=["weakmem1"], days_ago=1),
+        _citation_row(cited_ids=["weakmem1"], days_ago=5),
+    ]
+    _write_recall_log(log_path, rows)
+
+    weak_mem = _mem(mem_id="weakmem1", layer=2, importance=1)
+    candidates = dreamer_mod.find_demotion_candidates([weak_mem])
+    ids = [c["memory_id"] for c in candidates]
+    assert "weakmem1" not in ids, "Memory cited 2+ times should not be a demotion candidate"
+
+
+# Test 25: uncited memory → attr None or 0 → demotable
+def test_uncited_memory_is_demotable(tmp_cortex_dir):
+    """A memory with no citations in the log is demotable (attr=0.0 or None)."""
+    import importlib
+
+    import memem.dreamer as dreamer_mod
+    import memem.recall_log as recall_log_mod
+    importlib.reload(recall_log_mod)
+    importlib.reload(dreamer_mod)
+
+    log_path = recall_log_mod._LOG_PATH
+    # Only citation rows for other memories; none cite "nociteid"
+    rows = [
+        _citation_row(cited_ids=["othermem1"], days_ago=1),
+    ]
+    _write_recall_log(log_path, rows)
+
+    attr = dreamer_mod._recent_attribution("nociteid")
+    # Should be 0.0 (citation rows exist but none cite this memory)
+    assert attr == 0.0 or attr is None
+
+
+# Test 26: old citations (>14 days) are ignored
+def test_old_citations_beyond_14_days_ignored(tmp_cortex_dir):
+    """Citation rows older than 14 days must not contribute to the attribution score."""
+    import importlib
+
+    import memem.dreamer as dreamer_mod
+    import memem.recall_log as recall_log_mod
+    importlib.reload(recall_log_mod)
+    importlib.reload(dreamer_mod)
+
+    log_path = recall_log_mod._LOG_PATH
+    rows = [
+        # 3 old citations (>14 days) for "oldcited"
+        _citation_row(cited_ids=["oldcited1"], days_ago=15),
+        _citation_row(cited_ids=["oldcited1"], days_ago=20),
+        _citation_row(cited_ids=["oldcited1"], days_ago=30),
+    ]
+    _write_recall_log(log_path, rows)
+
+    attr = dreamer_mod._recent_attribution("oldcited1")
+    # citation rows found (found_any_citation=True) but all outside 14d window → count=0
+    assert attr == 0.0, f"Expected 0.0 (all old), got {attr}"
+    assert attr < dreamer_mod.LOW_ATTRIBUTION_THRESHOLD
+
+
+# Test 27: malformed log lines are tolerated
+def test_malformed_log_lines_tolerated(tmp_cortex_dir):
+    """Malformed JSON lines in the recall log must not crash _recent_attribution."""
+    import importlib
+
+    import memem.dreamer as dreamer_mod
+    import memem.recall_log as recall_log_mod
+    importlib.reload(recall_log_mod)
+    importlib.reload(dreamer_mod)
+
+    log_path = recall_log_mod._LOG_PATH
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(log_path, "w", encoding="utf-8") as f:
+        f.write("not valid json\n")
+        f.write("{incomplete\n")
+        f.write(json.dumps(_citation_row(cited_ids=["goodmemx"], days_ago=1)) + "\n")
+        f.write("another bad line\n")
+
+    # Must not raise
+    attr = dreamer_mod._recent_attribution("goodmemx")
+    assert attr is not None
+    assert attr > 0.0
+
+
+# Test 28: missing log file → None
+def test_missing_log_file_returns_none(tmp_cortex_dir):
+    """When .recall_log.jsonl does not exist, _recent_attribution must return None."""
+    import importlib
+
+    import memem.dreamer as dreamer_mod
+    import memem.recall_log as recall_log_mod
+    importlib.reload(recall_log_mod)
+    importlib.reload(dreamer_mod)
+
+    # Confirm log doesn't exist
+    assert not recall_log_mod._LOG_PATH.exists()
+
+    attr = dreamer_mod._recent_attribution("anymemory1")
+    assert attr is None, f"Expected None when log file missing, got {attr}"

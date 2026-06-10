@@ -168,3 +168,186 @@ def test_purge_contaminated_dry_run_contaminated_title(tmp_vault, tmp_cortex_dir
     output_text = out.out + out.err
     assert "1" in output_text, "Contaminated title must be detected in dry-run"
     assert "--apply" in output_text
+
+
+# ---------------------------------------------------------------------------
+# --exclude flag tests
+# ---------------------------------------------------------------------------
+
+def test_purge_exclude_in_dry_run(tmp_vault, tmp_cortex_dir, capsys):
+    """Excluded memory should not appear in dry-run listing; count line reflects exclusion."""
+    from memem import obsidian_store
+    importlib.reload(obsidian_store)
+
+    cont1 = _make_contaminated_memory(obsidian_store, "=== BEGIN CONVERSATION ===", title="Artifact: to exclude")
+    cont2 = _make_contaminated_memory(obsidian_store, "Below is a coding conversation", title="Artifact: to list")
+
+    id1_prefix = (cont1.get("id") or "")[:8]
+
+    out = _dispatch(["--purge-contaminated", "--exclude", id1_prefix], capsys)
+    output_text = out.out + out.err
+
+    # The excluded item must NOT appear in the listing
+    assert id1_prefix not in output_text, "Excluded id must not appear in dry-run listing"
+    # The non-excluded item must appear (by id prefix)
+    id2_prefix = (cont2.get("id") or "")[:8]
+    assert id2_prefix in output_text, "Non-excluded contaminated id must appear in dry-run"
+    # The summary line must show 'excluded: 1'
+    assert "excluded: 1" in output_text, "Dry-run output must show 'excluded: 1'"
+    # Count of active contaminated must be 1
+    assert "Total: 1" in output_text, "Dry-run total must be 1 (the non-excluded one)"
+
+
+def test_purge_exclude_with_apply(tmp_vault, tmp_cortex_dir, capsys):
+    """Excluded memory survives --apply; non-excluded contaminated memories are deleted."""
+    from memem import obsidian_store
+    importlib.reload(obsidian_store)
+
+    clean = _make_clean_memory(obsidian_store, title="Clean survivor")
+    cont_keep = _make_contaminated_memory(obsidian_store, "=== BEGIN CONVERSATION ===", title="Artifact: excluded keep")
+    cont_del = _make_contaminated_memory(obsidian_store, "Below is a coding conversation", title="Artifact: to delete")
+
+    id_keep_prefix = (cont_keep.get("id") or "")[:8]
+
+    out = _dispatch(["--purge-contaminated", "--apply", "--exclude", id_keep_prefix], capsys)
+    output_text = out.out + out.err
+
+    # Output should mention excluded
+    assert "excluded: 1" in output_text, "Apply output must show 'excluded: 1'"
+
+    # Vault: clean + excluded contaminated should remain; the other contaminated should be gone
+    importlib.reload(obsidian_store)
+    remaining = obsidian_store._obsidian_memories(include_deprecated=True)
+    remaining_titles = {m["title"] for m in remaining}
+    assert "Clean survivor" in remaining_titles, "Clean memory must survive"
+    assert "Artifact: excluded keep" in remaining_titles, "Excluded contaminated memory must survive"
+    assert "Artifact: to delete" not in remaining_titles, "Non-excluded contaminated memory must be deleted"
+
+
+def test_purge_exclude_apply_order_reversed(tmp_vault, tmp_cortex_dir, capsys):
+    """--exclude before --apply (reversed order) works the same."""
+    from memem import obsidian_store
+    importlib.reload(obsidian_store)
+
+    cont_keep = _make_contaminated_memory(obsidian_store, "=== BEGIN CONVERSATION ===", title="Artifact: keep reversed")
+    cont_del = _make_contaminated_memory(obsidian_store, "<task-notification type='stop'>", title="Artifact: del reversed")
+
+    id_keep_prefix = (cont_keep.get("id") or "")[:8]
+
+    # --exclude comes before --apply
+    out = _dispatch(["--purge-contaminated", "--exclude", id_keep_prefix, "--apply"], capsys)
+    output_text = out.out + out.err
+
+    assert "excluded: 1" in output_text
+
+    importlib.reload(obsidian_store)
+    remaining = obsidian_store._obsidian_memories(include_deprecated=True)
+    remaining_titles = {m["title"] for m in remaining}
+    assert "Artifact: keep reversed" in remaining_titles
+    assert "Artifact: del reversed" not in remaining_titles
+
+
+def test_purge_exclude_invalid_token_rejected(tmp_vault, tmp_cortex_dir, capsys):
+    """Invalid --exclude token (not 8 lowercase hex chars) prints error and exits cleanly."""
+    from memem import obsidian_store
+    importlib.reload(obsidian_store)
+
+    cont = _make_contaminated_memory(obsidian_store, "=== BEGIN CONVERSATION ===", title="Artifact: should not be touched")
+    vault_files_before = set(Path(tmp_vault / "memem" / "memories").glob("*.md"))
+
+    # Token too short
+    out = _dispatch(["--purge-contaminated", "--apply", "--exclude", "abc123"], capsys)
+    output_text = out.out + out.err
+    assert "invalid" in output_text.lower() or "error" in output_text.lower() or "abc123" in output_text, (
+        "Must report invalid token"
+    )
+
+    # Vault must be unchanged
+    vault_files_after = set(Path(tmp_vault / "memem" / "memories").glob("*.md"))
+    assert vault_files_before == vault_files_after, "Vault must be unchanged after invalid --exclude token"
+
+
+def test_purge_exclude_invalid_uppercase_rejected(tmp_vault, tmp_cortex_dir, capsys):
+    """Uppercase hex is not valid (must be lowercase)."""
+    from memem import obsidian_store
+    importlib.reload(obsidian_store)
+
+    _make_contaminated_memory(obsidian_store, "=== BEGIN CONVERSATION ===", title="Artifact: uppercase test")
+    vault_files_before = set(Path(tmp_vault / "memem" / "memories").glob("*.md"))
+
+    out = _dispatch(["--purge-contaminated", "--exclude", "ABCDEF12"], capsys)
+    output_text = out.out + out.err
+    assert "invalid" in output_text.lower() or "ABCDEF12" in output_text, (
+        "Uppercase hex token must be rejected"
+    )
+    vault_files_after = set(Path(tmp_vault / "memem" / "memories").glob("*.md"))
+    assert vault_files_before == vault_files_after
+
+
+def test_purge_exclude_multiple_ids(tmp_vault, tmp_cortex_dir, capsys):
+    """Multiple comma-separated ids are all excluded."""
+    from memem import obsidian_store
+    importlib.reload(obsidian_store)
+
+    cont1 = _make_contaminated_memory(obsidian_store, "=== BEGIN CONVERSATION ===", title="Artifact: multi 1")
+    cont2 = _make_contaminated_memory(obsidian_store, "Below is a coding conversation", title="Artifact: multi 2")
+    cont3 = _make_contaminated_memory(obsidian_store, "<task-notification type='stop'>", title="Artifact: multi 3 del")
+
+    id1 = (cont1.get("id") or "")[:8]
+    id2 = (cont2.get("id") or "")[:8]
+
+    out = _dispatch(["--purge-contaminated", "--apply", "--exclude", f"{id1},{id2}"], capsys)
+    output_text = out.out + out.err
+
+    assert "excluded: 2" in output_text, "Must show 'excluded: 2'"
+
+    importlib.reload(obsidian_store)
+    remaining = obsidian_store._obsidian_memories(include_deprecated=True)
+    remaining_titles = {m["title"] for m in remaining}
+    assert "Artifact: multi 1" in remaining_titles
+    assert "Artifact: multi 2" in remaining_titles
+    assert "Artifact: multi 3 del" not in remaining_titles
+
+
+def test_purge_exclude_spaces_tolerated(tmp_vault, tmp_cortex_dir, capsys):
+    """Spaces around comma-separated ids are stripped and accepted."""
+    from memem import obsidian_store
+    importlib.reload(obsidian_store)
+
+    cont1 = _make_contaminated_memory(obsidian_store, "=== BEGIN CONVERSATION ===", title="Artifact: spaces 1")
+    cont2 = _make_contaminated_memory(obsidian_store, "Below is a coding conversation", title="Artifact: spaces 2 del")
+
+    id1 = (cont1.get("id") or "")[:8]
+
+    # Include spaces around the comma and id
+    out = _dispatch(["--purge-contaminated", "--apply", "--exclude", f"  {id1}  "], capsys)
+    output_text = out.out + out.err
+
+    # Should succeed (no error), excluded count should be 1
+    assert "invalid" not in output_text.lower() or "excluded: 1" in output_text, (
+        "Spaces around id token must be tolerated"
+    )
+    assert "excluded: 1" in output_text
+
+    importlib.reload(obsidian_store)
+    remaining = obsidian_store._obsidian_memories(include_deprecated=True)
+    remaining_titles = {m["title"] for m in remaining}
+    assert "Artifact: spaces 1" in remaining_titles, "Excluded memory must survive"
+    assert "Artifact: spaces 2 del" not in remaining_titles, "Non-excluded memory must be deleted"
+
+
+def test_purge_exclude_unknown_id_silently_ignored(tmp_vault, tmp_cortex_dir, capsys):
+    """An --exclude id that matches no contaminated memory is silently ignored."""
+    from memem import obsidian_store
+    importlib.reload(obsidian_store)
+
+    cont = _make_contaminated_memory(obsidian_store, "=== BEGIN CONVERSATION ===", title="Artifact: unknown excl")
+
+    # Use a valid hex8 id that simply doesn't match any memory
+    out = _dispatch(["--purge-contaminated", "--exclude", "00000000"], capsys)
+    output_text = out.out + out.err
+
+    # Must not error; the contaminated memory should still appear in dry-run
+    assert "invalid" not in output_text.lower(), "Unknown id must not cause an error"
+    assert "1" in output_text, "Contaminated memory count must still show 1"
+    assert "--apply" in output_text

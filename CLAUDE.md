@@ -77,6 +77,11 @@ Call `mcp__memem__memory_save` with:
 - Completed-work logs or TODO state
 - Trivial or obvious facts easily re-discovered from code
 
+**Deduplication behavior (v2.7.0):** `memory_save` applies three-band dedup on every call:
+- Score **≥ 0.92** — near-exact duplicate; returns "Memory already exists: [id8] title. Not saved."
+- Score **0.70–0.92** — similar content; Haiku merges the new content into the existing memory and unions tags. Returns "Merged into existing memory [id8] title..." Merge failures fall back to reject.
+- Score **< 0.70** — genuinely new; saved normally.
+
 ## Kind tags (v1.10)
 
 Tag `memory_save` calls with a `type:*` tag to help recall-time grouping:
@@ -117,7 +122,18 @@ rm ~/.memem/.miner-opted-in
 
 **Safety net:** SessionStart fires a "stale-session sweep" that scans for JSONL files older than 10 min that aren't in `~/.memem/.mined_sessions` and spawns mine_delta for up to 3 of them. Catches sessions where Stop never fired (Claude crash, kill -9, network drop). The sweep skips headless mining transcripts (detected by marker phrases in the first 20 lines + file size ≤ 30 lines) to prevent self-mining contamination loops.
 
-**Purging contaminated memories:** if mining artifacts were saved to the vault before the v2.5.0 stale-sweep guard, run `python3 -m memem.server --purge-contaminated` to identify them (dry-run by default). Add `--apply` to permanently delete the flagged memories.
+**Purging contaminated memories:** if mining artifacts were saved to the vault before the v2.5.0 stale-sweep guard, run `python3 -m memem.server --purge-contaminated` to identify them (dry-run by default). Add `--apply` to permanently delete the flagged memories. Use `--exclude id8[,id8,...]` to skip specific memories by 8-char id prefix.
+
+**Reconciliation (v2.7.0):** the miner no longer blindly adds every extracted candidate. Before saving, `_reconcile_candidates` compares each candidate against its top-5 vault neighbors (ngram search) in one batched Haiku call and assigns one of four ops:
+
+- **ADD** — new information; saved normally with a stable deterministic id (`uuid5(session_id+content)` — idempotent re-mining).
+- **UPDATE** — candidate refines a neighbor; `_update_memory` merges content and unions tags/keys. Safety rail: merged content must be ≥ 10 chars and ≥ 30% of neighbor's essence, otherwise degrades to ADD.
+- **SUPERSEDE** — candidate contradicts/replaces a neighbor; new memory saved, neighbor bi-temporally invalidated (`invalid_at`, `replaced_by` frontmatter). Safety rail: L0 and `decay_immune` memories are never superseded.
+- **NOOP** — candidate is fully redundant; skipped.
+
+Cap: at most 5 UPDATE+SUPERSEDE ops per delta. Any reconcile exception falls back to v2.6 ADD-all. Every op writes an audit event (`reconcile_add/update/supersede/noop`) to `~/.memem/events.jsonl`.
+
+**Key expansion (v2.7.0):** Haiku now emits up to 8 `keys` per memory (synonyms, entity names, abbreviations, error strings). Keys are stored in frontmatter (`keys:` block), FTS-indexed via the `tags` column (no schema bump), and included in BM25 text so keyword queries find memories by alias.
 
 ## Available tools
 
@@ -135,8 +151,9 @@ rm ~/.memem/.miner-opted-in
 | `active_memory_slice` | On-demand runtime working-state slice from active recall candidates |
 
 **CLI commands** (run in your terminal, not via MCP):
-- `python3 -m memem.server --analyze-recalls` — summarize recall telemetry from `~/.memem/.recall_log.jsonl`: which tools were called, which memories retrieved most often, recall frequency per session. Use this to understand how Claude is (or isn't) pulling memory.
+- `python3 -m memem.server --analyze-recalls` — summarize recall telemetry from `~/.memem/.recall_log.jsonl`: which tools were called, which memories retrieved most often, recall frequency per session, citation rate per tool (v2.7.0: fraction of returned memories later cited in assistant text), top cited memories, and returned-ids count (token-budget proxy). Use this to understand how Claude is (or isn't) pulling memory.
 - `python3 -m memem.server --purge-contaminated [--apply]` — identify (dry-run) or delete memories mined from headless mining transcripts. Default is dry-run; pass `--apply` to permanently delete.
+- `python3 -m memem.server --purge-contaminated --exclude id8[,id8,...] [--apply]` — skip specific memories by 8-char id prefix when purging (v2.7.0).
 
 ## Episodic consolidation (v1.7)
 

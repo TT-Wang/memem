@@ -531,3 +531,90 @@ def test_full_iso_timestamps_roundtrip(tmp_vault, tmp_cortex_dir):
     # _parse_obsidian_memory_file maps frontmatter "created" -> "created_at" and "updated" -> "updated_at"
     assert "T" in result["created_at"], f"created_at should contain 'T' (full ISO), got: {result['created_at']!r}"
     assert "T" in result["updated_at"], f"updated_at should contain 'T' (full ISO), got: {result['updated_at']!r}"
+
+
+# ---------------------------------------------------------------------------
+# C2: keys field tests
+# ---------------------------------------------------------------------------
+
+def test_keys_roundtrip(tmp_vault, tmp_cortex_dir):
+    """Round-trip: _make_memory + _write_obsidian_memory + _parse_obsidian_memory_file
+    preserves keys field correctly."""
+    import importlib
+    from memem import models, obsidian_store, search_index
+    importlib.reload(models)
+    importlib.reload(search_index)
+    importlib.reload(obsidian_store)
+
+    mem = obsidian_store._make_memory(
+        content="Use OAuth2 PKCE flow for public clients, not implicit grant",
+        title="OAuth2 PKCE for public clients",
+        project="general",
+        source_type="mined",
+        keys=["oauth2", "pkce", "implicit-grant", "public-client"],
+    )
+    assert mem["keys"] == ["oauth2", "pkce", "implicit-grant", "public-client"]
+
+    obsidian_store._save_memory(mem)
+
+    # Read back and verify keys survived the round-trip
+    vault_dir = tmp_vault / "memem" / "memories"
+    files = list(vault_dir.glob("*.md"))
+    assert files
+    parsed = obsidian_store._parse_obsidian_memory_file(files[0])
+    assert parsed is not None
+    assert parsed["keys"] == ["oauth2", "pkce", "implicit-grant", "public-client"]
+
+
+def test_keys_empty_when_absent(tmp_vault, tmp_cortex_dir):
+    """Memories without keys get keys=[] in parsed output (default tolerant)."""
+    import importlib
+    from memem import models, obsidian_store, search_index
+    importlib.reload(models)
+    importlib.reload(search_index)
+    importlib.reload(obsidian_store)
+
+    mem = obsidian_store._make_memory(
+        content="Always run pytest with -x to stop on first failure",
+        title="Pytest stop on first failure",
+        project="general",
+        source_type="user",
+        # No keys param — should default to []
+    )
+    assert mem["keys"] == []
+
+    obsidian_store._save_memory(mem)
+
+    vault_dir = tmp_vault / "memem" / "memories"
+    files = list(vault_dir.glob("*.md"))
+    assert files
+    parsed = obsidian_store._parse_obsidian_memory_file(files[0])
+    assert parsed is not None
+    assert parsed["keys"] == []
+
+    # Verify the keys field is absent from frontmatter when empty (not written)
+    content = files[0].read_text()
+    assert "keys:\n" not in content, "Empty keys should not be written to frontmatter"
+
+
+def test_keys_omitted_in_frontmatter_when_empty(tmp_vault, tmp_cortex_dir):
+    """_write_obsidian_memory omits the keys: field entirely when keys is []."""
+    import importlib
+    from memem import models, obsidian_store, search_index
+    importlib.reload(models)
+    importlib.reload(search_index)
+    importlib.reload(obsidian_store)
+
+    mem = obsidian_store._make_memory(
+        content="Run database migrations before deploying new code",
+        title="DB migration order",
+        project="general",
+        source_type="user",
+    )
+    obsidian_store._write_obsidian_memory(mem)
+
+    vault_dir = tmp_vault / "memem" / "memories"
+    files = list(vault_dir.glob("*.md"))
+    content = files[0].read_text()
+    # keys should not appear at all when empty
+    assert "\nkeys:" not in content, f"keys field should be absent when empty, got:\n{content[:500]}"

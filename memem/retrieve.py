@@ -61,7 +61,22 @@ import numpy as np
 
 import memem.recall_log as _recall_log
 import memem.settings as _settings
-from memem.models import MEMEM_DIR, OBSIDIAN_MEMORIES_DIR, TELEMETRY_FILE, parse_iso_dt, _normalize_scope_id
+from memem.models import MEMEM_DIR, LAST_BRIEF_PATH, OBSIDIAN_MEMORIES_DIR, TELEMETRY_FILE, parse_iso_dt, _normalize_scope_id
+
+
+def _read_session_id() -> str:
+    """Read session_id from LAST_BRIEF_PATH ({"session_id": ...}).
+
+    Returns empty string on any error (file missing, bad JSON, wrong shape, etc.).
+    Intentionally does NOT import memem.recall to avoid circular imports.
+    """
+    try:
+        data = json.loads(LAST_BRIEF_PATH.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return str(data.get("session_id", "") or "")
+        return ""
+    except Exception:  # noqa: BLE001 — telemetry must never crash the caller
+        return ""
 
 _EMB_PATH = MEMEM_DIR / "embeddings.npy"
 _IDS_PATH = MEMEM_DIR / "embedding_ids.json"
@@ -79,6 +94,8 @@ _LAYER_PAT = re.compile(r"^layer:\s*(\d+)", re.M)
 _IMPORTANCE_PAT = re.compile(r"^importance:\s*(\d+)", re.M)
 _STATUS_PAT = re.compile(r"^status:\s*(.*)$", re.M)
 _INVALID_AT_PAT = re.compile(r"^invalid_at:\s*(.*)$", re.M)
+# keys extraction: block list (same pattern as tags — tolerates trailing-newline and empty items)
+_KEYS_BLOCK_PAT = re.compile(r"^keys:\n((?:- .*(?:\n|$))+)", re.M)
 _VERSION_PAT = re.compile(r"v\d+\.\d+(?:\.\d+)?", re.I)
 _DATE_PAT = re.compile(r"\d{4}-\d{2}-\d{2}")
 
@@ -237,6 +254,14 @@ def load_vault_index(scope_id: str = "") -> dict[str, dict]:
                 tags_val = [s for t in tags_val if (s := t.strip().strip("'\""))]
             else:
                 tags_val = []
+            # keys extraction — block list, same pattern as tags (tolerates trailing-newline,
+            # empty items filtered). Default [] when key absent.
+            keys_block_m = _KEYS_BLOCK_PAT.search(front)
+            if keys_block_m:
+                keys_val = re.findall(r"^- (.+)$", keys_block_m.group(1), re.M)
+                keys_val = [s for k in keys_val if (s := k.strip().strip("'\""))]
+            else:
+                keys_val = []
             # related extraction — block list of 8-char hex prefixes (possibly quoted)
             related_block_m = re.search(r"^related:\n((?:- .*(?:\n|$))+)", front, re.M)
             if related_block_m:
@@ -260,6 +285,7 @@ def load_vault_index(scope_id: str = "") -> dict[str, dict]:
                 "importance": importance_val,
                 "status": status_val,
                 "tags": tags_val,
+                "keys": keys_val,
                 "related": related_val,
             }
         except Exception:  # noqa: BLE001
@@ -409,7 +435,16 @@ def _build_bm25(vault_idx: dict) -> tuple | None:
     corpus_ids: list[str] = []
     corpus_tokens: list[list[str]] = []
     for mid, mem in vault_idx.items():
-        text = (mem.get("title", "") + " " + mem.get("body_full", "")).lower()
+        # BM25 token text: title + body_full + keys (keys are search aliases/synonyms).
+        # NOTE: keys are intentionally NOT included in the embedding text composition
+        # (that would invalidate the existing .npy embedding matrix).
+        keys_text = " ".join(mem.get("keys", []) or [])
+        text = (
+            mem.get("title", "")
+            + " "
+            + mem.get("body_full", "")
+            + (" " + keys_text if keys_text else "")
+        ).lower()
         tokens = text.split()
         if not tokens:
             continue  # skip empty bodies
@@ -888,6 +923,7 @@ def retrieve(
                 returned_ids=[h.get("id", "") for h in results],
                 latency_ms=int((time.monotonic() - t0) * 1000),
                 source="hook",
+                session_id=_read_session_id(),
             )
         except Exception:  # noqa: BLE001
             pass

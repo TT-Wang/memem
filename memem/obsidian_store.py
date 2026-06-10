@@ -422,7 +422,8 @@ def _strip_generated_related_section(body: str) -> str:
 def _make_memory(content: str, title: str, tags: list[str] | None = None,
                  project: str = "general", source_type: str = "user",
                  source_session: str = "", importance: int = 3,
-                 layer: int | None = None) -> dict:
+                 layer: int | None = None,
+                 keys: list[str] | None = None) -> dict:
     # Reject junk content
     stripped = content.strip().strip(".")
     if len(stripped) < 10:
@@ -456,6 +457,7 @@ def _make_memory(content: str, title: str, tags: list[str] | None = None,
         "last_accessed_at": _now(),
         "access_count": 0,
         "decay_immune": False,
+        "keys": list(keys) if keys else [],
     }
 
     # Layer assignment: explicit param wins; otherwise auto-classify.
@@ -536,6 +538,13 @@ def _write_obsidian_memory(mem: dict):
             safe_related.append(normalized)
 
     # Build metadata dict in canonical field order (sort_keys=False preserves it)
+    # Sanitize keys using the same _safe_tag helper as tags (cap each to 60 chars).
+    raw_keys = mem.get("keys") or []
+    if isinstance(raw_keys, list):
+        safe_keys = [_safe_tag(str(k))[:60] for k in raw_keys if _safe_tag(str(k))]
+    else:
+        safe_keys = []
+
     meta: dict[str, Any] = {
         "id": mem["id"],
         "schema_version": mem.get("schema_version", 1),
@@ -543,6 +552,9 @@ def _write_obsidian_memory(mem: dict):
         "project": _safe_tag(project),
         "tags": safe_tags,
     }
+    # keys: omit entirely when empty (canonical-order: after tags, before related)
+    if safe_keys:
+        meta["keys"] = safe_keys
     if safe_related:
         meta["related"] = safe_related
     meta["created"] = mem.get("created_at", "")
@@ -662,6 +674,13 @@ def _parse_obsidian_memory_file(md_file: Path) -> dict | None:
     # tags / related — library parses inline and block YAML lists to Python lists
     raw_tags = fm_meta.get("tags", [])
     mem["domain_tags"] = [str(t) for t in raw_tags] if isinstance(raw_tags, list) else []
+
+    # keys: sanitized list of short search keys; default [] when absent
+    raw_keys = fm_meta.get("keys", [])
+    if isinstance(raw_keys, list):
+        mem["keys"] = [str(k)[:60] for k in raw_keys if str(k).strip()]
+    else:
+        mem["keys"] = []
 
     raw_related = fm_meta.get("related", [])
     if isinstance(raw_related, list) and raw_related:
@@ -790,6 +809,31 @@ def _find_memory(memory_id: str) -> dict | None:
             for mid, mem in _VAULT_CACHE.items():
                 if mid.startswith(memory_id):
                     return mem
+    return None
+
+
+def _find_memory_unambiguous(memory_id: str) -> dict | None:
+    """Like _find_memory, but returns None when an 8-char prefix matches MORE
+    THAN ONE memory. Use for DESTRUCTIVE resolutions (reconciler UPDATE /
+    SUPERSEDE targets): _find_memory's first-match-wins prefix semantics are
+    fine for reads, but invalidating the wrong memory on a prefix collision
+    is unacceptable. Exact full-id matches are always unambiguous.
+    """
+    if not memory_id:
+        return None
+    _ensure_cache_warm()
+    with _VAULT_CACHE_LOCK:
+        if memory_id in _VAULT_CACHE:
+            return _VAULT_CACHE[memory_id]
+        if len(memory_id) >= 8:
+            matches = [mem for mid, mem in _VAULT_CACHE.items() if mid.startswith(memory_id)]
+            if len(matches) == 1:
+                return matches[0]
+            if len(matches) > 1:
+                log.warning(
+                    "ambiguous id prefix %s matches %d memories — refusing destructive resolution",
+                    memory_id[:8], len(matches),
+                )
     return None
 
 
@@ -1169,7 +1213,38 @@ def _save_memory(mem: dict):
         log.debug("graph refresh failed for saved memory %s: %s", mem.get("id", "")[:8], exc)
 
 
-def _update_memory(memory_id: str, new_content: str, new_title: str = "") -> None:
+def _acquire_vault_write_lock():
+    """Cross-process flock serializing mutations of EXISTING memory files.
+
+    v2.7.0: the detached miner's reconciler can UPDATE/SUPERSEDE existing
+    memories while the MCP server's memory_save merge band mutates the same
+    files — without this lock the read-mutate-write cycles interleave and the
+    last writer silently clobbers the other's merge (multi-second window).
+    Held only around the read→mutate→write portion, never across Haiku calls.
+    New-file saves (_save_memory ADD path) don't need it — fresh ids can't
+    collide. Returns an open locked fd; caller must _release_vault_write_lock.
+    """
+    MEMEM_DIR.mkdir(parents=True, exist_ok=True)
+    fd = open(MEMEM_DIR / ".vault-write.lock", "w")  # noqa: SIM115
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
+def _release_vault_write_lock(fd) -> None:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    fd.close()
+
+
+def _update_memory(
+    memory_id: str,
+    new_content: str,
+    new_title: str = "",
+    extra_tags: list[str] | None = None,
+    extra_keys: list[str] | None = None,
+) -> None:
     """Update an existing memory's content and optionally its title.
 
     Refreshes ``related`` links from the new content before writing so the
@@ -1177,29 +1252,53 @@ def _update_memory(memory_id: str, new_content: str, new_title: str = "") -> Non
     Previously the old ``related`` list survived unchanged — links could
     then point at memories that were chosen for the pre-merge content but
     no longer match the post-merge content.
+
+    ``extra_tags`` / ``extra_keys`` (v2.7.0): union-merged into the existing
+    memory's ``domain_tags`` / ``keys`` (order-preserving, deduped). Used by
+    the merge band in ``memory_save`` and the reconciler's UPDATE op so an
+    incoming near-duplicate's tags/search-keys aren't silently dropped when
+    its content is merged into the surviving memory. Sanitization happens in
+    the serializer as usual.
     """
     threat = scan_memory_content(new_content)
     if threat:
         raise ValueError(f"Update blocked: {threat}")
-    mem = _find_memory(memory_id)
-    if mem is None:
-        raise ValueError(f"Memory not found: {memory_id}")
-    mem["essence"] = new_content
-    if new_title:
-        mem["title"] = new_title
-    mem["updated_at"] = _now()
+    # Vault write lock: the read→mutate→write below must not interleave with
+    # another process mutating the same file (miner reconciler vs MCP merge).
+    # Released BEFORE the index lock is taken — never nested (AB-BA safety).
+    _wlock = _acquire_vault_write_lock()
     try:
-        from memem.graph_index import _suggest_related
-        refreshed = _suggest_related(mem)
-    except Exception as exc:
-        log.debug("graph related refresh failed; using lexical fallback: %s", exc)
-        refreshed = _find_related(new_content, exclude_id=mem.get("id", ""), scope_id=mem.get("project", "default"))
-    if refreshed:
-        mem["related"] = refreshed
-    elif "related" in mem:
-        mem["related"] = []
-    _write_obsidian_memory(mem)
-    _cache_refresh_from_disk(mem.get("id", ""))
+        mem = _find_memory(memory_id)
+        if mem is None:
+            raise ValueError(f"Memory not found: {memory_id}")
+        mem["essence"] = new_content
+        if new_title:
+            mem["title"] = new_title
+        if extra_tags:
+            existing_tags = list(mem.get("domain_tags") or [])
+            mem["domain_tags"] = existing_tags + [
+                t for t in extra_tags if t and t not in existing_tags
+            ]
+        if extra_keys:
+            existing_keys = list(mem.get("keys") or [])
+            mem["keys"] = existing_keys + [
+                k for k in extra_keys if k and k not in existing_keys
+            ]
+        mem["updated_at"] = _now()
+        try:
+            from memem.graph_index import _suggest_related
+            refreshed = _suggest_related(mem)
+        except Exception as exc:
+            log.debug("graph related refresh failed; using lexical fallback: %s", exc)
+            refreshed = _find_related(new_content, exclude_id=mem.get("id", ""), scope_id=mem.get("project", "default"))
+        if refreshed:
+            mem["related"] = refreshed
+        elif "related" in mem:
+            mem["related"] = []
+        _write_obsidian_memory(mem)
+        _cache_refresh_from_disk(mem.get("id", ""))
+    finally:
+        _release_vault_write_lock(_wlock)
     _append_or_update_index_line(mem)
     _log_event("update", memory_id)
     _index_memory(mem)
@@ -1292,14 +1391,21 @@ def invalidate_memory(memory_id: str, replaced_by: str | None = None) -> bool:
     the bi-temporal model preserves the old memory as historically-true while
     excluding it from future recall.
     """
-    mem = _find_memory(memory_id)
-    if not mem:
-        return False
-    mem["invalid_at"] = _now()
-    if replaced_by:
-        mem["replaced_by"] = replaced_by
-    _write_obsidian_memory(mem)
-    _cache_refresh_from_disk(mem.get("id", ""))
+    # Same vault write lock as _update_memory: invalidation is a
+    # read→mutate→write of an existing file and must not interleave with a
+    # concurrent merge on the same memory. Never held across the index lock.
+    _wlock = _acquire_vault_write_lock()
+    try:
+        mem = _find_memory(memory_id)
+        if not mem:
+            return False
+        mem["invalid_at"] = _now()
+        if replaced_by:
+            mem["replaced_by"] = replaced_by
+        _write_obsidian_memory(mem)
+        _cache_refresh_from_disk(mem.get("id", ""))
+    finally:
+        _release_vault_write_lock(_wlock)
     # Drop from FTS index so explicit memory_get still works (preserved on
     # disk) but auto-recall doesn't return it. Audit-log the invalidation.
     try:

@@ -504,3 +504,145 @@ def test_quoted_values_stripped(isolated_vault):
     assert "quoted-tag" in mem["tags"], f"Expected 'quoted-tag' stripped of quotes, got {mem['tags']}"
     assert "regular-tag" in mem["tags"]
     assert rel_id in mem["related"], f"Expected rel_id {rel_id!r} stripped of quotes, got {mem['related']}"
+
+
+# ---------------------------------------------------------------------------
+# C2: keys field in vault index and BM25
+# ---------------------------------------------------------------------------
+
+
+def test_vault_index_extracts_keys(isolated_vault):
+    """load_vault_index should extract the keys: block list from frontmatter."""
+    memories_dir, _retrieve = isolated_vault
+    _reset_retrieve_caches(_retrieve)
+
+    mem_id = _make_uuid()
+    content = f"""\
+---
+id: {mem_id}
+schema_version: 1
+title: Connection pooling guide
+project: general
+tags:
+- database
+keys:
+- pgpool
+- conn-pool
+- asyncpg-pool
+created: '2024-01-15T10:00:00+00:00'
+updated: '2024-01-15T10:00:00+00:00'
+source_type: mined
+importance: 3
+status: active
+layer: 2
+valid_at: '2024-01-15T10:00:00+00:00'
+last_accessed_at: '2024-01-15T10:00:00+00:00'
+access_count: 0
+decay_immune: false
+---
+Set pool_size=20 for production workloads.
+"""
+    (memories_dir / f"conn-pool-{mem_id[:8]}.md").write_text(content, encoding="utf-8")
+    _reset_retrieve_caches(_retrieve)
+
+    idx = _retrieve.load_vault_index()
+    assert mem_id in idx
+    mem = idx[mem_id]
+    assert mem.get("keys") == ["pgpool", "conn-pool", "asyncpg-pool"], (
+        f"Expected keys extracted, got {mem.get('keys')!r}"
+    )
+
+
+def test_vault_index_keys_default_empty(isolated_vault):
+    """load_vault_index returns keys=[] when the field is absent from frontmatter."""
+    memories_dir, _retrieve = isolated_vault
+    _reset_retrieve_caches(_retrieve)
+
+    mem_id = _make_uuid()
+    content = f"""\
+---
+id: {mem_id}
+schema_version: 1
+title: No keys here
+project: general
+tags:
+- testing
+created: '2024-01-15T10:00:00+00:00'
+updated: '2024-01-15T10:00:00+00:00'
+source_type: user
+importance: 3
+status: active
+layer: 2
+valid_at: '2024-01-15T10:00:00+00:00'
+last_accessed_at: '2024-01-15T10:00:00+00:00'
+access_count: 0
+decay_immune: false
+---
+Some content without keys field.
+"""
+    (memories_dir / f"no-keys-{mem_id[:8]}.md").write_text(content, encoding="utf-8")
+    _reset_retrieve_caches(_retrieve)
+
+    idx = _retrieve.load_vault_index()
+    assert mem_id in idx
+    mem = idx[mem_id]
+    assert mem.get("keys", []) == [], f"Expected empty keys, got {mem.get('keys')!r}"
+
+
+def test_bm25_includes_keys_terms(isolated_vault):
+    """BM25 should find a memory by a key term not in title/body_full."""
+    import importlib
+
+    from memem import models, obsidian_store, search_index
+    memories_dir, _retrieve = isolated_vault
+
+    # Write a memory whose keys contain a term absent from title and body
+    mem_id = _make_uuid()
+    content = f"""\
+---
+id: {mem_id}
+schema_version: 1
+title: Authentication setup
+project: general
+tags:
+- security
+keys:
+- oidc-provider
+- bearer-token
+- jwt-rs256
+created: '2024-01-15T10:00:00+00:00'
+updated: '2024-01-15T10:00:00+00:00'
+source_type: mined
+importance: 4
+status: active
+layer: 1
+valid_at: '2024-01-15T10:00:00+00:00'
+last_accessed_at: '2024-01-15T10:00:00+00:00'
+access_count: 0
+decay_immune: false
+---
+Configure the auth service for production deployment.
+"""
+    (memories_dir / f"auth-{mem_id[:8]}.md").write_text(content, encoding="utf-8")
+    _reset_retrieve_caches(_retrieve)
+
+    vault_idx = _retrieve.load_vault_index()
+    assert mem_id in vault_idx, "Memory should be indexed"
+    assert vault_idx[mem_id]["keys"] == ["oidc-provider", "bearer-token", "jwt-rs256"]
+
+    # Build BM25 and check that key terms are findable
+    bm25_data = _retrieve._build_bm25(vault_idx)
+    assert bm25_data is not None
+    bm25_ids, bm25_model = bm25_data
+
+    # Score for a key term not in title or body
+    # BM25Okapi can return negative scores when a term appears in many docs;
+    # assert mem_id has the highest score (it's the only doc containing this key)
+    scores = bm25_model.get_scores(["oidc-provider"])
+    assert mem_id in bm25_ids
+    idx_pos = bm25_ids.index(mem_id)
+    # The memory with the key should score highest — it uniquely contains "oidc-provider"
+    assert scores[idx_pos] == max(scores), (
+        f"Memory with key 'oidc-provider' should have the highest BM25 score, "
+        f"but score[{idx_pos}]={scores[idx_pos]} vs max={max(scores)}"
+    )

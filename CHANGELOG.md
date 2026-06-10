@@ -10,6 +10,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
 
+## v2.7.0 — Write Path + Instrumentation (2026-06-10)
+
+The miner now reconciles instead of blindly adding: each new candidate is compared against its nearest vault neighbors in one batched Haiku call and assigned ADD, UPDATE, SUPERSEDE, or NOOP — with a full audit trail per op. Every retrieval and inline citation is now measured via structured rows in `.recall_log.jsonl`, closing the feedback loop between what Claude reads and what the miner produces.
+
+### Added
+
+- **Reconcile-at-write (`mine_delta`)** — new `_reconcile_candidates()` function replaces the v2.6 blind-ADD path. Steps: (1) pre-filter at ≥0.95 cosine score (near-exact duplicate → NOOP, no Haiku cost); (2) `_ngram_search_candidates` top-5 neighbors per surviving candidate; (3) ONE batched `_HAIKU_RECONCILE_SYSTEM` Haiku call for all candidates; (4) execute ops with safety rails: protected-target guard (L0 / `decay_immune` memories can never be UPDATE/SUPERSEDE targets), truncation guard (UPDATE content < 10 chars or < 30% of target essence → ADD instead), null/unknown target → ADD, ≤5 UPDATE+SUPERSEDE per delta; (5) full audit trail via `_log_event` (`reconcile_add`, `reconcile_update`, `reconcile_supersede`, `reconcile_noop` + fallback events in `events.jsonl`); global fallback to v2.6 ADD-all on any reconcile exception. **Cost**: substantive deltas now make up to 3 Haiku calls (extract + reconcile + episode) vs 2 in v2.6 — one extra batched call (~$0.001–0.002) per delta that produces candidates; pre-filtered/empty deltas add no call.
+- **`_HAIKU_RECONCILE_SYSTEM` prompt (`haiku_prompts.py`)** — reconciler system prompt that asks Haiku for a JSON array of `{index, op, target, content, reason}` objects.
+- **SUPERSEDE drives `invalidate_memory`** — the previously unreachable bi-temporal invalidation path (`invalid_at`, `replaced_by` frontmatter fields, excluded from retrieval) is now exercised by SUPERSEDE ops.
+- **Idempotent mined IDs (`_stable_mined_memory_id`)** — mined memories receive a deterministic `uuid5(session_id + content)` id; re-running mine on the same session does not create duplicate vault files.
+- **Episode gate now candidates-based** — the episode-emission guard is evaluated against the RAW extraction candidate list (pre-reconcile), preserving v2.6 semantics exactly: in v2.6 every candidate became a vault write, so "candidates non-empty" is the historical gate. A delta whose candidates all resolve to NOOP/UPDATE still advanced the session narrative and keeps its episode current.
+- **Key expansion** — the Haiku mining prompt gains a `keys` field (up to 8 synonyms, entity names, abbreviations); `_mine_one_chunk` validates and caps to 8 entries; `_make_memory` stores `keys:` frontmatter; FTS5 index piggybacks keys on the `tags` column (no schema bump); BM25 text includes keys; `_update_memory` gains `extra_tags`/`extra_keys` union params; load_vault_index and retrieve.py extract and propagate `keys`.
+- **Tool-trace digest** — `_build_tool_digest()` (≤600 chars) appends a compact summary of Edit/Write/Read/Bash/Grep/Glob tool calls and error-looking tool results to the extraction input, making tool-use decisions minable.
+- **Citation detection (`_emit_citations_if_any`)** — after each mine, assistant text is scanned for 8-hex tokens matching recently-returned memory ids (session-matched recall-log rows, or 30-min window for legacy rows without `session_id`). Matches are written as `{"type":"citation",...}` rows via `recall_log.log_citation`.
+- **`session_id` threading** — `log_recall()` gains a `session_id` parameter (backward-tolerant: field omitted when empty); 5 call sites in `server.py` and the `retrieve.py` hook path now pass the current session id.
+- **`recall_log.log_citation()`** — writes `type:citation` rows to `.recall_log.jsonl` with `cited_ids` list and source.
+- **`analyze_recalls` citation metrics** — returns `citation_rate` (per call_type: fraction of returned ids that were cited), `top_cited_memories` (top-5 by citation count), and `returned_ids_count` (token-budget proxy); citation rows are separated from recall rows and excluded from recall aggregations.
+- **Dreamer demotion guard live again** — `_recent_attribution()` repointed at citation rows in `.recall_log.jsonl` (14-day window, `min(1.0, count/3.0)` score); guard fires for any memory cited at least once in 14 days (`LOW_ATTRIBUTION_THRESHOLD=0.2`). Previously the guard was inert since v2.5 removed the attribution event writer.
+- **`memory_save` merge band** — three-band dedup: score ≥ 0.92 → reject with "Memory already exists: [id8]"; 0.70–0.92 → Haiku-merge content into existing memory (tag union, `_update_memory` with `extra_tags`); < 0.70 → save new. Merge failures fall back to reject.
+- **`purge --exclude id8[,id8,...]`** — `--purge-contaminated` gains `--exclude` flag to skip specific memories by 8-char id prefix (validated: must be exactly 8 lowercase hex chars).
+- **`feedback.py` flock serialization** — `_save_relevance_scores` and `update_relevance_scores` now use `fcntl.flock` (with `fd` guard in `finally`) so concurrent session-end callbacks don't corrupt the relevance-scores file.
+
+### Changed
+
+- **`_update_memory` signature** — gains `extra_tags: list[str] | None` and `extra_keys: list[str] | None` params (order-preserving, deduped union-merge into existing tags/keys). Callers that pass only positional args are unaffected.
+- **`memory_save` docstring** — updated to reflect three-band dedup behavior (reject / merge / save).
+- **`_ngram_search_candidates`** — formerly orphaned (no production caller since v2.6); now called by `_reconcile_candidates`. Its semantics are unchanged.
+
+### Fixed
+
+- **Feedback EMA concurrent-write data loss** — two sessions completing close together could both read the relevance file before either wrote, clobbering one session's score updates. `flock`-guarded read-modify-write closes the race.
+
+### Migration notes
+
+- **No data migration required.** Reconciliation applies to new mining only. Existing duplicate memories are not retroactively merged; use `--consolidate` or `--purge-contaminated` to clean existing duplicates.
+- **Citation telemetry starts accumulating from install.** The dreamer demotion guard and `--analyze-recalls` citation metrics require citation rows in `.recall_log.jsonl`; these are written automatically by `mine_delta` after upgrade — no manual steps needed.
+- **Benchmark unchanged at 79.3% (119/150 precision).** Keys are empty on all pre-existing memories (they only populate for newly mined memories), so the BM25 and FTS changes have no effect on the existing vault benchmark.
+
 ## v2.6.0 — One Engine (2026-06-10)
 
 One retrieval engine now serves every path (hook, MCP tools, CLI): the three-way RRF pipeline in `retrieve.py` replaces the unbenchmarked heuristic (5-signal + file-scan fallback) that had served `memory_search`/`memory_recall` since v2.4.0. The heuristic engine is deleted; deprecated and invalidated memories are now excluded from the retrieval index at vault-load time; the 18-query benchmark is maintained at ≥74% through all changes.

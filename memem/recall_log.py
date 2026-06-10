@@ -23,6 +23,7 @@ def log_recall(
     returned_ids: list[str],
     latency_ms: int,
     source: str,
+    session_id: str = "",
 ) -> None:
     """Append one JSONL line. Silent no-op on any error (telemetry must
     never break the caller)."""
@@ -35,6 +36,29 @@ def log_recall(
             "latency_ms": int(latency_ms),
             "source": source,
         }
+        if session_id:
+            entry["session_id"] = session_id
+        Path(MEMEM_DIR).mkdir(parents=True, exist_ok=True)
+        with open(_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def log_citation(
+    session_id: str,
+    cited_ids: list[str],
+    source: str = "mine_delta",
+) -> None:
+    """Append a citation row to the recall log. Silent no-op on any error."""
+    try:
+        entry = {
+            "ts": datetime.now(UTC).isoformat(),
+            "type": "citation",
+            "session_id": session_id,
+            "cited_ids": list(cited_ids),
+            "source": source,
+        }
         Path(MEMEM_DIR).mkdir(parents=True, exist_ok=True)
         with open(_LOG_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
@@ -43,12 +67,22 @@ def log_recall(
 
 
 def analyze_recalls(days: int = 7) -> dict:
-    """Read .recall_log.jsonl and return summary for last N days."""
+    """Read .recall_log.jsonl and return summary for last N days.
+
+    Row types:
+      - recall rows: no ``type`` field (legacy + current log_recall rows)
+      - citation rows: ``type == 'citation'`` (written by log_citation)
+
+    Citation rows are counted separately and excluded from recall aggregations
+    (by_call_type, latency, queries, etc.).
+    """
     if not _LOG_PATH.exists():
         return {"total": 0, "by_call_type": {}, "top_queries": [],
-                "median_latency_per_type": {}, "calls_per_day": {}, "days": days}
+                "median_latency_per_type": {}, "calls_per_day": {}, "days": days,
+                "citation_rate": {}, "top_cited_memories": [], "returned_ids_count": 0}
     cutoff = datetime.now(UTC).timestamp() - (days * 86400)
-    entries = []
+    recall_entries: list[dict] = []
+    citation_entries: list[dict] = []
     try:
         with open(_LOG_PATH, encoding="utf-8") as f:
             for line in f:
@@ -59,18 +93,24 @@ def analyze_recalls(days: int = 7) -> dict:
                     e = json.loads(line)
                     ts = datetime.fromisoformat(e["ts"]).timestamp()
                     if ts >= cutoff:
-                        entries.append(e)
+                        if e.get("type") == "citation":
+                            citation_entries.append(e)
+                        else:
+                            # Treat rows without type as recall rows (backward compat)
+                            recall_entries.append(e)
                 except (json.JSONDecodeError, KeyError, ValueError):
                     continue
     except OSError:
         return {"total": 0, "by_call_type": {}, "top_queries": [],
-                "median_latency_per_type": {}, "calls_per_day": {}, "days": days}
-    # by_call_type
+                "median_latency_per_type": {}, "calls_per_day": {}, "days": days,
+                "citation_rate": {}, "top_cited_memories": [], "returned_ids_count": 0}
+
+    # by_call_type (recall rows only)
     by_type: dict[str, int] = {}
     latencies: dict[str, list[int]] = {}
     queries: dict[str, int] = {}
     days_count: dict[str, int] = {}
-    for e in entries:
+    for e in recall_entries:
         ct = e.get("call_type", "?")
         by_type[ct] = by_type.get(ct, 0) + 1
         latencies.setdefault(ct, []).append(e.get("latency_ms", 0))
@@ -86,11 +126,55 @@ def analyze_recalls(days: int = 7) -> dict:
         n = len(xs)
         return xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) // 2
 
+    # Citation rate per call_type:
+    #   union of all cited_ids across citation rows / distinct returned_ids
+    #   across recall rows that have returned_ids, grouped by call_type.
+    # Build a set of all cited ids (global; cross-session)
+    all_cited: set[str] = set()
+    for e in citation_entries:
+        for cid in e.get("cited_ids") or []:
+            if cid:
+                all_cited.add(str(cid)[:8])  # defensive — writers emit 8-char
+
+    # Per call_type: returned ids union.
+    # NORMALIZE to 8-char prefixes: returned_ids forms differ by call site
+    # (retrieve.py hook path logs FULL uuids; server.py tools log 8-char) while
+    # citation rows always carry 8-char ids. Without [:8] here the intersection
+    # below is empty by construction for full-uuid rows and the hook path's
+    # citation_rate reads as a permanent 0.0.
+    type_returned: dict[str, set[str]] = {}
+    for e in recall_entries:
+        rids = e.get("returned_ids")
+        if not rids:
+            continue
+        ct = e.get("call_type", "?")
+        type_returned.setdefault(ct, set()).update(
+            str(r)[:8] for r in rids if r
+        )
+
+    citation_rate: dict[str, float] = {}
+    for ct, rids_set in type_returned.items():
+        cited_for_type = rids_set & all_cited
+        citation_rate[ct] = len(cited_for_type) / len(rids_set) if rids_set else 0.0
+
+    # top_cited_memories: count how often each id appears in cited_ids lists
+    cited_counts: dict[str, int] = {}
+    for e in citation_entries:
+        for cid in e.get("cited_ids") or []:
+            cited_counts[cid] = cited_counts.get(cid, 0) + 1
+    top_cited = sorted(cited_counts.items(), key=lambda x: -x[1])[:5]
+
+    # Token-budget proxy: total count of returned_ids across all recall rows
+    returned_ids_count = sum(len(e.get("returned_ids") or []) for e in recall_entries)
+
     return {
-        "total": len(entries),
+        "total": len(recall_entries),
         "by_call_type": by_type,
         "top_queries": sorted(queries.items(), key=lambda x: -x[1])[:10],
         "median_latency_per_type": {k: _median(v) for k, v in latencies.items()},
         "calls_per_day": days_count,
         "days": days,
+        "citation_rate": citation_rate,
+        "top_cited_memories": top_cited,
+        "returned_ids_count": returned_ids_count,
     }

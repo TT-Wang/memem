@@ -721,7 +721,27 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         #   - 'Below is a coding conversation' (from mining._mine_one_chunk)
         #   - '<task-notification' (stray hook/notification fragments)
         # Dry-run by DEFAULT; use --apply to delete.
+        # Use --exclude id8[,id8,...] to skip specific memories by 8-char id prefix.
         apply = "--apply" in argv
+
+        # Parse --exclude: comma-separated 8-char lowercase hex id prefixes.
+        exclude_set: set[str] = set()
+        if "--exclude" in argv:
+            exc_idx = argv.index("--exclude")
+            if exc_idx + 1 >= len(argv):
+                print("--purge-contaminated: --exclude requires an argument (comma-separated 8-char id prefixes).")
+                return
+            raw_exc = argv[exc_idx + 1]
+            tokens = [t.strip() for t in raw_exc.split(",")]
+            tokens = [t for t in tokens if t]  # drop empty segments
+            import re as _re
+            _HEX8_RE = _re.compile(r'^[0-9a-f]{8}$')
+            for tok in tokens:
+                if not _HEX8_RE.match(tok):
+                    print(f"--purge-contaminated: invalid --exclude token {tok!r} (must be exactly 8 lowercase hex chars).")
+                    return
+                exclude_set.add(tok)
+
         _CONTAMINATION_MARKERS = (
             "=== BEGIN CONVERSATION ===",
             "Below is a coding conversation",
@@ -739,30 +759,36 @@ def dispatch_cli(argv: list[str], mcp) -> None:
             if any(marker in haystack for marker in _CONTAMINATION_MARKERS):
                 contaminated.append(mem)
 
+        # Split contaminated into active (to act on) and excluded.
+        excluded = [m for m in contaminated if (m.get("id") or "")[:8] in exclude_set]
+        active = [m for m in contaminated if (m.get("id") or "")[:8] not in exclude_set]
+
         if not contaminated:
             print("--purge-contaminated: no contaminated memories found.")
             return
 
         if not apply:
             # Dry-run: print matches and exit without touching the vault.
-            print(f"--purge-contaminated (dry-run): {len(contaminated)} contaminated memories found.")
+            print(f"--purge-contaminated (dry-run): {len(active)} contaminated memories found.")
             print("Run with --apply to delete. Matches:")
-            for mem in contaminated:
+            for mem in active:
                 mid = (mem.get("id") or "")[:8]
                 title = (mem.get("title") or "(untitled)")[:80]
                 print(f"  {mid}  {title}")
-            print(f"\nTotal: {len(contaminated)}  |  Run with --apply to delete.")
+            excluded_suffix = f"  |  excluded: {len(excluded)}" if excluded else ""
+            print(f"\nTotal: {len(active)}  |  Run with --apply to delete.{excluded_suffix}")
         else:
             deleted = 0
             failed = 0
-            for mem in contaminated:
+            for mem in active:
                 mid = mem.get("id") or ""
                 ok = _delete_memory(mid)
                 if ok:
                     deleted += 1
                 else:
                     failed += 1
-            print(f"--purge-contaminated: deleted {deleted}, failed {failed} (of {len(contaminated)} contaminated).")
+            excluded_suffix = f"  excluded: {len(excluded)}." if excluded else ""
+            print(f"--purge-contaminated: deleted {deleted}, failed {failed} (of {len(active)} contaminated).{excluded_suffix}")
         return
 
     if cmd == "--consolidate":

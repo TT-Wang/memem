@@ -10,6 +10,7 @@ training attention weights, we adjust a per-memory relevance-feedback
 score via an exponential moving average of session-outcome signals.
 """
 
+import fcntl
 import json
 import logging
 import os
@@ -92,13 +93,25 @@ def _load_relevance_scores() -> dict[str, float]:
 
 
 def _save_relevance_scores(scores: dict[str, float]) -> None:
+    """Write relevance scores atomically with flock to prevent concurrent-write data loss."""
     MEMEM_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = RELEVANCE_SCORES_FILE.with_suffix(".tmp")
-    with open(tmp, "w") as fh:
-        json.dump(scores, fh)
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.replace(tmp, RELEVANCE_SCORES_FILE)
+    lock_path = RELEVANCE_SCORES_FILE.with_suffix(".lock")
+    fd = None
+    try:
+        fd = open(lock_path, "w")
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        tmp = RELEVANCE_SCORES_FILE.with_suffix(".tmp")
+        with open(tmp, "w") as fh:
+            json.dump(scores, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, RELEVANCE_SCORES_FILE)
+    finally:
+        # fd guard: if open() itself raised, propagate the original OSError
+        # rather than masking it with a NameError from the cleanup.
+        if fd is not None:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            fd.close()
 
 
 def get_relevance_score(memory_id: str) -> float:
@@ -117,18 +130,40 @@ def update_relevance_scores(session_id: str, outcome: float) -> None:
     Does nothing if no recalls are recorded for the session (e.g., the
     user didn't trigger any recall during the session, or telemetry
     tracking wasn't active).
+
+    The read-modify-write cycle is performed under a single flock so that
+    concurrent calls (e.g. two sessions completing close together) don't
+    clobber each other's writes.
     """
     recalled = get_session_recalls(session_id)
     if not recalled:
         return
 
-    scores = _load_relevance_scores()
-    for mid in recalled:
-        key = mid[:8]
-        old = scores.get(key, 0.0)
-        scores[key] = (1 - _EMA_ALPHA) * old + _EMA_ALPHA * outcome
+    MEMEM_DIR.mkdir(parents=True, exist_ok=True)
+    lock_path = RELEVANCE_SCORES_FILE.with_suffix(".lock")
+    fd = None
+    try:
+        fd = open(lock_path, "w")
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        # Load under lock so we don't miss a concurrent write
+        scores = _load_relevance_scores()
+        for mid in recalled:
+            key = mid[:8]
+            old = scores.get(key, 0.0)
+            scores[key] = (1 - _EMA_ALPHA) * old + _EMA_ALPHA * outcome
 
-    _save_relevance_scores(scores)
+        # Write atomically (tmp + fsync + os.replace) while we still hold the lock
+        tmp = RELEVANCE_SCORES_FILE.with_suffix(".tmp")
+        with open(tmp, "w") as fh:
+            json.dump(scores, fh)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, RELEVANCE_SCORES_FILE)
+    finally:
+        if fd is not None:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            fd.close()
+
     log.info(
         "Updated relevance scores for %d memories (session=%s, outcome=%.2f)",
         len(recalled), session_id[:8], outcome,

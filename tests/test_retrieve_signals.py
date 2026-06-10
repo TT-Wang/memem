@@ -794,3 +794,58 @@ def test_telemetry_bulk_load_corrupt_file(isolated_env):
     TELEMETRY_FILE.write_text("not valid json{{{")
     result = isolated_env["retrieve_mod"]._load_telemetry_bulk()
     assert result == {}, f"Expected empty dict for corrupt telemetry, got {result}"
+
+
+# ---------------------------------------------------------------------------
+# C2: session_id threading in retrieve() → log_recall
+# ---------------------------------------------------------------------------
+
+
+def test_session_id_in_recall_log(isolated_env, tmp_path):
+    """retrieve() should thread session_id from LAST_BRIEF_PATH into recall log entries."""
+    import importlib
+    import json
+
+    from memem import models, recall_log, retrieve as retrieve_mod_pkg
+
+    # Write a fake LAST_BRIEF_PATH with a known session_id
+    fake_session_id = "test-session-abc123"
+    last_brief_path = models.LAST_BRIEF_PATH
+    last_brief_path.parent.mkdir(parents=True, exist_ok=True)
+    last_brief_path.write_text(json.dumps({"session_id": fake_session_id}))
+
+    # Verify _read_session_id() returns it
+    importlib.reload(retrieve_mod_pkg)
+    result = retrieve_mod_pkg._read_session_id()
+    assert result == fake_session_id, (
+        f"_read_session_id() should return '{fake_session_id}', got '{result}'"
+    )
+
+
+def test_session_id_missing_file_returns_empty(isolated_env):
+    """_read_session_id() returns '' when LAST_BRIEF_PATH does not exist."""
+    import importlib
+
+    from memem import models, retrieve as retrieve_mod_pkg
+
+    # Ensure file doesn't exist
+    if models.LAST_BRIEF_PATH.exists():
+        models.LAST_BRIEF_PATH.unlink()
+
+    importlib.reload(retrieve_mod_pkg)
+    result = retrieve_mod_pkg._read_session_id()
+    assert result == "", f"Expected empty string for missing file, got '{result}'"
+
+
+def test_session_id_malformed_file_returns_empty(isolated_env):
+    """_read_session_id() returns '' when LAST_BRIEF_PATH has invalid JSON."""
+    import importlib
+
+    from memem import models, retrieve as retrieve_mod_pkg
+
+    models.LAST_BRIEF_PATH.parent.mkdir(parents=True, exist_ok=True)
+    models.LAST_BRIEF_PATH.write_text("not valid json{{")
+
+    importlib.reload(retrieve_mod_pkg)
+    result = retrieve_mod_pkg._read_session_id()
+    assert result == "", f"Expected empty string for malformed JSON, got '{result}'"

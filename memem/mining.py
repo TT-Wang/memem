@@ -284,6 +284,18 @@ def _mine_one_chunk(chunk_messages: list[str]) -> list[dict]:
         if not isinstance(importance, int) or importance < 1 or importance > 5:
             importance = 3
         entry["importance"] = importance
+        # Validate and cap keys: must be list of strings, each ≤60 chars, capped to 8 items.
+        # Discard non-string entries; missing or null keys → empty list.
+        raw_keys = item.get("keys")
+        if isinstance(raw_keys, list):
+            sanitized_keys = [
+                str(k)[:60]
+                for k in raw_keys
+                if isinstance(k, str) and str(k).strip()
+            ][:8]
+        else:
+            sanitized_keys = []
+        entry["keys"] = sanitized_keys
         valid_items.append(entry)
 
     return valid_items

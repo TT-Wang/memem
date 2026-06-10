@@ -5,22 +5,47 @@ from pathlib import Path
 
 from memem.models import _normalize_scope_id
 from memem.obsidian_store import (
+    _find_best_match,
     _is_duplicate,
     _make_memory,
     _save_memory,
+    _update_memory,
 )
+
+_REJECT_THRESHOLD = 0.92  # exact duplicate — reject
+_MERGE_THRESHOLD = 0.70   # near-duplicate — merge via Haiku
 
 
 def memory_save(content: str, title: str = "", scope_id: str = "default",
                 tags: str = "", layer: int | None = None) -> str:
+    # Three-band dedup: score >= 0.92 → reject; 0.70 <= score < 0.92 → merge; < 0.70 → save
     domain_tags = [tag.strip() for tag in tags.split(",") if tag.strip()] if tags else []
     effective_title = title or content[:60]
     project = _normalize_scope_id(scope_id)
 
     try:
-        existing = _is_duplicate(content, scope_id=scope_id, return_match=True)
-        if isinstance(existing, dict):
-            return f'Memory already exists (similar to: "{existing.get("title", "")[:60]}"). Not saved.'
+        best_mem, score = _find_best_match(content, scope_id=scope_id)
+
+        if best_mem is not None and score >= _REJECT_THRESHOLD:
+            existing_id8 = best_mem.get("id", "")[:8]
+            existing_title = best_mem.get("title", "")[:60]
+            return f'Memory already exists: [{existing_id8}] "{existing_title}". Not saved.'
+
+        if best_mem is not None and score >= _MERGE_THRESHOLD:
+            existing_id = best_mem.get("id", "")
+            existing_id8 = existing_id[:8]
+            existing_title = best_mem.get("title", "")[:60]
+            try:
+                from memem.mining import _merge_memories  # noqa: PLC0415
+                merged_content = _merge_memories(best_mem.get("essence", ""), content)
+                # Union the incoming save's tags into the surviving memory so
+                # they aren't silently dropped with the merge (v2.7.0).
+                _update_memory(existing_id, merged_content, extra_tags=domain_tags)
+                return f'Merged into existing memory [{existing_id8}] "{existing_title}" (similar content existed; merged via Haiku).'
+            except Exception:  # noqa: BLE001 — RuntimeError (merge subprocess),
+                # ValueError (security scan on merged content), or anything
+                # else: degrade to the safe reject message.
+                return f'Memory already exists: [{existing_id8}] "{existing_title}". Not saved. (merge unavailable)'
 
         mem = _make_memory(
             content=content,

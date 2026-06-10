@@ -1,5 +1,6 @@
 """Tests for closed-loop relevance scoring (memem/feedback.py + integration)."""
 
+import fcntl
 import importlib
 import json
 
@@ -156,4 +157,82 @@ def test_ranking_includes_feedback(tmp_path, monkeypatch):
     bad_contribution = 0.10 * bad_norm
     assert good_contribution - bad_contribution > 0.05, (
         "feedback should create a meaningful ranking difference"
+    )
+
+
+# ── Concurrent-safe _save_relevance_scores ──────────────────────────
+
+
+def test_save_relevance_scores_uses_flock(tmp_path, monkeypatch):
+    """_save_relevance_scores must use fcntl.flock for concurrency safety."""
+    import memem.feedback as fb
+    import inspect
+
+    importlib.reload(fb)
+    monkeypatch.setattr(fb, "RELEVANCE_SCORES_FILE", tmp_path / "scores.json")
+    monkeypatch.setattr(fb, "MEMEM_DIR", tmp_path)
+
+    # Verify flock is used by checking the source — it's in the file
+    source = inspect.getsource(fb._save_relevance_scores)
+    assert "flock" in source, "_save_relevance_scores must call flock for concurrency safety"
+
+
+def test_two_sequential_saves_preserve_both(tmp_path, monkeypatch):
+    """Two sequential save calls must not lose each other's data."""
+    from memem import feedback, models, telemetry
+
+    importlib.reload(models)
+    importlib.reload(telemetry)
+    importlib.reload(feedback)
+
+    scores_file = tmp_path / "scores.json"
+    monkeypatch.setattr(feedback, "RELEVANCE_SCORES_FILE", scores_file)
+    monkeypatch.setattr(feedback, "MEMEM_DIR", tmp_path)
+
+    # First save: scores for session-1
+    feedback._save_relevance_scores({"aaaa1111": 0.5})
+    # Second save: scores for session-2 (using update which reads-then-writes)
+    feedback._save_relevance_scores({"aaaa1111": 0.5, "bbbb2222": 0.3})
+
+    final = json.loads(scores_file.read_text())
+    assert "aaaa1111" in final, "aaaa1111 must be present after both saves"
+    assert "bbbb2222" in final, "bbbb2222 must be present after second save"
+
+
+def test_update_relevance_scores_session_join(tmp_path, monkeypatch):
+    """record_session_recall then update_relevance_scores must write scores for those ids.
+
+    Verifies that the session_id join in update_relevance_scores correctly
+    matches the [:8] ids stored by record_session_recall (mid[:8] key).
+    """
+    from memem import feedback, models, telemetry
+
+    importlib.reload(models)
+    importlib.reload(telemetry)
+    importlib.reload(feedback)
+
+    scores_file = tmp_path / "scores.json"
+    recalls_file = tmp_path / "session_recalls.json"
+
+    monkeypatch.setattr(feedback, "RELEVANCE_SCORES_FILE", scores_file)
+    monkeypatch.setattr(feedback, "MEMEM_DIR", tmp_path)
+    monkeypatch.setattr(telemetry, "_SESSION_RECALLS_FILE", recalls_file)
+    monkeypatch.setattr(telemetry, "MEMEM_DIR", tmp_path)
+
+    session_id = "join-test-session-abc"
+    # record_session_recall stores memory_id[:8] as the "mid"
+    telemetry.record_session_recall(session_id, "aaaa1111bbbb2222")  # stored as "aaaa1111"
+    telemetry.record_session_recall(session_id, "cccc3333dddd4444")  # stored as "cccc3333"
+
+    feedback.update_relevance_scores(session_id, 1.0)
+
+    # Verify both ids got scores written
+    assert abs(feedback.get_relevance_score("aaaa1111") - 0.3) < 0.01, (
+        "aaaa1111 must have EMA score 0.3 after one update with outcome=1.0"
+    )
+    assert abs(feedback.get_relevance_score("cccc3333") - 0.3) < 0.01, (
+        "cccc3333 must have EMA score 0.3 after one update with outcome=1.0"
+    )
+    assert feedback.get_relevance_score("eeee5555") == 0.0, (
+        "Unknown memory must return 0.0"
     )

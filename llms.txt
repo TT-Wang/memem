@@ -50,7 +50,7 @@ First-session MCP spawn runs `bootstrap.sh` which installs `uv`, syncs deps into
 - **Event-triggered miner**: Stop hook spawns a detached `mine_delta` subprocess after each conversation turn; extracts durable lessons via Haiku and writes them as markdown (no daemon since v2.1.0)
 - **Context assembly**: on session start, a UserPromptSubmit hook sends the user's first message + relevant memories to Haiku, which synthesizes a focused briefing
 - **Playbook**: per-project curated knowledge file that grows and refines over time (inspired by the ACE paper)
-- **AUDN pipeline**: Add / Update / Deprecate / Noop — how new mined memories evolve the existing corpus
+- **Reconcile-at-write pipeline**: ADD / UPDATE / SUPERSEDE / NOOP — how new mined memories evolve the existing corpus. Each candidate is compared against its top-5 vault neighbors in one batched Haiku call; SUPERSEDE bi-temporally invalidates the replaced memory.
 - **Degraded mode**: when `claude` CLI is missing, memem falls back to FTS-only keyword recall instead of failing
 
 ## MCP tools exposed to the LLM

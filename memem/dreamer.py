@@ -38,6 +38,10 @@ from memem.models import DEFAULT_LAYER, LAYER_L0, MEMEM_DIR, now_iso
 log = logging.getLogger("memem-dreamer")
 
 DREAMS_DIR = MEMEM_DIR / "dreams"
+# Demotion guard threshold on the citation score [0, 1].
+# min(1.0, count/3.0) → a memory cited once in 14 days scores ~0.33,
+# which exceeds 0.2 so the guard fires and it is NOT demoted.
+# Effectively: "cited at least once in the last 14 days → keep alive."
 LOW_ATTRIBUTION_THRESHOLD = 0.2
 CLUSTER_SIMILARITY_THRESHOLD = 0.7
 CLUSTER_MIN_SIZE = 5
@@ -54,46 +58,88 @@ def _is_protected(memory: dict) -> bool:
     return bool(memory.get("decay_immune", False))
 
 
-def _recent_attribution(memory_id: str, sample_size: int = 20) -> float | None:
-    """Mean aggregate attribution score over the most recent N events for this memory.
-    Returns None if no events yet.
+def _recent_attribution(memory_id: str, sample_size: int = 20) -> float | None:  # noqa: ARG001
+    """Citation-based attribution score for this memory over the last 14 days.
 
-    v2.5.0 NOTE: the only writer of 'slice_attribution' events
-    (telemetry.log_slice_attribution) was deleted with the dead attribution
-    pipeline, so this currently ALWAYS returns None and the
+    Reads the tail of ~/.memem/.recall_log.jsonl and counts how many citation
+    rows (``type == 'citation'``) written by mine_delta contain this memory's
+    id8 prefix in their ``cited_ids`` list.  Returns a normalized usage score
+    ``min(1.0, count / 3.0)`` — float in [0, 1] — or ``None`` when the log
+    file does not exist (preserves the "no data yet → no guard" contract so
+    new installs never block demotion).
+
+    ``sample_size`` is retained in the signature for backward compatibility
+    (callers in find_demotion_candidates pass it); it is not used by the new
+    implementation (citation counting over a 14-day window is more meaningful
+    than a fixed event-count window for a sparse signal).
+
+    Citation row schema (written by recall_log.log_citation / mine_delta):
+        {"ts": <iso>, "type": "citation", "session_id": str,
+         "cited_ids": [<id8>, ...], "source": "mine_delta"}
+
+    Recall rows (also in the same file) have NO ``type`` field and are ignored.
+
+    v2.5.0 NOTE (updated v2.7.0): the previous implementation read
+    'slice_attribution' events from events.jsonl, but that writer was removed.
+    The guard is now LIVE again: citation rows are written by mine_delta via
+    recall_log.log_citation whenever a mined session cites a memory.  The
     "still-being-used → don't demote" guard in find_demotion_candidates is
-    inert: demotion candidates are decided by decay strength alone. Retained
-    because the planned citation-based attribution (recall_log `cited` events)
-    will repoint this reader at a live signal. Dreamer remains manual-only
-    with dry-run default, so the inert guard is safe in the interim.
+    active once citation rows accumulate.
     """
-    from memem.models import MEMEM_DIR
-    events_path = MEMEM_DIR / "events.jsonl"
-    if not events_path.exists():
+    from memem.recall_log import _LOG_PATH  # live path, respects MEMEM_DIR override
+
+    if not _LOG_PATH.exists():
         return None
-    samples = []
+
+    id8 = memory_id[:8]
+    # 14-day lookback window
+    cutoff_ts = datetime.now(UTC).timestamp() - (14 * 86400)
+
+    # Read the tail of the file (~500 lines) — malformed-tolerant
+    _TAIL_LINES = 500
     try:
-        with open(events_path) as fh:
-            for line in fh:
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                # telemetry._log_event writes the event-name field as 'op'
-                if event.get("op") != "slice_attribution":
-                    continue
-                data = event
-                if data.get("memory_id") != memory_id:
-                    continue
-                agg = data.get("aggregate")
-                if agg is not None:
-                    samples.append(float(agg))
+        with open(_LOG_PATH, encoding="utf-8") as fh:
+            all_lines = fh.readlines()
     except OSError:
         return None
-    if not samples:
+
+    tail_lines = all_lines[-_TAIL_LINES:] if len(all_lines) > _TAIL_LINES else all_lines
+
+    count = 0
+    found_any_citation = False
+    for line in tail_lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if row.get("type") != "citation":
+            continue
+        found_any_citation = True
+        # Check timestamp window
+        try:
+            ts = datetime.fromisoformat(row["ts"]).timestamp()
+        except (KeyError, ValueError):
+            continue
+        if ts < cutoff_ts:
+            continue
+        # Check if this memory's id8 was cited
+        cited = row.get("cited_ids") or []
+        if id8 in cited:
+            count += 1
+
+    if not found_any_citation:
+        # No citation rows in the tail at all — return None so the guard stays
+        # inactive (same semantics as "no log file")
         return None
-    recent = samples[-sample_size:]
-    return sum(recent) / len(recent)
+
+    # Threshold rationale: a memory cited 3+ times in 14 days is "actively used".
+    # min(1.0, count/3.0) maps: 0→0.0, 1→0.33, 2→0.67, 3+→1.0.
+    # LOW_ATTRIBUTION_THRESHOLD=0.2 therefore means "cited at least once recently"
+    # (count≥1 → 0.33 > 0.2 → guard fires → not demoted).
+    return min(1.0, count / 3.0)
 
 
 def find_demotion_candidates(memories: list[dict]) -> list[dict]:

@@ -174,3 +174,75 @@ def test_search_embedding_with_scores_returns_tuples(monkeypatch):
     # Backwards-compat: bare ID API still works.
     bare = embedding_index._search_embedding("any query", limit=5)
     assert bare == ["mem-a", "mem-b", "mem-c"]
+
+
+# ---------------------------------------------------------------------------
+# C2: keys field in FTS index
+# ---------------------------------------------------------------------------
+
+def test_fts_finds_memory_by_key_term(tmp_cortex_dir):
+    """FTS must find a memory by a key term that appears nowhere in title or essence.
+
+    keys piggyback on the tags FTS column — searching for a key synonym should
+    surface the memory even if the synonym isn't in the visible content fields.
+    """
+    from memem.search_index import _index_memory, _search_fts
+
+    mem = {
+        "id": "key-fts-test-001",
+        "title": "Database connection pool configuration",
+        "essence": "Set pool_size=20 and max_overflow=40 for production workloads",
+        "project": "general",
+        "domain_tags": ["database"],
+        "keys": ["pgpool", "conn-pool", "asyncpg-pool"],  # synonyms not in title/essence
+    }
+    _index_memory(mem)
+
+    # Search by a key synonym that does NOT appear in title or essence
+    results = _search_fts("pgpool", limit=10)
+    assert "key-fts-test-001" in results, (
+        "FTS should find memory by key synonym 'pgpool' piggybacked in tags column"
+    )
+
+    # Also searchable by another key
+    results2 = _search_fts("asyncpg-pool", limit=10)
+    assert "key-fts-test-001" in results2
+
+
+def test_fts_keys_and_tags_combined(tmp_cortex_dir):
+    """FTS index should find memory by both regular tags and keys."""
+    from memem.search_index import _index_memory, _search_fts
+
+    mem = {
+        "id": "key-tag-combo-002",
+        "title": "Auth service setup",
+        "essence": "Configure the authentication service",
+        "project": "general",
+        "domain_tags": ["auth", "security"],
+        "keys": ["jwt-auth", "bearer-token", "openid-connect"],
+    }
+    _index_memory(mem)
+
+    # Find by regular tag
+    assert "key-tag-combo-002" in _search_fts("security", limit=10)
+    # Find by key
+    assert "key-tag-combo-002" in _search_fts("bearer-token", limit=10)
+    # Find by title keyword
+    assert "key-tag-combo-002" in _search_fts("Auth", limit=10)
+
+
+def test_fts_empty_keys_no_error(tmp_cortex_dir):
+    """Memory with empty keys list indexes and searches without error."""
+    from memem.search_index import _index_memory, _search_fts
+
+    mem = {
+        "id": "no-keys-mem-003",
+        "title": "Memory without keys",
+        "essence": "This memory has no keys field at all",
+        "project": "general",
+        "domain_tags": ["testing"],
+    }
+    # keys missing entirely — should work fine
+    _index_memory(mem)
+    results = _search_fts("testing", limit=10)
+    assert "no-keys-mem-003" in results

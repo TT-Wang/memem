@@ -24,6 +24,8 @@ _HAIKU_MINE_SYSTEM = (
     "future AI that needs context. (required)\n"
     '- "supersedes": (optional) string describing what prior decision this '
     "reverses — only when the session explicitly overturns something\n\n"
+    '- "keys": list of up to 8 short search keys (synonyms, entity names, aliases, '
+    "error strings, abbreviations). Optional.\n\n"
     '- "importance": integer 1-5 rating how important this is for a future AI session. '
     "1=trivial fact, 2=useful info, 3=convention/pattern, 4=architecture decision, "
     "5=critical user preference or correction (required)\n\n"
@@ -66,4 +68,30 @@ _HAIKU_PROCEDURAL_SYSTEM = (
     '- "reason": 1-sentence why — cite the specific user correction from this session\n\n'
     "Output a JSON array of rewrite objects. If no rewrites are warranted, output [].\n"
     "Output ONLY the JSON array, no other text."
+)
+
+_HAIKU_RECONCILE_SYSTEM = (
+    "You are a memory reconciler for an AI memory system. "
+    "You receive a batch of NEW candidate memories and their NEIGHBOR memories "
+    "(existing memories already in the vault). "
+    "For each candidate, decide what to do:\n\n"
+    "Output a strict JSON array with one object per candidate (same order). Each object:\n"
+    '{"index": <int>, "op": "ADD"|"UPDATE"|"SUPERSEDE"|"NOOP", '
+    '"target": "<8-char-id or null>", '
+    '"content": "<merged content, only for UPDATE>"|null, '
+    '"reason": "<10 words max>"}\n\n'
+    "Decision guidance:\n"
+    "- ADD: new information not covered by any neighbor\n"
+    "- UPDATE: candidate refines or extends a neighbor (provide merged content preserving both)\n"
+    "- SUPERSEDE: candidate makes a neighbor obsolete (contradicts or replaces it)\n"
+    "- NOOP: candidate is fully redundant with an existing neighbor\n\n"
+    "Rules:\n"
+    "- target must be the 8-char id of the neighbor, or null for ADD\n"
+    "- content is REQUIRED for UPDATE (merged text), null for others\n"
+    "- For UPDATE: merged content must preserve ALL substantive information from BOTH the "
+    "neighbor and the candidate — never shorter than the neighbor's content\n"
+    "- NEVER choose UPDATE or SUPERSEDE for a neighbor that looks like project-identity or "
+    "core-convention content unless the candidate explicitly contradicts it\n"
+    "- Output ONLY the JSON array, no other text\n"
+    "- If unsure, prefer ADD over NOOP to avoid losing information"
 )

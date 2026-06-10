@@ -36,6 +36,7 @@ def _build_mcp():
         return re.findall(r'\[([0-9a-f]{8})\]', md)
 
     import memem.recall_log as _recall_log
+    from memem.recall import _get_current_session_id
     from memem.cross_vault import load_vault_registry as _load_vault_registry
     from memem.cross_vault import search_across_vaults as _search_across_vaults
     from memem.graph_index import (
@@ -121,6 +122,7 @@ def _build_mcp():
     ) -> str:
         """Deprecated: prefer memory_search + memory_get for token efficiency. This legacy alias combines compact search and full-content fetch in one call. Still functional for backward compatibility."""
         t0 = time.monotonic()
+        session_id = _get_current_session_id()
         result = _memory_recall(query, scope_id=scope_id, limit=limit, rerank_model=rerank_model or None)
         try:
             _recall_log.log_recall(
@@ -129,6 +131,7 @@ def _build_mcp():
                 returned_ids=_extract_ids_from_markdown(result),
                 latency_ms=int((time.monotonic() - t0) * 1000),
                 source="mcp",
+                session_id=session_id,
             )
         except Exception:  # noqa: BLE001
             pass
@@ -167,6 +170,7 @@ def _build_mcp():
     ) -> str:
         """Compact-index search (~50 tok/result). Use FIRST to narrow candidates before pulling full content. Returns IDs + titles + 1-line snippets. Call this when the user references a topic, person, project, or decision that isn't already in conversation context."""
         t0 = time.monotonic()
+        session_id = _get_current_session_id()
         result = _memory_search(query, limit=limit, scope_id=scope_id)
         try:
             _recall_log.log_recall(
@@ -175,6 +179,7 @@ def _build_mcp():
                 returned_ids=_extract_ids_from_markdown(result),
                 latency_ms=int((time.monotonic() - t0) * 1000),
                 source="mcp",
+                session_id=session_id,
             )
         except Exception:  # noqa: BLE001
             pass
@@ -207,6 +212,7 @@ def _build_mcp():
     ) -> str:
         """Full content fetch by IDs (~500 tok/result). Use AFTER memory_search to retrieve specific memories. Or call directly with an 8-character ID prefix from the SessionStart episode catalog."""
         t0 = time.monotonic()
+        session_id = _get_current_session_id()
         result = _memory_get(ids, scope_id=scope_id)
         try:
             _recall_log.log_recall(
@@ -215,6 +221,7 @@ def _build_mcp():
                 returned_ids=list(ids),
                 latency_ms=int((time.monotonic() - t0) * 1000),
                 source="mcp",
+                session_id=session_id,
             )
         except Exception:  # noqa: BLE001
             pass
@@ -249,6 +256,7 @@ def _build_mcp():
     ) -> str:
         """Chronological thread via related[] graph + same-project window. Use when you need the narrative around a memory (what led to it, what came after) — typically for understanding a decision's history."""
         t0 = time.monotonic()
+        session_id = _get_current_session_id()
         result = _memory_timeline(
             memory_id,
             depth_before=depth_before,
@@ -262,6 +270,7 @@ def _build_mcp():
                 returned_ids=[memory_id],
                 latency_ms=int((time.monotonic() - t0) * 1000),
                 source="mcp",
+                session_id=session_id,
             )
         except Exception:  # noqa: BLE001
             pass
@@ -345,6 +354,7 @@ def _build_mcp():
     ) -> dict:
         """Call this when you encounter unfamiliar references (version numbers like v1.10.1, project names, bug shortcodes the user expects you to know), when about to make a decision the user might have already made in a prior session, OR when the user uses retrieval-language ('remember', 'we discussed', 'did we agree'). ~150ms latency. The first call in a session is recommended if you don't have project context from CLAUDE.md."""
         t0 = time.monotonic()
+        session_id = _get_current_session_id()
         from memem.render import render_slice
         from memem.retrieve import retrieve
 
@@ -361,6 +371,7 @@ def _build_mcp():
                 returned_ids=[(h.get("id") or "")[:8] for h in results if h.get("id")],
                 latency_ms=int((time.monotonic() - t0) * 1000),
                 source="mcp",
+                session_id=session_id,
             )
         except Exception:  # noqa: BLE001
             pass
@@ -448,17 +459,20 @@ def _build_mcp():
             scan, dedup check, and write sync.
           - Data access scope: writes stay entirely on the local filesystem.
             Nothing is sent over the network.
-          - Not idempotent: calling twice with identical content triggers
-            the dedup check and the second call returns a "Memory already
-            exists" error instead of a duplicate write.
+          - Not idempotent: deduplication applies on every call. Three-band
+            behaviour: score ≥ 0.92 → exact duplicate, rejected with
+            "Memory already exists: [id8] title. Not saved."; 0.70–0.92 →
+            similar content, merged into existing memory via Haiku
+            ("Merged into existing memory [id8] title..."); score < 0.70 →
+            new memory saved normally. Merge failures fall back to reject.
           - Failure modes: rejected inputs return a string error ("Memory
             already exists", "Memory rejected: <security threat>"); they
             never raise to the caller.
 
         Every save goes through:
         1. Prompt-injection + credential-exfil security scan (rejects matches)
-        2. Fuzzy deduplication against existing memories (word+bigram+trigram
-           overlap — rejects near-duplicates with clear reason)
+        2. Fuzzy deduplication against existing memories (three-band:
+           reject exact / merge similar / save new — see Behaviour above)
         3. Automatic related-memory linking (adds `related` frontmatter field)
         4. Write to Obsidian markdown file + FTS5 index + _index.md
 
