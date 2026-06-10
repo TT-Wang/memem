@@ -72,9 +72,8 @@ def _build_mcp():
             str,
             Field(
                 description=(
-                    "Deprecated: prefer memory_search + memory_get for token efficiency. "
-                    "This legacy alias combines compact search and full-content fetch in "
-                    "one call. Still functional for backward compatibility."
+                    "Search query for recalling memories. Use natural-language phrases "
+                    "or keywords describing the topic, decision, or concept to retrieve."
                 ),
                 min_length=1,
                 max_length=500,
@@ -84,9 +83,10 @@ def _build_mcp():
             str,
             Field(
                 description=(
-                    "Project scope to search within. Defaults to \"default\" which "
-                    "searches across all projects. Pass a specific project name to "
-                    "narrow the search to that project's memories only."
+                    "Project scope for retrieval. scope_id is a soft bonus — memories "
+                    "in this project rank higher, but strong cross-project results are "
+                    "not excluded (changed from hard filter in v2.6.0). Default "
+                    "\"default\" applies no scope bonus."
                 ),
             ),
         ] = "default",
@@ -94,10 +94,10 @@ def _build_mcp():
             int,
             Field(
                 description=(
-                    "Maximum number of top-ranked memories to return. Results are "
-                    "ranked by 50% FTS relevance + 15% recency + 15% access "
-                    "history + 20% importance. Linked memories may be expanded "
-                    "beyond this limit."
+                    "Maximum number of top-ranked memories to return. Results ranked "
+                    "by the unified retrieval engine: three-way RRF fusion (semantic + "
+                    "BM25 + full-text) with usage/scope/link/importance signals and "
+                    "MMR diversification. Linked memories may be expanded beyond this limit."
                 ),
                 ge=1,
                 le=50,
@@ -108,9 +108,9 @@ def _build_mcp():
             Field(
                 description=(
                     "Optional cross-encoder reranker model to apply on top of the "
-                    "heuristic 6-signal ranking. When non-empty, the top-50 heuristic "
-                    "candidates are scored by the named model and reordered before "
-                    "truncation to `limit`. Default empty string means heuristic-only. "
+                    "unified retrieval ranking. When non-empty, the top-50 candidates "
+                    "are scored by the named model and reordered before truncation to "
+                    "`limit`. Defaults to the MEMEM_RERANK_MODEL env var when unset. "
                     "Fast default: 'cross-encoder/ms-marco-MiniLM-L-12-v2' (~33M, ~50ms "
                     "CPU). High-quality option: 'BAAI/bge-reranker-v2-m3' (~568M, "
                     "multilingual). Model is downloaded on first use."
@@ -155,7 +155,14 @@ def _build_mcp():
         ] = 10,
         scope_id: Annotated[
             str,
-            Field(description='Project scope to search within. Default "default".'),
+            Field(
+                description=(
+                    'Project scope to search within. Default "default". '
+                    "scope_id is a soft bonus — memories in this project rank higher, "
+                    "but strong cross-project results are not excluded (changed from "
+                    "hard filter in v2.6.0)."
+                ),
+            ),
         ] = "default",
     ) -> str:
         """Compact-index search (~50 tok/result). Use FIRST to narrow candidates before pulling full content. Returns IDs + titles + 1-line snippets. Call this when the user references a topic, person, project, or decision that isn't already in conversation context."""
@@ -189,7 +196,13 @@ def _build_mcp():
         ],
         scope_id: Annotated[
             str,
-            Field(description='Project scope. Default "default".'),
+            Field(
+                description=(
+                    'Project scope. Default "default". Reserved — fetch by ID is '
+                    "scope-independent; this parameter is accepted for API compatibility "
+                    "but does not filter results."
+                ),
+            ),
         ] = "default",
     ) -> str:
         """Full content fetch by IDs (~500 tok/result). Use AFTER memory_search to retrieve specific memories. Or call directly with an 8-character ID prefix from the SessionStart episode catalog."""
@@ -320,13 +333,22 @@ def _build_mcp():
                 ),
             ),
         ] = None,
+        scope_id: Annotated[
+            str,
+            Field(
+                description=(
+                    "Optional project scope. Memories in this project receive a soft "
+                    "ranking bonus; cross-project results are not excluded."
+                ),
+            ),
+        ] = "",
     ) -> dict:
         """Call this when you encounter unfamiliar references (version numbers like v1.10.1, project names, bug shortcodes the user expects you to know), when about to make a decision the user might have already made in a prior session, OR when the user uses retrieval-language ('remember', 'we discussed', 'did we agree'). ~150ms latency. The first call in a session is recommended if you don't have project context from CLAUDE.md."""
         t0 = time.monotonic()
         from memem.render import render_slice
         from memem.retrieve import retrieve
 
-        results = retrieve(query, k=8, log_call_type=None)
+        results = retrieve(query, k=8, log_call_type=None, scope_id=scope_id)
         working = {"task_mode": task_mode} if task_mode else {}
         md = render_slice(query, results, working)
         try:

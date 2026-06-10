@@ -28,10 +28,14 @@ def tmp_vault(tmp_path, monkeypatch):
     (vault / "memem" / "playbooks").mkdir(parents=True)
     monkeypatch.setenv("MEMEM_OBSIDIAN_VAULT", str(vault))
     monkeypatch.delenv("CORTEX_OBSIDIAN_VAULT", raising=False)
-    from memem import models, obsidian_store, playbook
+    # UPDATED(v2.6): retrieve module added to reload list because _search_memories
+    # now delegates to retrieve(), whose module-level _vault_idx_cache must be
+    # invalidated when the vault path changes between tests.
+    from memem import models, obsidian_store, playbook, retrieve
     importlib.reload(models)
     importlib.reload(obsidian_store)
     importlib.reload(playbook)
+    importlib.reload(retrieve)
     return vault
 
 

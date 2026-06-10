@@ -56,7 +56,7 @@ First-session MCP spawn runs `bootstrap.sh` which installs `uv`, syncs deps into
 ## MCP tools exposed to the LLM
 
 - `memory_save(content, title, tags)`: store a lesson (security-scanned)
-- `memory_recall(query, limit)`: search memories (FTS5 + temporal + importance ranking)
+- `memory_recall(query, limit)`: search memories (unified engine: three-way RRF — semantic + BM25 + FTS5 — with usage/scope/link/importance signals and MMR)
 - `memory_list()`: list all memories with stats
 - `memory_import(source_path)`: import from files, directories, chat exports
 - `transcript_search(query)`: search raw Claude Code session logs

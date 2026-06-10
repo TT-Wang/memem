@@ -260,6 +260,202 @@ def test_replay_handles_query_error_gracefully(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# A/B compare helper unit tests
+# ---------------------------------------------------------------------------
+
+
+def test_ab_jaccard_identical():
+    """jaccard() of two identical lists returns 1.0."""
+    from scripts.ab_compare_engines import jaccard as ab_jaccard
+    assert ab_jaccard(["a", "b", "c"], ["a", "b", "c"]) == 1.0
+
+
+def test_ab_jaccard_disjoint():
+    from scripts.ab_compare_engines import jaccard as ab_jaccard
+    assert ab_jaccard(["a", "b"], ["c", "d"]) == 0.0
+
+
+def test_ab_jaccard_partial():
+    from scripts.ab_compare_engines import jaccard as ab_jaccard
+    # |{a} ∩ {a,b,c}| / |{a,b,c}| = 1/3
+    j = ab_jaccard(["a"], ["a", "b", "c"])
+    assert abs(j - (1 / 3)) < 1e-9
+
+
+def test_ab_jaccard_at_k():
+    """jaccard with k=2 truncates both lists before comparing."""
+    from scripts.ab_compare_engines import jaccard as ab_jaccard
+    # Without k: {a,b,c} vs {a,b,z} → 2/4 = 0.5
+    # With k=2: {a,b} vs {a,b} → 1.0
+    assert ab_jaccard(["a", "b", "c"], ["a", "b", "z"], k=2) == 1.0
+    assert abs(ab_jaccard(["a", "b", "c"], ["a", "b", "z"]) - 0.5) < 1e-9
+
+
+def test_ab_rank_delta_present_in_both():
+    """rank_delta returns position change (new_pos - old_pos)."""
+    from scripts.ab_compare_engines import rank_delta
+    assert rank_delta("a", ["a", "b", "c"], ["b", "a", "c"]) == 1   # a moved from 0→1
+    assert rank_delta("c", ["a", "b", "c"], ["c", "a", "b"]) == -2  # c moved from 2→0
+
+
+def test_ab_rank_delta_absent_from_new():
+    from scripts.ab_compare_engines import rank_delta
+    assert rank_delta("a", ["a", "b"], ["c", "d"]) is None
+
+
+def test_ab_rank_delta_absent_from_old():
+    from scripts.ab_compare_engines import rank_delta
+    assert rank_delta("z", ["a", "b"], ["z", "d"]) is None
+
+
+def test_ab_compute_query_stats_overlap():
+    """compute_query_stats produces correct jaccard and shared count."""
+    from scripts.ab_compare_engines import compute_query_stats
+    old = [{"id": "a", "title": "A"}, {"id": "b", "title": "B"}, {"id": "c", "title": "C"}]
+    new = [{"id": "a", "title": "A"}, {"id": "d", "title": "D"}, {"id": "c", "title": "C"}]
+    stats = compute_query_stats(old, new, top=10)
+    # shared = {a, c}, union = {a, b, c, d}, jaccard = 2/4 = 0.5
+    assert abs(stats["jaccard_at_10"] - 0.5) < 1e-9
+    assert stats["n_shared"] == 2
+    # only_in_old: b; only_in_new: d
+    assert stats["only_in_old"][0]["id"] == "b"
+    assert stats["only_in_new"][0]["id"] == "d"
+    # top_1 stable: both start with 'a'
+    assert stats["top_1_stable"] is True
+
+
+def test_ab_compute_query_stats_top1_mismatch():
+    from scripts.ab_compare_engines import compute_query_stats
+    old = [{"id": "a", "title": "A"}, {"id": "b", "title": "B"}]
+    new = [{"id": "b", "title": "B"}, {"id": "a", "title": "A"}]
+    stats = compute_query_stats(old, new)
+    assert stats["top_1_stable"] is False
+    assert stats["n_shared"] == 2
+
+
+def test_ab_compare_artifacts_aggregation(tmp_path):
+    """compare_artifacts returns correct mean Jaccard and top-1 stability."""
+    import json
+    from scripts.ab_compare_engines import compare_artifacts
+
+    old_data = [
+        {"query": "q1", "category": "test", "latency_ms": 10.0,
+         "hits": [{"id": "a", "title": "A", "score": 1.0}, {"id": "b", "title": "B", "score": 0.9}]},
+        {"query": "q2", "category": "test", "latency_ms": 12.0,
+         "hits": [{"id": "x", "title": "X", "score": 1.0}, {"id": "y", "title": "Y", "score": 0.8}]},
+    ]
+    new_data = [
+        {"query": "q1", "category": "test", "latency_ms": 11.0,
+         "hits": [{"id": "a", "title": "A", "score": 1.0}, {"id": "c", "title": "C", "score": 0.7}]},
+        {"query": "q2", "category": "test", "latency_ms": 13.0,
+         "hits": [{"id": "x", "title": "X", "score": 1.0}, {"id": "z", "title": "Z", "score": 0.6}]},
+    ]
+    old_path = tmp_path / "old.json"
+    new_path = tmp_path / "new.json"
+    old_path.write_text(json.dumps(old_data))
+    new_path.write_text(json.dumps(new_data))
+
+    rows, agg = compare_artifacts(old_path, new_path)
+    assert agg["n_queries"] == 2
+    # q1: {a} ∩ {a,b,c} → jaccard = 1/3; q2: {x} ∩ {x,y,z} → jaccard = 1/3
+    # mean_jaccard_at_10 is rounded to 3 decimal places → 0.333
+    assert abs(agg["mean_jaccard_at_10"] - (1/3)) < 1e-3
+    # top-1 stable: q1=True (both 'a'), q2=True (both 'x') → 2/2 = 1.0
+    assert abs(agg["top_1_stability"] - 1.0) < 1e-9
+
+
+# ---------------------------------------------------------------------------
+# mode-dispatch in _re_run_query (m3 v2.6 addition)
+# ---------------------------------------------------------------------------
+
+
+def test_re_run_query_search_mode_routes_to_search_memories(monkeypatch):
+    """row with mode='search' must call _search_memories, not retrieve."""
+    from memem import eval_replay
+
+    search_called = []
+    retrieve_called = []
+
+    def fake_search(query, scope_id=None, limit=10, record_access=True, expand_links=True, **kw):
+        search_called.append(query)
+        return [{"id": "mem-search-1"}]
+
+    def fake_retrieve(query, k=8, scope_id="", log_call_type="hook_auto", writeback=True):
+        retrieve_called.append(query)
+        return []
+
+    # Patch where eval_replay looks up each symbol
+    monkeypatch.setattr(eval_replay, "_search_memories", fake_search)
+    import memem.retrieve as _retrieve_mod
+    monkeypatch.setattr(_retrieve_mod, "retrieve", fake_retrieve)
+
+    row = {
+        "query": "test search query",
+        "mode": "search",
+        "scope_id": "cortex-plugin",
+        "limit": 5,
+    }
+    ids, latency = eval_replay._re_run_query(row)
+    assert ids == ["mem-search-1"], "search mode must return ids from _search_memories"
+    assert search_called == ["test search query"]
+    assert retrieve_called == [], "retrieve() must NOT be called for mode='search'"
+
+
+def test_re_run_query_recall_mode_routes_to_search_memories(monkeypatch):
+    """row with mode='recall' must also route to _search_memories (alias path)."""
+    from memem import eval_replay
+
+    search_called = []
+
+    def fake_search(query, **kw):
+        search_called.append(query)
+        return [{"id": "recall-hit"}]
+
+    monkeypatch.setattr(eval_replay, "_search_memories", fake_search)
+
+    row = {"query": "recall-test", "mode": "recall", "scope_id": "default", "limit": 3}
+    ids, _ = eval_replay._re_run_query(row)
+    assert ids == ["recall-hit"]
+    assert search_called == ["recall-test"]
+
+
+def test_re_run_query_tool_active_slice_routes_to_retrieve(monkeypatch):
+    """row with mode='tool_active_slice' must call retrieve(), not _search_memories."""
+    from memem import eval_replay
+    import memem.retrieve as _retrieve_mod
+
+    retrieve_called = []
+    search_called = []
+
+    def fake_retrieve(query, k=8, scope_id="", log_call_type="hook_auto", writeback=True):
+        retrieve_called.append(query)
+        return [{"id": "slice-hit-1"}, {"id": "slice-hit-2"}]
+
+    def fake_search(query, **kw):
+        search_called.append(query)
+        return []
+
+    monkeypatch.setattr(_retrieve_mod, "retrieve", fake_retrieve)
+    monkeypatch.setattr(eval_replay, "_search_memories", fake_search)
+
+    row = {
+        "query": "active slice query",
+        "mode": "tool_active_slice",
+        "scope_id": "myproject",
+        "limit": 8,
+    }
+    ids, latency = eval_replay._re_run_query(row)
+    assert ids == ["slice-hit-1", "slice-hit-2"]
+    assert retrieve_called == ["active slice query"]
+    assert search_called == [], "_search_memories must NOT be called for mode='tool_active_slice'"
+
+
+# ---------------------------------------------------------------------------
+# Integration: capture writes during memory_search when opted in
+# ---------------------------------------------------------------------------
+
+
 def test_memory_search_writes_capture_when_enabled(tmp_cortex_dir, tmp_vault, monkeypatch):
     """End-to-end: opt in, call memory_search, assert capture file exists with the right shape."""
     monkeypatch.setenv("MEMEM_EVAL_CAPTURE", "1")

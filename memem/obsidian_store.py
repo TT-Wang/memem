@@ -956,9 +956,12 @@ _SAME_PROJECT_BONUS = 0.05
 def _ngram_search_candidates(query: str, scope_id: str = "default", limit: int = 20) -> list[str]:
     """Return memory IDs ranked by fuzzy similarity against ``query``.
 
-    Second candidate generator alongside FTS5, used by the union-rank path
-    in recall.py. Uses rapidfuzz.process.extract with token_set_ratio so it
-    catches semantic/paraphrase matches that FTS surface-form matching misses
+    v2.6.0 ORPHAN: its only production caller (recall.py's union-rank path)
+    was deleted with the heuristic engine. Retained because tests exercise it
+    directly; candidate for deletion in a future cleanup pass.
+
+    Uses rapidfuzz.process.extract with token_set_ratio so it catches
+    semantic/paraphrase matches that FTS surface-form matching misses
     (e.g. query "postgres async" matching memory "asyncpg driver").
 
     score_cutoff=20 (out of 100) mirrors the old 0.2 containment threshold.

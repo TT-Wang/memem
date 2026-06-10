@@ -176,10 +176,9 @@ def test_search_memories_with_rerank_model_no_crash(tmp_vault, tmp_cortex_dir):
     """_search_memories(rerank_model=...) should return <=limit memories without crashing.
 
     Uses a small in-process vault with 3 memories. The cross-encoder will be
-    invoked if results are found, or gracefully skipped if FTS returns nothing.
-    Since this is a fresh empty vault, the FTS path returns [] and the
-    file-scan fallback runs without cross-encoder (the rerank_model is only
-    applied in the FTS path). Either way, no crash is the contract.
+    invoked if results are found, or gracefully skipped if retrieve() returns nothing.
+    UPDATED(v2.6): file-scan fallback no longer exists; _search_memories now
+    delegates to retrieve() (three-way RRF engine). Either way, no crash is the contract.
     """
     from memem.recall import _search_memories
 

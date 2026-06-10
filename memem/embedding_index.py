@@ -1,21 +1,24 @@
-"""Local embedding side-channel for memem's union-rank search.
+"""Local embedding index: build/upsert path for memem's unified retrieval engine.
 
-Adds a third parallel candidate generator alongside FTS5 (search_index.py)
-and ngram containment (obsidian_store._ngram_search_candidates) so queries
-whose surface form doesn't match the memory's wording still surface
-semantically-related memories via vector similarity.
+v2.6.0 NOTE: the "union-rank" search this module originally served was deleted
+with the recall.py heuristic engine. Embeddings are now consumed by ONE reader:
+retrieve.py's cosine RRF channel, which loads ~/.memem/embeddings.npy directly.
+This module remains the WRITE path (full rebuild via _rebuild_search_index,
+incremental upsert via obsidian_store._save_memory → _upsert_embedding).
+`_search_embedding`/`_search_embedding_with_scores` are query-time orphans with
+no production caller — retained for tests/CLI experimentation, candidates for
+deletion in a future cleanup.
 
 Design — strictly additive, zero accuracy regression:
-  • The index is built on demand by _rebuild_embedding_index() which is
-    called from _rebuild_search_index() and nightly during the miner
-    daemon's consolidation pass. New memories added between rebuilds
-    are NOT in the index — they'll come back via FTS/ngram until the
-    next rebuild. This means the embedding signal only UNDER-counts,
+  • The index is rebuilt by _rebuild_embedding_index() (called from
+    _rebuild_search_index()) and incrementally upserted on every memory save
+    (v2.5.0+), so it tracks the vault closely; the mtime-keyed readers pick
+    up changes automatically. A missing row only UNDER-counts,
     never returns wrong results.
   • sentence-transformers is an optional dependency. If the module is
     not importable (install didn't include the `embedding` extra),
-    `_search_embedding` returns [] and the overall union-rank path
-    silently falls back to FTS+ngram. No crash, no user-visible error.
+    upsert/rebuild are no-ops and retrieve() degrades to its BM25+FTS
+    channels. No crash, no user-visible error.
   • The model (`all-MiniLM-L6-v2`) is ~30 MB on disk, 384-dim, local-only.
     No API key, no network calls after model download. First-use downloads
     from HuggingFace; subsequent calls hit the on-disk cache.
@@ -328,9 +331,10 @@ def _upsert_embedding(memory_id: str, text: str) -> bool:
 def _search_embedding(query: str, limit: int = 20) -> list[str]:
     """Return memory IDs ranked by cosine similarity to `query`.
 
-    Returns [] if the optional dependency isn't installed or the index
-    hasn't been built yet. Strict additive signal: never raises, never
-    blocks the parent union-rank path.
+    v2.6.0 ORPHAN: no production caller since the union-rank engine was
+    deleted; retained for tests/CLI experimentation. Returns [] if the
+    optional dependency isn't installed or the index hasn't been built yet.
+    Never raises.
 
     Backwards-compat wrapper around :func:`_search_embedding_with_scores`
     for callers that only want IDs.

@@ -110,7 +110,7 @@ def test_v2_retrieval_meets_acceptance_gates():
     precision = total_hits / max(1, total_returned)
     mean_latency = sum(latencies) / len(latencies)
 
-    print("\n=== Benchmark v2.0.0 ===")
+    print("\n=== memem 18q retrieval benchmark ===")
     print(f"Total: {total_hits}/{total_returned} hits ({100*precision:.1f}% precision)")
     print(f"Cross-scope: {cross_scope_hits}/8 hits")
     print(f"Mean warm latency: {mean_latency:.0f}ms")

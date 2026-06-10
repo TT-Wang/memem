@@ -23,16 +23,36 @@ REPLAY_KEY_LIMIT = 10  # K for Jaccard@k cap (most baselines won't exceed this)
 
 
 def _re_run_query(row: dict[str, Any]) -> tuple[list[str], float]:
-    """Re-run a captured query against current code, return (memory_ids, latency_ms)."""
+    """Re-run a captured query against current code, return (memory_ids, latency_ms).
+
+    Dispatches by row['mode']:
+    - 'search' / 'recall': use _search_memories (unified retrieve() delegate, v2.6)
+    - 'tool_active_slice': use retrieve() directly (already the One Engine path)
+    - unknown/missing: falls back to _search_memories
+
+    UPDATED(v2.6): Added mode-based dispatch so replay comparisons route to the
+    correct engine for each captured mode. 'tool_active_slice' rows bypass the
+    obsidian_store._find_memory mapping overhead since active_slice only needs hit IDs.
+    """
     query = str(row.get("query", "") or "")
     scope_id = str(row.get("scope_id", "default") or "default")
     limit = int(row.get("limit") or REPLAY_KEY_LIMIT)
+    mode = str(row.get("mode") or "search")
+
     t0 = time.monotonic()
-    memories = _search_memories(
-        query, scope_id=scope_id, limit=limit, record_access=False, expand_links=False
-    )
-    elapsed_ms = (time.monotonic() - t0) * 1000.0
-    ids = [str(m.get("id") or "") for m in memories if m.get("id")]
+    if mode == "tool_active_slice":
+        from memem.retrieve import retrieve
+        _scope = scope_id if scope_id and scope_id != "default" else ""
+        hits = retrieve(query, k=limit, scope_id=_scope, log_call_type=None, writeback=False)  # replay must not mutate telemetry
+        elapsed_ms = (time.monotonic() - t0) * 1000.0
+        ids = [str(h.get("id") or "") for h in hits if h.get("id")]
+    else:
+        # 'search', 'recall', or any unknown mode → _search_memories (unified engine)
+        memories = _search_memories(
+            query, scope_id=scope_id, limit=limit, record_access=False, expand_links=False
+        )
+        elapsed_ms = (time.monotonic() - t0) * 1000.0
+        ids = [str(m.get("id") or "") for m in memories if m.get("id")]
     return ids, elapsed_ms
 
 

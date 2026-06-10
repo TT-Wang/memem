@@ -1203,13 +1203,16 @@ class TestRRFScaleFixes:
     """Regression tests for B2 (temporal boost scale) and B3 (MMR scale)."""
 
     def test_cosine_scores_normalized_to_0_1(self, retrieve_env):
-        """After retrieve(), all cosine-source scores must be in [0, 1] (post-normalization).
+        """After retrieve(), all cosine-source scores must be non-negative (post-normalization).
 
         v2.3.1 fix (B2): raw RRF fused scores in ~[0.016, 0.033] are min-max normalized
         to [0, 1] over the candidate pool before temporal boost and MMR. This ensures
         temporal boost and MMR diversity operate on the same scale.
-        For temporal queries: in-window scores may reach 1.2 (1.0 * 1.2x multiplier);
-        for non-temporal queries scores are strictly in [0, 1].
+
+        v2.6.0 update: rerank signal multiplier (usage/scope/link/imp) is applied AFTER
+        normalization. The multiplier can exceed 1.0 (max multiplier ~1.35 at full weights),
+        so final scores may be above 1.0. This is expected and documented — nothing downstream
+        gates on magnitude; ordering is what matters. We verify scores are non-negative.
         """
         env = retrieve_env
         mod = env["retrieve_mod"]
@@ -1232,9 +1235,10 @@ class TestRRFScaleFixes:
 
         for hit in cosine_hits:
             score = hit["score"]
-            assert 0.0 <= score <= 1.0, (
-                f"Cosine hit score {score:.6f} out of [0, 1] range. "
-                f"v2.3.1 normalization must map all cosine scores to [0, 1]. "
+            # v2.6.0 ceiling: 1.0 (norm base) × 1.45 (full signal bundle) = 1.45
+            # (+ float tolerance). A looser bound would mask weight-inflation bugs.
+            assert 0.0 <= score <= 1.46, (
+                f"Cosine hit score {score:.6f} outside [0, 1.46] non-temporal ceiling. "
                 f"title={hit.get('title', '?')}"
             )
 
@@ -1316,8 +1320,11 @@ class TestRRFScaleFixes:
         cosine_hits = [r for r in results if r.get("source") == "cosine"]
         for hit in cosine_hits:
             score = hit["score"]
-            assert 0.0 <= score <= 1.21, (  # 1.2x * 1.0 max + tiny float tolerance
-                f"Temporal-boosted cosine score {score:.6f} exceeds 1.2x bound. "
+            # v2.6.0 ceiling: 1.0 (norm base) × 1.45 (full signal bundle) × 1.2
+            # (temporal) = 1.74 (+ float tolerance). Tight bound catches future
+            # weight-inflation bugs that a bare non-negativity check would mask.
+            assert 0.0 <= score <= 1.75, (
+                f"Temporal-boosted cosine score {score:.6f} outside [0, 1.75] ceiling. "
                 f"title={hit.get('title', '?')}"
             )
 

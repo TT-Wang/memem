@@ -30,6 +30,10 @@ memem is a Claude Code plugin that gives Claude persistent memory across session
 
 It's **local-first**: no cloud services, no API keys required, no vendor lock-in. Everything lives in `~/obsidian-brain/memem/memories/` as human-readable markdown.
 
+### What's new in v2.6.0 (One Engine)
+
+v2.6.0 unifies retrieval: a single three-way RRF engine (cosine + BM25 + FTS5) now serves every call path — hook, MCP tools, and CLI. The unbenchmarked heuristic engine that served `memory_search`/`memory_recall` since v2.4.0 is deleted (−218 LOC: 5-signal re-ranker, ngram union, file-scan fallback, and a 15% feedback weight reading a file nothing ever wrote). Deprecated and invalidated memories are now excluded from the retrieval index at vault-load time, fixing a leak via the hook path. The `scope_id` parameter changes from a hard filter to a soft ranking bonus — cross-project results that score well now appear. The 18-query benchmark is maintained at ≥74% precision (79.3%, measured during release validation). See the [A/B comparison report](docs/ab-report-v2.6.0.md) for transparency on result-set divergence vs the prior engine, and [CHANGELOG](CHANGELOG.md) for full details.
+
 ### What's new in v2.5.0 (Repair & Prune)
 
 v2.5.0 is a maintenance release: 24 audited defects fixed and ~2,256 LOC of dead code removed. No new memory capabilities. Key fixes: self-mining contamination guard (stale-sweep now skips headless mining transcripts), RRF/MMR scoring bugs fixed (18-query benchmark measured during release validation: 74.7% → 78.7%), embedding index staleness fixed (incremental upsert + mtime invalidation + cross-process flock), double access-count stores eliminated (telemetry sidecar is now the single store), episode deduplication (one stable-id episode per session). Removed: `compaction.py`, `reaper.py`, attribution pipeline, `storage.py`, 8 dead settings knobs, and `hybrid` injection mode (was documented but never implemented). New CLI: `python3 -m memem.server --purge-contaminated [--apply]`. See [CHANGELOG](CHANGELOG.md) for full details.

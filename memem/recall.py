@@ -1,16 +1,14 @@
 import hashlib
 import logging
+import os
 from collections import Counter
-from datetime import UTC, datetime
 
-from memem.models import DEFAULT_LAYER, LAST_BRIEF_PATH, LAYER_L0, now_iso, parse_iso_dt
+from memem.models import DEFAULT_LAYER, LAST_BRIEF_PATH, now_iso, parse_iso_dt
 from memem.obsidian_store import (
     _find_memory,
     _obsidian_memories,
-    _word_set,
 )
 from memem.telemetry import (
-    _get_telemetry,
     _record_access,
 )
 from memem.transcripts import transcript_search
@@ -174,140 +172,6 @@ def _memory_to_item(
     return item
 
 
-def _search_memories_fts(query: str, scope_id: str | None = None, limit: int = 10, rerank_model: str | None = None) -> list[dict]:
-    """Candidate-union search: parallel FTS + ngram → dedupe → re-rank → top-N.
-
-    Runs two candidate generators in parallel:
-      • FTS5 (surface-form keyword match, fast, may miss paraphrases)
-      • ngram containment (word/bigram/trigram overlap over the cached vault;
-        catches paraphrase matches FTS misses)
-
-    Takes the union of candidate IDs (preserving FTS order for FTS hits,
-    appending ngram-only hits at the end). Loads full memories from the
-    cache, then applies a 5-signal re-ranker (FTS rank, recency, access
-    telemetry, importance, feedback) to the full union BEFORE truncation.
-    """
-    from concurrent.futures import ThreadPoolExecutor
-
-    scope = scope_id or "default"
-    candidate_limit = limit * 4  # generous — re-ranker filters noise
-
-    try:
-        from memem.obsidian_store import _ngram_search_candidates
-        from memem.search_index import _search_fts
-
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            fts_future = pool.submit(_search_fts, query, scope, candidate_limit)
-            ngram_future = pool.submit(_ngram_search_candidates, query, scope, candidate_limit)
-            try:
-                fts_ids = fts_future.result(timeout=10) or []
-            except Exception as exc:
-                log.debug("FTS candidate generation failed: %s", exc)
-                fts_ids = []
-            try:
-                ngram_ids = ngram_future.result(timeout=10) or []
-            except Exception as exc:
-                log.debug("ngram candidate generation failed: %s", exc)
-                ngram_ids = []
-
-        if not fts_ids and not ngram_ids:
-            return []
-
-        # Preserve FTS rank for its hits; ngram-only hits get a neutral FTS-rank.
-        fts_rank_by_id = {mid: i for i, mid in enumerate(fts_ids)}
-        total_fts = len(fts_ids)
-        union_ids: list[str] = list(fts_ids)
-        seen = set(fts_ids)
-        for mid in ngram_ids:
-            if mid not in seen:
-                union_ids.append(mid)
-                seen.add(mid)
-
-        # Load full memories from cache
-        mems: list[dict] = []
-        for mid in union_ids:
-            mem = _find_memory(mid)
-            if mem and mem.get("status", "active") != "deprecated":
-                # Bi-temporal filter: exclude memories that have been invalidated
-                if mem.get("invalid_at") is not None:
-                    continue
-                mems.append(mem)
-        if not mems:
-            return []
-
-        # 5-signal re-rank across the FULL union.
-        # Weights: FTS 0.35 + recency 0.20 + access 0.10 + importance 0.20 + feedback 0.15 = 1.00
-        from memem.feedback import get_relevance_score
-
-        scored: list[tuple[float, dict]] = []
-        for mem in mems:
-            mem_id = mem.get("id", "")
-            tel = _get_telemetry(mem_id)
-            last_touch = tel.get("last_accessed") or mem.get("updated_at") or mem.get("created_at", "")
-            try:
-                if last_touch:
-                    dt = datetime.fromisoformat(last_touch.replace("Z", "+00:00"))
-                    hours_old = max(0, (datetime.now(UTC) - dt).total_seconds() / 3600)
-                    recency = 0.995 ** hours_old
-                else:
-                    recency = 0.5
-            except (ValueError, TypeError):
-                recency = 0.5
-
-            access_boost = min(tel.get("access_count", 0) / 10.0, 1.0)
-            importance = mem.get("importance", 3) / 5.0
-
-            if mem_id in fts_rank_by_id and total_fts:
-                rank_pos = fts_rank_by_id[mem_id]
-                fts_rank = 1.0 - (rank_pos / total_fts)
-            else:
-                fts_rank = 0.5
-
-            feedback_raw = get_relevance_score(mem_id)
-            feedback_norm = (feedback_raw + 1.0) / 2.0
-
-            score = (
-                0.35 * fts_rank
-                + 0.20 * recency
-                + 0.10 * access_boost
-                + 0.20 * importance
-                + 0.15 * feedback_norm
-            )
-            scored.append((score, mem))
-
-        scored.sort(key=lambda x: x[0], reverse=True)
-
-        import memem.settings as _memem_settings
-        _min_item_score = _memem_settings.MEMEM_RECALL_MIN_ITEM_SCORE
-        if _min_item_score > 0.0:
-            scored = [
-                (s, m) for s, m in scored
-                if s >= _min_item_score or m.get("layer") == LAYER_L0
-            ]
-
-        # Optional cross-encoder rerank: take top-50, score with cross-encoder.
-        if rerank_model:
-            top50 = [mem for _, mem in scored[:50]]
-            try:
-                from memem.cross_encoder_rerank import rerank_pairs
-
-                ce_pairs = rerank_pairs(query, top50, model_name=rerank_model)
-                id_to_mem = {mem.get("id", ""): mem for mem in top50}
-                reranked = [id_to_mem[mid] for mid, _score in ce_pairs if mid in id_to_mem]
-                seen_reranked = {mem.get("id", "") for mem in reranked}
-                for mem in top50:
-                    if mem.get("id", "") not in seen_reranked:
-                        reranked.append(mem)
-                return reranked[:limit]
-            except Exception as exc:  # noqa: BLE001
-                log.warning("cross-encoder rerank failed, using heuristic order: %s", exc)
-
-        return [mem for _, mem in scored[:limit]]
-    except Exception as exc:
-        log.debug("Union search failed, falling back to file scan: %s", exc)
-        return []  # Fallback: caller will use file scan
-
-
 def _expand_graph(seed_mems: list[dict], max_total: int, hops: int = 2) -> list[dict]:
     """Breadth-first graph expansion over typed graph edges, cap-aware.
 
@@ -409,90 +273,81 @@ def _search_memories(
     expand_links: bool = True,
     rerank_model: str | None = None,
 ) -> list[dict]:
-    # Try FTS-first path
-    fts_results = _search_memories_fts(query, scope_id, limit, rerank_model=rerank_model)
-    if fts_results:
-        results = (
-            _expand_graph(fts_results, max_total=limit * 2, hops=2)
-            if expand_links
-            else fts_results[:limit]
-        )
-        if record_access:
-            session_id = _get_current_session_id()
-            for mem in results:
-                mem_id = mem.get("id", "")
-                if mem_id:
-                    _record_access(mem_id)
-                    if session_id:
-                        from memem.telemetry import record_session_recall
+    """Unified retrieval: delegates to retrieve() (three-way RRF engine, v2.6.0).
 
-                        record_session_recall(session_id, mem_id)
-        return results
+    Maps each MemoryHit from retrieve() to its full obsidian_store memory dict
+    via _find_memory(hit['id']), which provides the complete essence/body/tags
+    that _memory_to_item expects (NOT retrieve's truncated 300-char body).
 
-    # Fallback to file scan (existing code continues below)
-    query_words = _word_set(query)
-    if not query_words:
+    Each full memory dict is copied (dict(full)) before the score annotation
+    so the obsidian_store cache is never mutated.
+
+    rerank_model: when set (or overridden by MEMEM_RERANK_MODEL env var),
+    a cross-encoder re-ranking pass is applied AFTER the retrieve() pool.
+    To give the CE a meaningful pool without exploding latency, retrieve() is
+    called with k=min(limit*3, 50) and then truncated to `limit` after CE.
+    """
+    # UPDATED(v2.6): heuristic engine (5-signal / file-scan fallback / feedback
+    # import) deleted; now delegates to retrieve() One Engine.
+    rerank_model = rerank_model or os.environ.get("MEMEM_RERANK_MODEL") or None
+
+    from memem.retrieve import retrieve
+
+    # Map scope: 'default' / None / '' → '' (no soft-bonus scope applied)
+    _scope = scope_id if scope_id and scope_id != "default" else ""
+
+    # When CE rerank is requested, ask for a larger pool so the CE has
+    # something meaningful to chew on before truncating to limit.
+    # We cap at 50 to match the previous heuristic CE pool size. (Note: small
+    # limits get a smaller CE pool than the old fixed-50 path: min(limit*3, 50).)
+    _k = min(limit * 3, 50) if rerank_model else limit
+    # writeback=False always: this layer owns access recording. Under
+    # record_access=True it records once below (including graph-expanded
+    # results); under record_access=False (memory_search's compact index)
+    # the contract is NO access recording at all — retrieve()'s writeback
+    # thread firing would silently change that semantics.
+    hits = retrieve(
+        query, k=_k, scope_id=_scope, log_call_type=None, writeback=False,
+    )
+
+    # Map MemoryHit → full memory dict (preserves body-truncation contract)
+    primary: list[dict] = []
+    for hit in hits:
+        full = _find_memory(hit.get("id") or "")
+        if full is None:
+            # Hit's vault entry was removed since index was built — skip
+            continue
+        # Copy before annotating: _find_memory returns the live cache object
+        mem = dict(full)
+        mem["score"] = hit.get("score")
+        primary.append(mem)
+
+    if not primary:
         return []
 
-    scored = []
-    for mem in _obsidian_memories(scope_id):
-        # Bi-temporal filter: exclude memories that have been invalidated
-        if mem.get("invalid_at") is not None:
-            continue
-        title = mem.get("title", "")
-        tags = mem.get("domain_tags", [])
-        body = mem.get("full_record", "")
-        mem_words = _word_set(title + " " + " ".join(tags) + " " + body)
-        # Title matches count double
-        title_words = _word_set(title + " " + " ".join(tags))
-        title_hits = len(query_words & title_words)
-        body_hits = len(query_words & mem_words) - title_hits
-        keyword_score = (title_hits * 2 + body_hits) / len(query_words)
-        if keyword_score >= 0.3:
-            # Temporal + access weighting (telemetry from sidecar)
-            tel = _get_telemetry(mem.get("id", ""))
-            last_touch = tel.get("last_accessed") or mem.get("updated_at") or mem.get("created_at", "")
-            try:
-                if last_touch:
-                    dt = datetime.fromisoformat(last_touch.replace("Z", "+00:00"))
-                    hours_old = max(0, (datetime.now(UTC) - dt).total_seconds() / 3600)
-                    recency = 0.995 ** hours_old
-                else:
-                    recency = 0.5
-            except (ValueError, TypeError):
-                recency = 0.5
+    # Optional cross-encoder rerank over the full pool, then truncate to limit
+    if rerank_model:
+        try:
+            from memem.cross_encoder_rerank import rerank_pairs
 
-            access_count = tel.get("access_count", 0)
-            access_boost = min(access_count / 10.0, 1.0)
-
-            importance = mem.get("importance", 3)
-            importance_score = importance / 5.0
-
-            # Relevance feedback (closed-loop signal from session outcomes).
-            from memem.feedback import get_relevance_score
-
-            feedback_raw = get_relevance_score(mem.get("id", ""))
-            feedback_norm = (feedback_raw + 1.0) / 2.0
-
-            score = (
-                0.45 * keyword_score
-                + 0.15 * recency
-                + 0.15 * access_boost
-                + 0.15 * importance_score
-                + 0.10 * feedback_norm
-            )
-
-            result = dict(mem)
-            scored.append((score, result))
-
-    scored.sort(key=lambda item: item[0], reverse=True)
-    primary = [mem for _, mem in scored[:limit]]
+            ce_pairs = rerank_pairs(query, primary, model_name=rerank_model)
+            id_to_mem = {m.get("id", ""): m for m in primary}
+            reranked = [id_to_mem[mid] for mid, _score in ce_pairs if mid in id_to_mem]
+            seen_reranked = {m.get("id", "") for m in reranked}
+            for m in primary:
+                if m.get("id", "") not in seen_reranked:
+                    reranked.append(m)
+            primary = reranked[:limit]
+        except Exception as exc:  # noqa: BLE001
+            log.warning("cross-encoder rerank failed, using retrieve order: %s", exc)
+            primary = primary[:limit]
+    else:
+        primary = primary[:limit]
 
     if expand_links:
-        max_total = limit * 2
-        results = _expand_graph(primary, max_total=max_total, hops=2)
+        results = _expand_graph(primary, max_total=limit * 2, hops=2)
     else:
-        results = primary[:limit]
+        results = primary
 
     # Track access for returned memories (skip for internal/assembly calls)
     if record_access:

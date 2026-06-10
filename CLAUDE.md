@@ -49,6 +49,11 @@ Selective-recall tunables (v1.9.6+, env vars, all optional):
 | Var | Default | Behaviour |
 |-----|---------|-----------|
 | `MEMEM_RECALL_MIN_ITEM_SCORE` | `0.0` | Per-item composite-score floor for recall results (0.0 = disabled). L0 project-identity anchors are always exempt. Clamped to `[0.0, 1.0]`. |
+| `MEMEM_RERANK_MODEL` | `""` | Cross-encoder reranker model name (e.g. `cross-encoder/ms-marco-MiniLM-L-12-v2`). When set, all `memory_search`/`memory_recall` calls apply a CE reranking pass over the top-50 unified-engine candidates before truncating to `limit`. Model downloaded on first use. Not required — three-way RRF produces strong results without CE. |
+
+**Retrieval engine (v2.6.0+)** — `memory_search`, `memory_recall`, and `active_memory_slice` all use the same unified engine: three-way RRF (cosine + BM25 + FTS5) with a rerank signal bundle (usage, scope, link, importance) and MMR diversification. There is no separate heuristic engine.
+
+**Scope semantics (v2.6.0+)** — `scope_id` is a **soft bonus** (not a hard filter). Memories in the named project rank higher, but strong cross-project results are not excluded. Default `"default"` applies no scope bonus.
 
 **Graph traversal** — `memory_search` and `memory_get` automatically follow the `related[]` field one hop and include linked memories in a separate section.
 

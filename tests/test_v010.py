@@ -252,50 +252,10 @@ def test_graph_traversal_two_hops(monkeypatch):
     assert "Gamma memory" in result or "cccc0003" in result
 
 
-def test_union_search_includes_ngram_only_candidates(tmp_vault, tmp_cortex_dir, monkeypatch):
-    """m5 regression: ngram-only candidates (missed by FTS) must survive
-    the union and reach the re-ranker. FTS hits never get squeezed out."""
-    import importlib
-
-    from memem import models, obsidian_store, recall, search_index
-    importlib.reload(models)
-    importlib.reload(search_index)
-    importlib.reload(obsidian_store)
-    importlib.reload(recall)
-
-    # Save three memories directly so _find_memory / telemetry work.
-    mem_fts_only = obsidian_store._make_memory(
-        content="FTS-only candidate — unique keyword xenon-phrase",
-        title="fts_cand", project="general", source_type="user",
-    )
-    mem_both = obsidian_store._make_memory(
-        content="Both candidate — xenon-phrase and semantic overlap",
-        title="both_cand", project="general", source_type="user",
-    )
-    mem_ngram_only = obsidian_store._make_memory(
-        content="Ngram-only candidate — no xenon but semantic overlap",
-        title="ngram_cand", project="general", source_type="user",
-    )
-    for m in (mem_fts_only, mem_both, mem_ngram_only):
-        obsidian_store._save_memory(m)
-
-    fts_hits = [mem_fts_only["id"], mem_both["id"]]
-    ngram_hits = [mem_both["id"], mem_ngram_only["id"]]
-
-    monkeypatch.setattr(
-        "memem.search_index._search_fts",
-        lambda q, scope, limit: fts_hits[:limit],
-    )
-    monkeypatch.setattr(
-        "memem.obsidian_store._ngram_search_candidates",
-        lambda q, scope, limit: ngram_hits[:limit],
-    )
-
-    results = recall._search_memories_fts("anything", "default", limit=10)
-    ids = {m.get("id") for m in results}
-    assert mem_fts_only["id"] in ids, "FTS-only candidate got dropped"
-    assert mem_ngram_only["id"] in ids, "ngram-only candidate got dropped"
-    assert mem_both["id"] in ids
+# DELETED(v2.6): test_union_search_includes_ngram_only_candidates removed because
+# _search_memories_fts and the ngram union path no longer exist in recall.py.
+# The unified retrieve() engine (three-way RRF: cosine+BM25+FTS) subsumes
+# both FTS and ngram signal channels, so ngram-only recall is covered by BM25+FTS.
 
 
 def test_embedding_graceful_degrade_without_dep():
@@ -322,39 +282,10 @@ def test_embedding_graceful_degrade_without_dep():
             sys.modules["sentence_transformers"] = saved
 
 
-def test_union_search_survives_embedding_timeout(tmp_vault, tmp_cortex_dir, monkeypatch):
-    """If the embedding generator hangs or errors, FTS + ngram results still
-    return — embedding is additive, not blocking."""
-    import importlib
-
-    from memem import models, obsidian_store, recall, search_index
-    importlib.reload(models)
-    importlib.reload(search_index)
-    importlib.reload(obsidian_store)
-    importlib.reload(recall)
-
-    mem = obsidian_store._make_memory(
-        content="Content about testing FTS survives embedding failure path",
-        title="test_survive", project="general", source_type="user",
-    )
-    obsidian_store._save_memory(mem)
-
-    monkeypatch.setattr(
-        "memem.search_index._search_fts",
-        lambda q, scope, limit: [mem["id"]],
-    )
-    monkeypatch.setattr(
-        "memem.obsidian_store._ngram_search_candidates",
-        lambda q, scope, limit: [],
-    )
-
-    def raise_embedding(*args, **kwargs):
-        raise RuntimeError("embedding model broke")
-    monkeypatch.setattr("memem.embedding_index._search_embedding_with_scores", raise_embedding)
-
-    results = recall._search_memories_fts("anything", "default", limit=10)
-    ids = {m.get("id") for m in results}
-    assert mem["id"] in ids, "FTS result lost when embedding failed"
+# DELETED(v2.6): test_union_search_survives_embedding_timeout removed because
+# _search_memories_fts no longer exists. The unified retrieve() engine already
+# handles embedding failures gracefully (cosine channel degrades to BM25+FTS-only).
+# retrieve() embedding-failure resilience is tested in tests/test_retrieve_unified.py.
 
 
 

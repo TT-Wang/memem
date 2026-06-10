@@ -10,6 +10,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
 
+## v2.6.0 — One Engine (2026-06-10)
+
+One retrieval engine now serves every path (hook, MCP tools, CLI): the three-way RRF pipeline in `retrieve.py` replaces the unbenchmarked heuristic (5-signal + file-scan fallback) that had served `memory_search`/`memory_recall` since v2.4.0. The heuristic engine is deleted; deprecated and invalidated memories are now excluded from the retrieval index at vault-load time; the 18-query benchmark is maintained at ≥74% through all changes.
+
+### Changed
+
+- **Engine unification (m3)** — `recall.py::_search_memories` now delegates entirely to `retrieve()` (the three-way RRF engine). The prior code path (`_search_memories_fts` → ngram union → file-scan fallback → 5-signal re-ranker) is deleted (−218 LOC: `_search_memories_fts`, ngram union, file-scan fallback, and the 5-signal scorer including the dead 15% feedback weight that read a file nothing ever wrote). Every query now goes through the same cosine + BM25 + FTS RRF pipeline regardless of call origin.
+- **Scope semantics: HARD FILTER → SOFT BONUS (user-visible change)** — `scope_id` is now a soft ranking bonus at every call site (`memory_search`, `memory_recall`, `active_memory_slice`). Cross-project results that score well are no longer excluded; they rank behind same-scope results. Callers passing `scope_id` to narrow results should be aware that high-scoring cross-project memories will appear. Default `"default"` applies no scope bonus.
+- **FTS5 as a third RRF channel (m2)** — FTS top-20 results join cosine and BM25 in three-way RRF fusion for EVERY query (previously FTS was a literal-supplement for version/date patterns only). `_rrf_fusion` extended to accept an optional `fts_scores` dict; absent-channel IDs receive a penalty rank.
+- **Rerank signal bundle (m2)** — after min-max normalization of the RRF pool to `[0,1]`, a multiplicative signal bundle is applied before the temporal 1.2× boost: `final = norm_rrf × (1 + 0.15·usage + 0.10·scope + 0.10·link + 0.10·imp)`. `usage = 0.5·recency(7-day half-life from telemetry) + 0.5·capped log-frequency`; `link = bidirectional 1-hop over related[] prefixes of the top-5 seeds (self-link-proof)`; `imp = importance / 5.0`. Scores may exceed 1.0 after multipliers; nothing downstream gates on magnitude. Pipeline order: 3-way RRF → min-max normalize → signal bundle → temporal 1.2× → re-sort → MMR → k.
+- **Writeback single-ownership (m3)** — `retrieve()` is called with `writeback=False` from the recall layer. `memory_search` records no access (unchanged contract). `memory_recall` records exactly once in the recall layer, after graph expansion. The prior behavior (retrieve() firing its own writeback thread AND the recall layer recording again for the same hits) is eliminated.
+- **Tool descriptions corrected (m5)** — `memory_recall`, `memory_search`, and `active_memory_slice` parameter descriptions updated: old heuristic weight text (`"50% FTS relevance + 15% recency"`) replaced with accurate unified-engine descriptions; scope parameter now describes the soft-bonus semantics; `memory_recall`'s rerank_model description notes the `MEMEM_RERANK_MODEL` env var fallback.
+
+### Added
+
+- **`scope_id` param on `retrieve()` and `active_memory_slice` (m2/m5)** — `retrieve()` gains `scope_id: str = ""` (soft bonus, not filter); `active_memory_slice` MCP tool gains a `scope_id` parameter that is forwarded to `retrieve()`.
+- **`MEMEM_RERANK_MODEL` env var (m3)** — `recall.py::_search_memories` reads `MEMEM_RERANK_MODEL` from the environment as a default rerank model when the caller does not pass one explicitly. Setting this env var enables cross-encoder reranking for all MCP tool calls without per-call configuration.
+- **A/B comparison script `scripts/ab_compare_engines.py` (m4)** — offline comparison of two captured result-set artifacts (Mode A) or live re-run against the current engine (Mode B `--live`). Outputs Jaccard@k, top-1 stability, and mean absolute rank delta across query sets; also writes `/tmp/memem_v26_ab_report.json` with summary fields for the release process.
+- **A/B report `docs/ab-report-v2.6.0.md` (m4)** — 23-query comparison between the v2.5 heuristic engine and the v2.6 unified engine. Mean Jaccard@10: 0.296; top-1 stability: 1/23 (4.3%). Ranking changed wholesale by design; the quality evidence is the separate 18-query benchmark (≥74% precision maintained, measured during release validation). See [docs/ab-report-v2.6.0.md](docs/ab-report-v2.6.0.md).
+- **`MemoryHit` gains `tags`, `related`, `status` fields (m1)** — `load_vault_index` now extracts `tags` (block-list YAML), `related` (block-list of 8-char hex prefixes), and `status` from each memory's frontmatter, bounded by the closing `---` of the frontmatter block (body content no longer bleeds into extraction). The `link` rerank signal uses `related[]` from the top-5 seed candidates for bidirectional 1-hop graph traversal.
+- **Telemetry bulk-load (m2)** — `TELEMETRY_FILE` is read exactly once per `retrieve()` call (not once per memory) via `_load_telemetry_bulk()`. Keys are 8-char memory id prefixes; tolerates missing or corrupt file.
+
+### Removed
+
+- **Heuristic engine `_search_memories_fts` (m3)** — deleted from `recall.py` (−218 LOC). This function ran parallel FTS5 + ngram candidate generation, re-ranked via 5 signals (FTS rank, recency, access, importance, and a 15% feedback weight reading a file no code path wrote), and fell back to a full O(vault) file-scan on any failure. None of these paths are reachable after v2.6.0.
+- **Dead feedback weight** — the 15% feedback signal in the heuristic re-ranker imported `get_relevance_score()` from `memem.feedback`, which consulted a file no code path writes. The dead import and its 0.15 weight are removed.
+- **`_word_set` and `_get_telemetry` imports in recall.py** — used only by the deleted heuristic paths.
+
+### Fixed
+
+- **Deprecated/invalidated memories leaked via hook path (m1)** — `load_vault_index` now skips memories where `status == "deprecated"` or `invalid_at` is non-empty. Previously these memories could surface via the `active_memory_slice` hook path (which calls `retrieve()` directly, bypassing the bi-temporal filter that `_find_memory` in `obsidian_store.py` applies).
+- **Double access-count writeback (m3)** — under the old `_search_memories_fts` path, `retrieve()` would fire a writeback thread AND the recall layer would call `_record_access` again for the same hits. The new path calls `retrieve(writeback=False)` from the recall layer and records exactly once.
+
+### Migration notes
+
+- **Scope behavior change**: if you were passing `scope_id` to `memory_search` or `memory_recall` expecting hard project isolation, you will now see cross-project results ranked lower but not excluded. To preserve strict scope isolation, filter returned memories client-side by their `project` field.
+- **No data migration required**: the vault format is unchanged. `search.db` and `embeddings.npy` continue to work without rebuild.
+- **`MEMEM_RERANK_MODEL`** (optional): set to a cross-encoder model name (e.g. `cross-encoder/ms-marco-MiniLM-L-12-v2`) to enable reranking globally for all MCP tool calls. Model downloaded on first use. Not required — three-way RRF produces strong results without a CE pass. **If you already had this var exported**: before v2.6.0 the env var was documented but unwired (the CE pass only fired via `memory_recall`'s explicit `rerank_model` argument); v2.6.0 wires it for real, and it now also reaches `memory_search` and slice assembly — more paths, first-call model-download latency included.
+- **Benchmark provenance**: 18-query benchmark measured during release validation on the live vault: **79.3% precision (119/150 keyword hits)**, vs 78.7% at v2.5.0. The +0.6pp step came from m1's deprecated/invalidated-memory exclusion; the rerank-signal bundle and FTS third channel held precision at full-strength weights (gate: ≥74%).
+
 ## v2.5.0 — Repair & Prune (2026-06-10)
 
 No new memory capabilities; 24 audited defects fixed and ~2,256 LOC of dead code removed.
