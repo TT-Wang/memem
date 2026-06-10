@@ -209,8 +209,14 @@ def test_find_settled_sessions_skips_sessions_with_credentials(tmp_cortex_dir, t
 
 
 def test_find_settled_sessions_skips_lexie_project_by_default(tmp_cortex_dir, tmp_path, monkeypatch):
-    """Lexie owns its own mining pipeline; memem should not mine its sessions by default."""
+    """MEMEM_EXCLUDED_SESSION_PROJECTS env var controls project exclusion.
+
+    B23: DEFAULT_EXCLUDED_SESSION_PROJECTS is now empty — personal project
+    exclusions must be set via MEMEM_EXCLUDED_SESSION_PROJECTS env var.
+    This test verifies that the env-var mechanism works correctly.
+    """
     from memem import session_state
+    monkeypatch.setenv("MEMEM_EXCLUDED_SESSION_PROJECTS", "-home-claude-user-lexie")
     importlib.reload(session_state)
 
     projects = tmp_path / "projects"

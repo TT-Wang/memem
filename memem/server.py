@@ -24,11 +24,16 @@ def _build_mcp():
     Importing ``mcp.server.fastmcp`` here keeps non-MCP commands free of the
     dependency.
     """
+    import re
     import time
     from typing import Annotated
 
     from mcp.server.fastmcp import FastMCP
     from pydantic import Field
+
+    def _extract_ids_from_markdown(md: str) -> list[str]:
+        """Extract 8-hex memory IDs from compact result lines (e.g. '[abcd1234] ...')."""
+        return re.findall(r'\[([0-9a-f]{8})\]', md)
 
     import memem.recall_log as _recall_log
     from memem.cross_vault import load_vault_registry as _load_vault_registry
@@ -121,7 +126,7 @@ def _build_mcp():
             _recall_log.log_recall(
                 call_type="tool_memory_recall",
                 query=query,
-                returned_ids=[],
+                returned_ids=_extract_ids_from_markdown(result),
                 latency_ms=int((time.monotonic() - t0) * 1000),
                 source="mcp",
             )
@@ -160,7 +165,7 @@ def _build_mcp():
             _recall_log.log_recall(
                 call_type="tool_memory_search",
                 query=query,
-                returned_ids=[],
+                returned_ids=_extract_ids_from_markdown(result),
                 latency_ms=int((time.monotonic() - t0) * 1000),
                 source="mcp",
             )
@@ -321,14 +326,17 @@ def _build_mcp():
         from memem.render import render_slice
         from memem.retrieve import retrieve
 
-        results = retrieve(query, k=8)
+        results = retrieve(query, k=8, log_call_type=None)
         working = {"task_mode": task_mode} if task_mode else {}
         md = render_slice(query, results, working)
         try:
             _recall_log.log_recall(
                 call_type="tool_active_slice",
                 query=query,
-                returned_ids=[],
+                # IDs come from the MemoryHit dicts, not the rendered markdown
+                # (render_slice output carries no 8-hex ids) — this is the
+                # citation-rate telemetry for the passive-mode evaluation.
+                returned_ids=[(h.get("id") or "")[:8] for h in results if h.get("id")],
                 latency_ms=int((time.monotonic() - t0) * 1000),
                 source="mcp",
             )

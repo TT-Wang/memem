@@ -1,4 +1,6 @@
+import atexit
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -7,15 +9,46 @@ from typing import Any
 # v2.1.0: miner_protocol module deleted; constants inlined here.
 FATAL_EXIT_CODE = 75
 TRANSIENT_EXIT_CODE = 20
-# v2.1.0: mine_session, MiningError, FatalMiningError removed from mining.py — use mine_delta instead.
-from memem.models import INDEX_PATH
+
+from memem.models import INDEX_PATH, MINER_OPT_IN_MARKER, MEMEM_DIR, OBSIDIAN_MEMORIES_DIR, PLAYBOOK_DIR, SERVER_PID_FILE
 from memem.obsidian_store import (
     _generate_index,
     purge_mined_memories,
 )
 from memem.recall import memory_recall
 from memem.session_state import MINED_SESSIONS_FILE
-from memem.storage import _register_server_pid
+
+
+def _pid_is_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _cleanup_pid_file(path: "Path", pid: int) -> None:
+    try:
+        if path.read_text().strip() == str(pid):
+            path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _register_server_pid() -> None:
+    OBSIDIAN_MEMORIES_DIR.mkdir(parents=True, exist_ok=True)
+    INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
+    PLAYBOOK_DIR.mkdir(parents=True, exist_ok=True)
+    MEMEM_DIR.mkdir(parents=True, exist_ok=True)
+    pid = os.getpid()
+    SERVER_PID_FILE.write_text(str(pid))
+
+    def _cleanup() -> None:
+        _cleanup_pid_file(SERVER_PID_FILE, pid)
+
+    atexit.register(_cleanup)
 
 
 def _run_integrity_check(verbose: bool = True) -> bool:
@@ -329,7 +362,7 @@ def dispatch_cli(argv: list[str], mcp) -> None:
             print("memem.retrieve / memem.render not available.")
             return
 
-        results = retrieve(query, k=8)
+        results = retrieve(query, k=8, log_call_type="cli_slice")
         working: dict = {}
         if environment:
             if environment.get("task_mode"):
@@ -365,7 +398,7 @@ def dispatch_cli(argv: list[str], mcp) -> None:
 
     if cmd == "--mine-all":
         from memem.session_state import find_settled_sessions
-        from memem.storage import MINER_OPT_IN_MARKER
+
 
         # Explicit --mine-all is an opt-in signal.
         MINER_OPT_IN_MARKER.parent.mkdir(parents=True, exist_ok=True)
@@ -396,14 +429,14 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         return
 
     if cmd == "--miner-opt-in":
-        from memem.storage import MINER_OPT_IN_MARKER
+
         MINER_OPT_IN_MARKER.parent.mkdir(parents=True, exist_ok=True)
         MINER_OPT_IN_MARKER.touch()
         print(f"v2.1.0: opt-in marker {MINER_OPT_IN_MARKER} created. The Stop hook will now trigger mine_delta on every conversation turn (no daemon).")
         return
 
     if cmd == "--miner-opt-out":
-        from memem.storage import MINER_OPT_IN_MARKER
+
         MINER_OPT_IN_MARKER.unlink(missing_ok=True)
         print(f"v2.1.0: opt-in marker {MINER_OPT_IN_MARKER} removed. Mining will no longer trigger on Stop events. Re-create the marker (or run --miner-opt-in) to re-enable.")
         return
@@ -670,7 +703,7 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         print(f"  Events:    {sum(1 for _ in open(EVENT_LOG)) if EVENT_LOG.exists() else 0} logged")
 
         # Miner status (v2.1.0: event-triggered via Stop hook, no daemon)
-        from memem.storage import MINER_OPT_IN_MARKER
+
         miner_state = "opted-in (Stop hook)" if MINER_OPT_IN_MARKER.exists() else "opted-out"
         print(f"  Miner:     {miner_state}")
         print("=" * 40)
@@ -678,6 +711,58 @@ def dispatch_cli(argv: list[str], mcp) -> None:
 
     if cmd in ("--miner-start", "--miner-stop", "--miner-status", "--start-miner", "--stop-miner"):
         print("v2.1.0: miner is now event-triggered via Stop hook; no daemon to start/stop. The opt-in marker ~/.memem/.miner-opted-in is still respected.")
+        return
+
+    if cmd == "--purge-contaminated":
+        # Scan vault memories for mining-artifact contamination and optionally delete them.
+        # A memory is contaminated if its title or essence contains any of these markers
+        # that come from headless claude -p mining invocations:
+        #   - '=== BEGIN CONVERSATION ===' (from mine_delta._emit_session_episode)
+        #   - 'Below is a coding conversation' (from mining._mine_one_chunk)
+        #   - '<task-notification' (stray hook/notification fragments)
+        # Dry-run by DEFAULT; use --apply to delete.
+        apply = "--apply" in argv
+        _CONTAMINATION_MARKERS = (
+            "=== BEGIN CONVERSATION ===",
+            "Below is a coding conversation",
+            "<task-notification",
+        )
+
+        from memem.obsidian_store import _delete_memory, _obsidian_memories
+
+        all_mems = _obsidian_memories(include_deprecated=True)
+        contaminated = []
+        for mem in all_mems:
+            title = mem.get("title") or ""
+            essence = mem.get("essence") or mem.get("full_record") or ""
+            haystack = title + "\n" + essence
+            if any(marker in haystack for marker in _CONTAMINATION_MARKERS):
+                contaminated.append(mem)
+
+        if not contaminated:
+            print("--purge-contaminated: no contaminated memories found.")
+            return
+
+        if not apply:
+            # Dry-run: print matches and exit without touching the vault.
+            print(f"--purge-contaminated (dry-run): {len(contaminated)} contaminated memories found.")
+            print("Run with --apply to delete. Matches:")
+            for mem in contaminated:
+                mid = (mem.get("id") or "")[:8]
+                title = (mem.get("title") or "(untitled)")[:80]
+                print(f"  {mid}  {title}")
+            print(f"\nTotal: {len(contaminated)}  |  Run with --apply to delete.")
+        else:
+            deleted = 0
+            failed = 0
+            for mem in contaminated:
+                mid = mem.get("id") or ""
+                ok = _delete_memory(mid)
+                if ok:
+                    deleted += 1
+                else:
+                    failed += 1
+            print(f"--purge-contaminated: deleted {deleted}, failed {failed} (of {len(contaminated)} contaminated).")
         return
 
     if cmd == "--consolidate":

@@ -42,6 +42,7 @@ def _run_eval_in_tmp_vault() -> dict:
 
         os.environ["MEMEM_OBSIDIAN_VAULT"] = str(tmp_vault)
         os.environ["MEMEM_DIR"] = str(tmp_dir)
+        os.environ["MEMEM_EVAL_VAULT_OVERRIDE"] = "1"
 
         # Reload modules so the path constants pick up the new env values
         # (these were captured at first import against the live vault).
@@ -59,6 +60,7 @@ def _run_eval_in_tmp_vault() -> dict:
         finally:
             # Restore env + re-reload back to live config so the rest of the
             # script (canary verification) sees the real vault.
+            os.environ.pop("MEMEM_EVAL_VAULT_OVERRIDE", None)
             if saved_vault is not None:
                 os.environ["MEMEM_OBSIDIAN_VAULT"] = saved_vault
             else:

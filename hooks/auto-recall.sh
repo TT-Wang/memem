@@ -23,7 +23,7 @@ if [ "${MEMEM_INJECTION_MODE:-tool}" = "tool" ]; then
         TS=$(date -u +%Y-%m-%dT%H:%M:%S.%6NZ 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
         MEMEM_DIR_RESOLVED="${MEMEM_DIR:-$HOME/.memem}"
         mkdir -p "$MEMEM_DIR_RESOLVED" 2>/dev/null
-        printf '{"ts":"%s","call_type":"hook_hybrid_skip","query":"","returned_ids":[],"latency_ms":0,"source":"hook"}\n' \
+        printf '{"ts":"%s","call_type":"hook_tool_skip","query":"","returned_ids":[],"latency_ms":0,"source":"hook"}\n' \
             "$TS" >> "$MEMEM_DIR_RESOLVED/.recall_log.jsonl" 2>/dev/null
     } 2>/dev/null || true
     echo '{}'

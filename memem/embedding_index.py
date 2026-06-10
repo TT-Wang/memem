@@ -30,6 +30,7 @@ Files:
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import os
@@ -49,6 +50,7 @@ _model_lock = threading.Lock()
 _model = None       # cached SentenceTransformer instance
 _index_matrix = None  # cached numpy.ndarray
 _index_ids: list[str] = []
+_index_load_mtime: float = 0.0  # mtime of embeddings.npy when _index_matrix was last loaded
 _unavailable_logged = False
 
 
@@ -95,15 +97,26 @@ def _get_model():
 
 
 def _load_index() -> bool:
-    """Load the on-disk index into process memory. Returns True on success."""
-    global _index_matrix, _index_ids
-    if _index_matrix is not None:
-        return True
+    """Load the on-disk index into process memory. Returns True on success.
+
+    Mtime-based freshness: if _index_matrix is cached but the on-disk file is
+    newer than the cached load time (e.g. after _upsert_embedding wrote a new
+    row), the cache is invalidated and the index is reloaded from disk.
+    """
+    global _index_matrix, _index_ids, _index_load_mtime
     if not _EMB_PATH.exists() or not _IDS_PATH.exists():
         return False
     _st, np = _try_import()
     if np is None:
         return False
+    try:
+        disk_mtime = _EMB_PATH.stat().st_mtime
+    except OSError:
+        return False
+    # Return cached index only if it is still fresh
+    if _index_matrix is not None and _index_load_mtime >= disk_mtime:
+        return True
+    # Cache stale (or cold start) — reload from disk
     try:
         matrix = np.load(str(_EMB_PATH))
         meta = json.loads(_IDS_PATH.read_text())
@@ -116,6 +129,7 @@ def _load_index() -> bool:
         return False
     _index_matrix = matrix
     _index_ids = ids
+    _index_load_mtime = disk_mtime
     return True
 
 
@@ -125,7 +139,7 @@ def _rebuild_embedding_index() -> int:
     Returns the number of memories embedded. Returns 0 if the optional
     dependency isn't installed (not an error — strictly additive feature).
     """
-    global _index_matrix, _index_ids
+    global _index_matrix, _index_ids, _index_load_mtime
     model = _get_model()
     if model is None:
         return 0
@@ -135,28 +149,50 @@ def _rebuild_embedding_index() -> int:
     # Lazy import to avoid circular dep (obsidian_store may import this module)
     from memem.obsidian_store import _obsidian_memories
 
-    mems = _obsidian_memories()
-    if not mems:
-        _index_matrix = np.zeros((0, 384), dtype=np.float32)
-        _index_ids = []
-        _persist()
-        return 0
-    texts = [
-        (mem.get("title", "") + " — " + mem.get("essence", "")).strip()
-        for mem in mems
-    ]
-    ids = [mem.get("id", "") for mem in mems]
+    # Hold the same cross-process lock as _upsert_embedding for the WHOLE
+    # vault-snapshot → encode → persist span. Without it, a save that lands
+    # mid-rebuild upserts its row and the rebuild's os.replace then overwrites
+    # the pair with a snapshot that predates the save — silent lost row until
+    # the next rebuild. Cost: a concurrent _save_memory blocks on the lock for
+    # the encode duration (seconds) during the rare manual --rebuild — an
+    # acceptable trade for never losing a row.
+    MEMEM_DIR.mkdir(parents=True, exist_ok=True)
+    lock_fh = open(MEMEM_DIR / ".embeddings.lock", "w")  # noqa: SIM115 — held across the block
     try:
-        vectors = model.encode(
-            texts, normalize_embeddings=True, show_progress_bar=False,
-        )
-    except Exception as exc:  # noqa: BLE001
-        log.warning("embedding rebuild failed at encode: %s", exc)
-        return 0
-    _index_matrix = np.asarray(vectors, dtype=np.float32)
-    _index_ids = ids
-    _persist()
-    return len(ids)
+        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+
+        mems = _obsidian_memories()
+        if not mems:
+            _index_matrix = np.zeros((0, 384), dtype=np.float32)
+            _index_ids = []
+            _persist()
+            return 0
+        texts = [
+            (mem.get("title", "") + " — " + mem.get("essence", "")).strip()
+            for mem in mems
+        ]
+        ids = [mem.get("id", "") for mem in mems]
+        try:
+            vectors = model.encode(
+                texts, normalize_embeddings=True, show_progress_bar=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("embedding rebuild failed at encode: %s", exc)
+            return 0
+        _index_matrix = np.asarray(vectors, dtype=np.float32)
+        _index_ids = ids
+        _persist()
+        try:
+            _index_load_mtime = _EMB_PATH.stat().st_mtime
+        except OSError:
+            pass
+        return len(ids)
+    finally:
+        try:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        lock_fh.close()
 
 
 def _persist() -> None:
@@ -183,6 +219,110 @@ def _persist() -> None:
         os.replace(str(tmp_path) + ".npy", str(_EMB_PATH))
     except Exception as exc:  # noqa: BLE001
         log.warning("embedding index persist failed: %s", exc)
+
+
+def _upsert_embedding(memory_id: str, text: str) -> bool:
+    """Encode one memory text and append/replace its row in the on-disk index.
+
+    Text composition matches the rebuild path: callers should pass
+    ``title + " — " + essence`` (same format as _rebuild_embedding_index).
+
+    Returns True on success, False on any failure (import missing, index
+    absent and nothing to create from, encode error, persist error). Never
+    raises — embedding failure must never break a memory save.
+
+    The in-process cache is invalidated after a successful persist so that
+    _load_index() re-reads the updated file on the next call. retrieve.py's
+    own mtime-keyed cache (load_embeddings) will pick up the change because
+    we change embeddings.npy's mtime via os.replace.
+    """
+    global _index_matrix, _index_ids, _index_load_mtime
+
+    if not memory_id or not text:
+        return False
+
+    _st, np = _try_import()
+    if np is None:
+        return False
+
+    model = _get_model()
+    if model is None:
+        return False
+
+    # Encode the single text
+    try:
+        vec = model.encode([text], normalize_embeddings=True, show_progress_bar=False)
+        new_row = np.asarray(vec[0], dtype=np.float32).reshape(1, -1)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("_upsert_embedding encode failed for %s: %s", memory_id[:8], exc)
+        return False
+
+    MEMEM_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Serialize the read-modify-write cycle across processes. The MCP server
+    # (memory_save) and a detached mine_delta subprocess can upsert at the same
+    # moment; without a lock both read the same N-row state and the second
+    # writer silently drops the first writer's row (lost update, recoverable
+    # only on the next full rebuild). flock matches the codebase's existing
+    # POSIX-only locking pattern (telemetry.py, obsidian_store index lock).
+    lock_fh = open(MEMEM_DIR / ".embeddings.lock", "w")  # noqa: SIM115 — held across the block
+    try:
+        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+
+        # Load current on-disk state (or start fresh)
+        if _EMB_PATH.exists() and _IDS_PATH.exists():
+            try:
+                current_matrix = np.load(str(_EMB_PATH))
+                meta = json.loads(_IDS_PATH.read_text())
+                current_ids: list[str] = meta.get("ids", []) if isinstance(meta, dict) else meta
+                if not isinstance(current_ids, list) or len(current_ids) != current_matrix.shape[0]:
+                    log.warning("_upsert_embedding: shape mismatch in existing index; starting fresh row")
+                    current_matrix = np.zeros((0, new_row.shape[1]), dtype=np.float32)
+                    current_ids = []
+            except Exception as exc:  # noqa: BLE001
+                log.warning("_upsert_embedding: could not load existing index: %s", exc)
+                current_matrix = np.zeros((0, new_row.shape[1]), dtype=np.float32)
+                current_ids = []
+        else:
+            # No existing index — create a fresh 1-row index
+            current_matrix = np.zeros((0, new_row.shape[1]), dtype=np.float32)
+            current_ids = []
+
+        # Append or replace
+        if memory_id in current_ids:
+            idx = current_ids.index(memory_id)
+            current_matrix[idx] = new_row[0]
+            new_ids = current_ids
+            new_matrix = current_matrix
+        else:
+            new_matrix = np.vstack([current_matrix, new_row]) if current_matrix.shape[0] > 0 else new_row
+            new_ids = current_ids + [memory_id]
+
+        # Persist atomically (same pattern as _persist)
+        try:
+            atomic_write_text(_IDS_PATH, json.dumps({
+                "ids": new_ids,
+                "model": _MODEL_NAME,
+                "built_at": now_iso(),
+            }))
+            tmp_path = _EMB_PATH.with_suffix(_EMB_PATH.suffix + f".tmp.{os.getpid()}")
+            np.save(str(tmp_path), new_matrix)
+            os.replace(str(tmp_path) + ".npy", str(_EMB_PATH))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("_upsert_embedding persist failed for %s: %s", memory_id[:8], exc)
+            return False
+    finally:
+        try:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        lock_fh.close()
+
+    # Invalidate in-process cache so next _load_index() re-reads from disk
+    _index_matrix = None
+    _index_ids = []
+    _index_load_mtime = 0.0
+    return True
 
 
 def _search_embedding(query: str, limit: int = 20) -> list[str]:
@@ -256,9 +396,10 @@ def _embed_text(text: str) -> list[float] | None:
 
 def _reset_index_cache() -> None:
     """Test hook: drop in-process index cache (and the on-disk files if present)."""
-    global _index_matrix, _index_ids
+    global _index_matrix, _index_ids, _index_load_mtime
     _index_matrix = None
     _index_ids = []
+    _index_load_mtime = 0.0
     for p in (_EMB_PATH, _IDS_PATH):
         try:
             Path(p).unlink(missing_ok=True)

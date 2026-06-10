@@ -16,14 +16,6 @@ from memem.models import MEMEM_DIR
 
 _LOG_PATH = Path(MEMEM_DIR) / ".recall_log.jsonl"
 
-_VALID_CALL_TYPES = frozenset({
-    "hook_auto", "hook_hybrid_skip",
-    "tool_active_slice", "tool_memory_search",
-    "tool_memory_get", "tool_memory_recall",
-    "tool_memory_timeline",
-})
-_VALID_SOURCES = frozenset({"hook", "mcp"})
-
 
 def log_recall(
     call_type: str,

@@ -131,7 +131,7 @@ def test_mine_session_emits_procedural_suggestion(tmp_vault, tmp_cortex_dir, tmp
     monkeypatch.setattr("memem.mining._make_memory", obs._make_memory)
     monkeypatch.setattr("memem.mining._find_best_match", lambda *a, **kw: (None, 0.0))
     monkeypatch.setattr("memem.session_state.load_mined_session_state", lambda: {})
-    monkeypatch.setattr("memem.session_state.session_is_complete", lambda p, s: False)
+    monkeypatch.setattr("memem.session_state.session_is_terminal", lambda p, s: False)  # session_is_complete deleted in v2.5.0
     monkeypatch.setattr("memem.session_state.update_session_state", lambda *a, **kw: None)
     monkeypatch.setattr("memem.mining._generate_index", lambda: None)
     monkeypatch.setattr("memem.mining._obsidian_memories", lambda: [])
@@ -203,7 +203,7 @@ def test_mine_session_no_claudemd_no_suggestion(tmp_vault, tmp_cortex_dir, tmp_p
     monkeypatch.setattr("memem.mining._make_memory", obs._make_memory)
     monkeypatch.setattr("memem.mining._find_best_match", lambda *a, **kw: (None, 0.0))
     monkeypatch.setattr("memem.session_state.load_mined_session_state", lambda: {})
-    monkeypatch.setattr("memem.session_state.session_is_complete", lambda p, s: False)
+    monkeypatch.setattr("memem.session_state.session_is_terminal", lambda p, s: False)  # session_is_complete deleted in v2.5.0
     monkeypatch.setattr("memem.session_state.update_session_state", lambda *a, **kw: None)
     monkeypatch.setattr("memem.mining._generate_index", lambda: None)
     monkeypatch.setattr("memem.mining._obsidian_memories", lambda: [])

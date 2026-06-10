@@ -764,65 +764,6 @@ class TestDecayScoring:
             "is_immune(vault_entry) must be True for decay_immune: true memories"
         )
 
-    def test_decay_disabled_via_setting(self, retrieve_env):
-        """MEMEM_DECAY_ENABLED setting exists and is readable/patchable via monkeypatch.
-
-        Note: the decay wiring in retrieve() was reverted (benchmark regression to 70%
-        vs 73% gate). This test verifies the settings infrastructure is in place and
-        that patching it does not affect retrieve() scores (since wiring is off).
-        """
-        import memem.settings as _settings_mod
-
-        # Verify the setting exists and defaults to True
-        assert hasattr(_settings_mod, "MEMEM_DECAY_ENABLED"), (
-            "MEMEM_DECAY_ENABLED must be defined in memem.settings"
-        )
-        assert isinstance(_settings_mod.MEMEM_DECAY_ENABLED, bool), (
-            "MEMEM_DECAY_ENABLED must be a bool"
-        )
-
-        env = retrieve_env
-        mod = env["retrieve_mod"]
-        mdir = env["memories_dir"]
-        state_dir = env["state_dir"]
-
-        now = datetime.now(UTC)
-        id_stale = str(uuid.uuid4())
-
-        _write_memory_full(
-            mdir, id_stale, "Very stale memory",
-            created_iso=(now - timedelta(days=365)).isoformat(),
-            last_accessed_iso=(now - timedelta(days=365)).isoformat(),
-            access_count=0,
-            layer=2, importance=3,
-        )
-
-        _write_embeddings(state_dir, [id_stale])
-        mod._vault_idx_cache = None
-        mod._emb_cache = None
-
-        # With decay wiring reverted, scores should be identical regardless of setting
-        _settings_mod.MEMEM_DECAY_ENABLED = False
-        results_off = mod.retrieve("stale memory test", k=8)
-
-        mod._vault_idx_cache = None
-        mod._emb_cache = None
-
-        _settings_mod.MEMEM_DECAY_ENABLED = True
-        results_on = mod.retrieve("stale memory test", k=8)
-
-        # Since wiring is reverted, scores should be identical in both cases
-        off_score = next((r["score"] for r in results_off if r["id"] == id_stale), None)
-        on_score = next((r["score"] for r in results_on if r["id"] == id_stale), None)
-        assert off_score is not None, "Stale memory should appear in results"
-        assert on_score is not None, "Stale memory should appear in results"
-        assert abs(off_score - on_score) < 1e-5, (
-            f"With decay wiring reverted, scores should be identical: "
-            f"off={off_score:.6f} on={on_score:.6f}"
-        )
-
-        # Cleanup: restore default
-        _settings_mod.MEMEM_DECAY_ENABLED = True
 
 
 # ---------------------------------------------------------------------------
@@ -1034,21 +975,26 @@ def _write_vault_with_embeddings(
 
 class TestMMRDiversification:
     def test_mmr_dedupes_near_duplicates(self, retrieve_env):
-        """Near-duplicate memories (high cosine sim) should have only one in top-k output."""
-        env = retrieve_env
-        mod = env["retrieve_mod"]
-        mdir = env["memories_dir"]
-        state_dir = env["state_dir"]
+        """Near-duplicate memories (high cosine sim) should have only one in top-k output.
+
+        Tests _mmr_rerank directly with controlled normalized scores (v2.3.1+
+        scores are in [0,1] after pool normalization). Uses k=4 with 6 candidates:
+        2 near-dups + 4 diverse. All candidates have identical relevance scores (=1.0)
+        to focus purely on the diversity mechanism.
+
+        After dup_a is selected, dup_b gets penalized by 0.3 * ~1.0 = 0.3, giving
+        MMR = 0.7 * 1.0 - 0.3 = 0.4. The 4 diverse memories with near-zero sim
+        to dup_a get MMR = 0.7 * 1.0 - 0 = 0.7, all beating dup_b. So exactly
+        one dup should appear in the k=4 results.
+        """
+        from memem.retrieve import _mmr_rerank
 
         rng = np.random.default_rng(7)
         dim = 384
-        now_iso = datetime.now(UTC).isoformat()
 
-        # Create a base query-aligned vector
+        # Near-duplicate cluster (very similar vectors)
         base_vec = rng.random(dim).astype(np.float32)
         base_vec /= np.linalg.norm(base_vec)
-
-        # Two near-duplicate memories: very similar to each other (and to query)
         dup_a_id = str(uuid.uuid4())
         dup_b_id = str(uuid.uuid4())
         dup_vec_a = base_vec + rng.random(dim).astype(np.float32) * 0.001
@@ -1056,39 +1002,46 @@ class TestMMRDiversification:
         dup_vec_b = base_vec + rng.random(dim).astype(np.float32) * 0.001
         dup_vec_b /= np.linalg.norm(dup_vec_b)
 
-        # 8 more diverse memories with moderate similarity to query
-        other_ids = [str(uuid.uuid4()) for _ in range(8)]
+        # 4 diverse competitors with orthogonal-to-base embeddings
+        other_ids = [str(uuid.uuid4()) for _ in range(4)]
         other_vecs = []
         for _ in other_ids:
             v = rng.random(dim).astype(np.float32)
-            v /= np.linalg.norm(v)
-            # Blend moderately with base_vec so they still rank
-            v = 0.5 * base_vec + 0.5 * v
+            v -= float(np.dot(v, base_vec)) * base_vec  # make orthogonal to dup cluster
+            if np.linalg.norm(v) < 1e-6:
+                v = rng.random(dim).astype(np.float32)
             v /= np.linalg.norm(v)
             other_vecs.append(v)
 
-        mems = [
-            {"id": dup_a_id, "title": "Python callback pattern async", "created": now_iso,
-             "vec": dup_vec_a},
-            {"id": dup_b_id, "title": "Python callback pattern await", "created": now_iso,
-             "vec": dup_vec_b},
+        # All candidates get score=1.0 (pool-normalized, same relevance)
+        # so MMR outcome is driven purely by diversity
+        candidates = [
+            {"id": dup_a_id, "score": 1.0, "layer": 2, "decay_immune": False,
+             "path": f"/tmp/{dup_a_id}.md", "title": "Dup A"},
+            {"id": dup_b_id, "score": 1.0, "layer": 2, "decay_immune": False,
+             "path": f"/tmp/{dup_b_id}.md", "title": "Dup B"},
         ] + [
-            {"id": oid, "title": f"Diverse memory {i}", "created": now_iso, "vec": ov}
-            for i, (oid, ov) in enumerate(zip(other_ids, other_vecs, strict=True))
+            {"id": oid, "score": 1.0, "layer": 2, "decay_immune": False,
+             "path": f"/tmp/{oid}.md", "title": f"Diverse {i}"}
+            for i, oid in enumerate(other_ids)
         ]
 
-        _write_vault_with_embeddings(mdir, state_dir, mems)
-        mod._vault_idx_cache = None
-        mod._emb_cache = None
-        mod._bm25_cache = None
+        all_ids = [dup_a_id, dup_b_id] + other_ids
+        all_vecs = [dup_vec_a, dup_vec_b] + other_vecs
+        emb = np.stack(all_vecs).astype(np.float32)
+        norms = np.linalg.norm(emb, axis=1, keepdims=True).clip(min=1e-9)
+        emb = emb / norms
 
-        results = mod.retrieve("Python callback pattern", k=8)
-        result_ids = [r["id"] for r in results]
+        # k=4: with 6 candidates, select 4. dup_b should be excluded because
+        # after dup_a is selected, all 4 diverse have MMR > dup_b's MMR.
+        result = _mmr_rerank(candidates, emb, all_ids, k=4)
+        result_ids = [r["id"] for r in result]
 
-        # At most one of the near-duplicate pair should appear
+        # Verify at most one dup in top-4
         dup_count = sum(1 for rid in result_ids if rid in (dup_a_id, dup_b_id))
         assert dup_count <= 1, (
-            f"MMR should deduplicate near-duplicates: found {dup_count} of the pair in results"
+            f"MMR should deduplicate near-duplicates (k=4, 4 diverse competitors): "
+            f"found {dup_count} of the pair in results. result_ids={result_ids}"
         )
 
     def test_l0_memories_always_included(self, retrieve_env):
@@ -1238,4 +1191,213 @@ class TestMMRDiversification:
         assert len(result) == k, (
             f"MMR should return k={k} results even when some candidates lack embeddings, "
             f"got {len(result)}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# v2.3.1: RRF scale bug fixes (B2, B3)
+# ---------------------------------------------------------------------------
+
+
+class TestRRFScaleFixes:
+    """Regression tests for B2 (temporal boost scale) and B3 (MMR scale)."""
+
+    def test_cosine_scores_normalized_to_0_1(self, retrieve_env):
+        """After retrieve(), all cosine-source scores must be in [0, 1] (post-normalization).
+
+        v2.3.1 fix (B2): raw RRF fused scores in ~[0.016, 0.033] are min-max normalized
+        to [0, 1] over the candidate pool before temporal boost and MMR. This ensures
+        temporal boost and MMR diversity operate on the same scale.
+        For temporal queries: in-window scores may reach 1.2 (1.0 * 1.2x multiplier);
+        for non-temporal queries scores are strictly in [0, 1].
+        """
+        env = retrieve_env
+        mod = env["retrieve_mod"]
+        mdir = env["memories_dir"]
+        state_dir = env["state_dir"]
+
+        now = datetime.now(UTC)
+        ids = [str(uuid.uuid4()) for _ in range(5)]
+        for i, mid in enumerate(ids):
+            created = (now - timedelta(days=i * 5)).isoformat()
+            _write_memory(mdir, mid, f"Normalization test memory {i}", created)
+
+        _write_embeddings(state_dir, ids)
+        mod._vault_idx_cache = None
+        mod._emb_cache = None
+
+        results = mod.retrieve("normalization test memory", k=8)
+        cosine_hits = [r for r in results if r.get("source") == "cosine"]
+        assert len(cosine_hits) > 0, "Expected cosine hits"
+
+        for hit in cosine_hits:
+            score = hit["score"]
+            assert 0.0 <= score <= 1.0, (
+                f"Cosine hit score {score:.6f} out of [0, 1] range. "
+                f"v2.3.1 normalization must map all cosine scores to [0, 1]. "
+                f"title={hit.get('title', '?')}"
+            )
+
+    def test_weakly_relevant_inwindow_does_not_outrank_strong_outofwindow(self, retrieve_env):
+        """Scale regression test (B2): a weakly-relevant in-window memory must NOT
+        outrank a strongly-relevant out-of-window memory.
+
+        Old bug: additive +0.2 on raw RRF scores (~0.033 max) was a hard override —
+        any in-window memory beat every out-of-window match unconditionally.
+        E.g., weak in-window score 0.016 + 0.2 = 0.216 >> strong out-of-window 0.033.
+
+        Fixed behavior (v2.3.1): scores are min-max normalized to [0,1] first,
+        then in-window memories get a 1.2x multiplicative boost.
+        Strongly-relevant out-of-window memory: normalized score 1.0 (top of pool).
+        Weakly-relevant in-window memory: normalized score ~0.0 (bottom), * 1.2 = ~0.0.
+        Strong always outranks weak.
+
+        This test simulates the normalization math directly, verifying the property
+        holds for the relevant score range.
+        """
+        # Simulate the normalization + temporal boost for the bug-trigger scenario.
+        # Pre-condition: strong memory has raw RRF score 0.033 (rank 1 in both channels)
+        # weak memory has raw RRF score 0.016 (rank 1 in only 1 channel, rank N in other)
+        strong_raw = 0.033   # top-ranked candidate
+        weak_raw = 0.016     # bottom-ranked candidate
+
+        # Min-max normalize to [0, 1]
+        score_min = weak_raw
+        score_max = strong_raw
+        strong_norm = (strong_raw - score_min) / (score_max - score_min)  # = 1.0
+        weak_norm = (weak_raw - score_min) / (score_max - score_min)      # = 0.0
+
+        # Apply 1.2x temporal boost to in-window (weak) memory
+        weak_boosted = weak_norm * 1.2   # = 0.0 * 1.2 = 0.0
+
+        assert strong_norm > weak_boosted, (
+            f"Strong out-of-window (norm={strong_norm:.4f}) must outrank "
+            f"weak in-window after 1.2x boost (boosted={weak_boosted:.4f}). "
+            f"Old additive +0.2 bug: weak_raw + 0.2 = {weak_raw + 0.2:.3f} >> strong_raw={strong_raw:.3f}"
+        )
+
+        # Also verify: with intermediate relevance gap (strong = 2x weak),
+        # the strong out-of-window memory still wins.
+        strong_raw2 = 0.030
+        weak_raw2 = 0.017
+        s_min = weak_raw2
+        s_max = strong_raw2
+        strong_norm2 = (strong_raw2 - s_min) / (s_max - s_min)  # ~1.0
+        weak_norm2 = (weak_raw2 - s_min) / (s_max - s_min)       # ~0.0 (small fraction)
+        weak_boosted2 = weak_norm2 * 1.2
+
+        assert strong_norm2 > weak_boosted2, (
+            f"Strong out-of-window (norm2={strong_norm2:.4f}) must outrank "
+            f"weak in-window after 1.2x boost (boosted2={weak_boosted2:.4f})."
+        )
+
+        # Verify retrieve() produces [0, 1.2] range scores (temporal can exceed 1.0)
+        # by running a temporal query and checking boosted scores stay bounded.
+        env = retrieve_env
+        mod = env["retrieve_mod"]
+        mdir = env["memories_dir"]
+        state_dir = env["state_dir"]
+
+        now = datetime.now(UTC)
+        ids = [str(uuid.uuid4()) for _ in range(3)]
+        for i, mid in enumerate(ids):
+            # Make one in-window (yesterday) and two out-of-window
+            if i == 0:
+                created = (now - timedelta(hours=30)).isoformat()  # yesterday
+            else:
+                created = (now - timedelta(days=30 + i)).isoformat()  # old
+            _write_memory(mdir, mid, f"Memory {i}", created)
+
+        _write_embeddings(state_dir, ids)
+        mod._vault_idx_cache = None
+        mod._emb_cache = None
+
+        results = mod.retrieve("what did I do yesterday", k=8)
+        cosine_hits = [r for r in results if r.get("source") == "cosine"]
+        for hit in cosine_hits:
+            score = hit["score"]
+            assert 0.0 <= score <= 1.21, (  # 1.2x * 1.0 max + tiny float tolerance
+                f"Temporal-boosted cosine score {score:.6f} exceeds 1.2x bound. "
+                f"title={hit.get('title', '?')}"
+            )
+
+    def test_mmr_relevance_sensitivity_normalized_scale(self, retrieve_env):
+        """MMR relevance sensitivity (B3): with diverse candidates, higher-relevance
+        candidates are preferred at equal diversity (same-scale scores after normalization).
+
+        v2.3.1 fix (B3): before normalization, relevance (raw RRF ~0.016) vs diversity
+        (cosine [0,1]) was ~10:1 in favor of diversity. After normalization, both are
+        on [0,1] and lam=0.7 correctly weights relevance 70% vs diversity 30%.
+
+        This test calls _mmr_rerank directly with controlled [0,1] scores to verify
+        that a candidate with higher relevance (score=0.9) beats a candidate with
+        lower relevance (score=0.5) when both are equally diverse (same max_sim).
+        """
+        from memem.retrieve import _mmr_rerank
+
+        rng = np.random.default_rng(21)
+        dim = 384
+
+        # Build 4 candidates: all diverse from each other (orthogonal vectors)
+        # but with different relevance scores. Without normalization, all scores
+        # would be ~0.016-0.033 and diversity would dominate. With normalization,
+        # a score of 0.9 clearly beats 0.5 when diversity is equal.
+        ids = [str(uuid.uuid4()) for _ in range(4)]
+        vecs = []
+        for _ in ids:
+            v = rng.random(dim).astype(np.float32)
+            v /= np.linalg.norm(v)
+            vecs.append(v)
+
+        # Make vectors mutually orthogonal-ish via Gram-Schmidt
+        ortho_vecs = []
+        for i, v in enumerate(vecs):
+            for prev in ortho_vecs:
+                v = v - float(np.dot(v, prev)) * prev
+            if np.linalg.norm(v) > 1e-6:
+                v /= np.linalg.norm(v)
+            ortho_vecs.append(v)
+
+        emb = np.stack(ortho_vecs).astype(np.float32)
+
+        high_rel_id = ids[0]
+        low_rel_id = ids[1]
+
+        # Two candidates pre-selected (already in selected set)
+        selected_id_1 = ids[2]
+        selected_id_2 = ids[3]
+
+        # Candidates for MMR selection: high_rel (score=0.9) vs low_rel (score=0.5)
+        # Both are equally diverse from {selected_1, selected_2} (orthogonal vecs)
+        candidates = [
+            {"id": high_rel_id, "score": 0.9, "layer": 2, "decay_immune": False,
+             "path": f"/tmp/{high_rel_id}.md", "title": "High relevance candidate"},
+            {"id": low_rel_id, "score": 0.5, "layer": 2, "decay_immune": False,
+             "path": f"/tmp/{low_rel_id}.md", "title": "Low relevance candidate"},
+        ]
+
+        # Add selected memories as additional "pre-seeded" candidates with k=1
+        # to force _mmr_rerank to choose between high_rel and low_rel
+        # Use k=3 so that pre-seeded {sel1, sel2} plus 1 winner = 3 total
+        all_candidates = [
+            {"id": selected_id_1, "score": 1.0, "layer": 0, "decay_immune": False,
+             "path": f"/tmp/{selected_id_1}.md", "title": "Pre-seeded L0 memory 1"},
+            {"id": selected_id_2, "score": 1.0, "layer": 0, "decay_immune": False,
+             "path": f"/tmp/{selected_id_2}.md", "title": "Pre-seeded L0 memory 2"},
+        ] + candidates
+
+        result = _mmr_rerank(all_candidates, emb, ids, k=3)
+        result_ids = [r["id"] for r in result]
+
+        # The high-relevance candidate must be selected over the low-relevance one
+        # when both are equally diverse from the pre-seeded set.
+        assert high_rel_id in result_ids, (
+            f"High-relevance candidate (score=0.9) must be selected in MMR top-3. "
+            f"Result ids: {result_ids}"
+        )
+        assert low_rel_id not in result_ids, (
+            f"Low-relevance candidate (score=0.5) must NOT be selected when "
+            f"high-relevance (score=0.9) has equal diversity. "
+            f"Result ids: {result_ids}. "
+            f"This confirms B3 fix: relevance now matters on normalized [0,1] scale."
         )

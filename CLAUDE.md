@@ -7,19 +7,19 @@ Machine index: SQLite FTS5 at `~/.memem/search.db` for fast retrieval.
 
 ## Auto-recall
 
-The UserPromptSubmit hook fires on every message and builds an `active_memory_slice` from the current query. This uses your message to activate the relevant working-state memories and produces a focused slice — not a raw index dump.
+In `auto` mode, the UserPromptSubmit hook fires on every message and builds an `active_memory_slice` from the current query. As of v2.4.0, `tool` is the default mode — auto-injection is off; Claude pulls memory on demand via the MCP tools below.
 
-For deeper recall during the session, use the MCP tools below.
+For on-demand recall, use the MCP tools below.
 
 ## Layered recall (v0.10)
 
 Memories are organized into layers:
-- **L0 (always-loaded):** project identity — tech stack, repo structure, core conventions. Full content is injected at session start.
+- **L0 (always-loaded):** project identity — tech stack, repo structure, core conventions. L0 memories are pre-seeded in MMR (decay_immune) so they anchor every retrieval.
 - **L1 (generic conventions):** broadly useful patterns (testing, style, commit conventions)
 - **L2 (domain-specific):** most memories — the default bucket
 - **L3 (rare/archival):** niche failure modes, one-off lessons
 
-**At session start** you receive an L0 briefing (full content) plus a compact index of L1-L3 memories (~50 tokens each: `[id] L<layer> title — snippet`). Use this index to decide what to drill into.
+**At session start** you receive only the Episode index (up to 25 recent `type:episodic` memories listed by title). There is no L0 briefing injected at session start. Use `memory_search` or `memory_get` to pull L0 project-identity content on demand.
 
 **During the session**, use the 3-tier recall workflow:
 
@@ -29,7 +29,7 @@ Memories are organized into layers:
 
 `memory_recall` (legacy) still works as a backward-compat alias that's equivalent to memory_search + memory_get on top results.
 
-**Always-wake recall** — the `UserPromptSubmit` hook runs `active_memory_slice` on every prompt. Topic overlap is tracked only for telemetry and tuning; it no longer gates activation. You don't need to call it manually.
+**Always-wake recall (auto mode only)** — when `MEMEM_INJECTION_MODE=auto`, the `UserPromptSubmit` hook runs `active_memory_slice` on every prompt. In the default `tool` mode this hook produces no auto-injection; you call `active_memory_slice` manually when context is needed.
 
 **Injection mode (`MEMEM_INJECTION_MODE`)** — controls whether the hook auto-injects context into every prompt (v1.9+):
 
@@ -38,26 +38,17 @@ Memories are organized into layers:
 | Value | Behaviour |
 |-------|-----------|
 | `auto` | Hook injects the active memory slice on every prompt. Equivalent to pre-v2.4.0 behaviour. To restore: `export MEMEM_INJECTION_MODE=auto`. |
-| `hybrid` | Hook applies gating heuristics (trivial-query filter, turn cadence, empty-streak backoff, topic-shift detection) before injecting. Reduces noise without losing recall. Enable with `MEMEM_INJECTION_MODE=hybrid`. |
 | `tool` | **Default (v2.4.0+).** Hook produces no auto-injection. You control recall entirely via the `active_memory_slice` MCP tool. Zero hook overhead; no passive context. |
 
+`hybrid` was removed in v2.5.0 — it was documented but never implemented.
+
 Set this in your Claude Code environment or shell profile (e.g. `export MEMEM_INJECTION_MODE=auto`).
-
-Hybrid-mode tunables (env vars, all optional):
-
-| Var | Default | Behaviour |
-|-----|---------|-----------|
-| `MEMEM_INJECT_CADENCE` | `2` | Run the full slice every Nth turn. Clamped to `>= 1`. |
-| `MEMEM_TOPIC_SHIFT_THRESHOLD` | `0.85` | Cosine-similarity threshold for reusing the previous turn's slice. Higher = stricter (fewer cache hits). Clamped to `[0.0, 1.0]`. |
-| `MEMEM_EMPTY_STREAK_MAX` | `8` | Cap on the exponential cadence backoff after consecutive empty slices (streak=N → cadence × 2^N, capped). |
 
 Selective-recall tunables (v1.9.6+, env vars, all optional):
 
 | Var | Default | Behaviour |
 |-----|---------|-----------|
-| `MEMEM_RECALL_MIN_CONFIDENCE` | `0.45` | Activation-confidence threshold for emitting context. Below this, slice is marked `should_emit_context=False` with `gating_reason="low_confidence"` and the hook suppresses `additionalContext`. Clamped to `[0.0, 1.0]`. |
 | `MEMEM_RECALL_MIN_ITEM_SCORE` | `0.0` | Per-item composite-score floor for recall results (0.0 = disabled). L0 project-identity anchors are always exempt. Clamped to `[0.0, 1.0]`. |
-| `MEMEM_RECALL_OOV_THRESHOLD` | `0.0` | Out-of-vault detection threshold (0.0 = disabled). When `> 0`, queries with no L0-title keyword overlap and all candidate scores below threshold return a stub with `gating_reason="out_of_vault"`. Env-var changes take effect on the next hook invocation (no daemon to restart in v2.1.0+). Clamped to `[0.0, 1.0]`. |
 
 **Graph traversal** — `memory_search` and `memory_get` automatically follow the `related[]` field one hop and include linked memories in a separate section.
 
@@ -119,7 +110,9 @@ rm ~/.memem/.miner-opted-in
 
 (No daemon to stop — the hook just no-ops without the marker.)
 
-**Safety net:** SessionStart fires a "stale-session sweep" that scans for JSONL files older than 10 min that aren't in `~/.memem/.mined_sessions` and spawns mine_delta for up to 3 of them. Catches sessions where Stop never fired (Claude crash, kill -9, network drop).
+**Safety net:** SessionStart fires a "stale-session sweep" that scans for JSONL files older than 10 min that aren't in `~/.memem/.mined_sessions` and spawns mine_delta for up to 3 of them. Catches sessions where Stop never fired (Claude crash, kill -9, network drop). The sweep skips headless mining transcripts (detected by marker phrases in the first 20 lines + file size ≤ 30 lines) to prevent self-mining contamination loops.
+
+**Purging contaminated memories:** if mining artifacts were saved to the vault before the v2.5.0 stale-sweep guard, run `python3 -m memem.server --purge-contaminated` to identify them (dry-run by default). Add `--apply` to permanently delete the flagged memories.
 
 ## Available tools
 
@@ -138,6 +131,7 @@ rm ~/.memem/.miner-opted-in
 
 **CLI commands** (run in your terminal, not via MCP):
 - `python3 -m memem.server --analyze-recalls` — summarize recall telemetry from `~/.memem/.recall_log.jsonl`: which tools were called, which memories retrieved most often, recall frequency per session. Use this to understand how Claude is (or isn't) pulling memory.
+- `python3 -m memem.server --purge-contaminated [--apply]` — identify (dry-run) or delete memories mined from headless mining transcripts. Default is dry-run; pass `--apply` to permanently delete.
 
 ## Episodic consolidation (v1.7)
 
@@ -153,3 +147,5 @@ memem was renamed from `cortex` in v0.7.0. Existing users with data under
 and `~/obsidian-brain/memem/` on first run via a one-time copy. Legacy paths
 remain intact as a safety net. Legacy `CORTEX_*` env vars are still read as
 fallbacks for `MEMEM_*`.
+
+**Project aliases (v2.5.0):** create `~/.memem/project_aliases.json` (or `$MEMEM_DIR/project_aliases.json`) to canonicalize project names. Format: `{"alias": "canonical"}` — the KEY is the old/alternate name, the VALUE is the canonical scope memories should consolidate under. Example: `{"vibe-reader": "vibereader", "old-repo-name": "new-repo-name"}`. Do NOT map a canonical name back to one of its aliases (e.g. `{"cortex-plugin": "memem"}` would conflict with the built-in `memem → cortex-plugin` mapping and split one project across two scopes). Used everywhere scope is normalized: recall filtering, FTS indexing, and mining project assignment.

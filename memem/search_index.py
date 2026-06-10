@@ -16,14 +16,15 @@ log = logging.getLogger("memem-search")
 _FTS5_OPERATORS = {"AND", "OR", "NOT", "NEAR"}
 _FTS5_TOKEN_CAP = 20
 
-# Schema v2 adds `related_ids` column (JSON-encoded list of 8-char prefixes)
-# so graph expansion can come back in the same MATCH query instead of
-# requiring a follow-up _find_memory() call per FTS hit.
-_FTS_SCHEMA_VERSION = 2
+# Schema v3: memory_id and related_ids are declared UNINDEXED to prevent BM25
+# relevance pollution — id fragments would otherwise participate in token ranking.
+# UNINDEXED columns are still stored and retrievable but excluded from full-text
+# indexing, so MATCH queries only score title/essence/project/tags.
+_FTS_SCHEMA_VERSION = 3
 _FTS_COLUMNS = ("memory_id", "title", "essence", "project", "tags", "related_ids")
 _CREATE_TABLE_SQL = (
     "CREATE VIRTUAL TABLE memories_fts "
-    "USING fts5(memory_id, title, essence, project, tags, related_ids)"
+    "USING fts5(memory_id UNINDEXED, title, essence, project, tags, related_ids UNINDEXED)"
 )
 
 
@@ -51,23 +52,46 @@ def _migrate_fts_schema(conn: sqlite3.Connection) -> None:
     current schema version. FTS5 has no in-place ADD COLUMN, so a rebuild is
     the cleanest path. The vault is the source of truth, so no FTS data is
     actually lost — we just re-derive the index.
+
+    Concurrency: the whole check→drop→create→repopulate sequence runs inside
+    one IMMEDIATE transaction. Around upgrade time the MCP server, a detached
+    mine_delta, and the SessionStart catalog can all open the DB at once; the
+    write lock serializes them, the post-lock re-check makes the losers no-op,
+    and readers see either the old table or the fully repopulated new one —
+    never an empty mid-migration window.
     """
     try:
-        conn.execute("DROP TABLE IF EXISTS memories_fts")
+        conn.execute("BEGIN IMMEDIATE")
     except sqlite3.OperationalError as exc:
-        log.warning("FTS migration: drop failed: %s", exc)
-    conn.execute(_CREATE_TABLE_SQL)
-    conn.execute(f"PRAGMA user_version = {_FTS_SCHEMA_VERSION}")
-    conn.commit()
+        # Another process holds the write lock past busy_timeout — it is
+        # running this same migration; degrade quietly and retry next open.
+        log.warning("FTS migration: could not acquire write lock: %s", exc)
+        return
     try:
-        from memem.obsidian_store import _obsidian_memories
-        for mem in _obsidian_memories():
-            _insert_memory_row(conn, mem)
-        conn.commit()
-    except ImportError:
-        log.info("FTS migration: vault import unavailable; will populate lazily")
+        current = conn.execute("PRAGMA user_version").fetchone()[0]
+        if current >= _FTS_SCHEMA_VERSION:
+            conn.execute("COMMIT")  # lost the race; winner already migrated
+            return
+        conn.execute("DROP TABLE IF EXISTS memories_fts")
+        conn.execute(
+            _CREATE_TABLE_SQL.replace(
+                "CREATE VIRTUAL TABLE", "CREATE VIRTUAL TABLE IF NOT EXISTS"
+            )
+        )
+        conn.execute(f"PRAGMA user_version = {_FTS_SCHEMA_VERSION}")
+        try:
+            from memem.obsidian_store import _obsidian_memories
+            for mem in _obsidian_memories():
+                _insert_memory_row(conn, mem)
+        except ImportError:
+            log.info("FTS migration: vault import unavailable; will populate lazily")
+        conn.execute("COMMIT")
     except Exception as exc:
-        log.warning("FTS migration repopulate failed: %s", exc)
+        log.warning("FTS migration failed; rolling back (will retry next open): %s", exc)
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.OperationalError:
+            pass
 
 
 def _insert_memory_row(conn: sqlite3.Connection, mem: dict) -> None:
@@ -109,10 +133,7 @@ def _init_search_db() -> sqlite3.Connection:
     if current_version < _FTS_SCHEMA_VERSION:
         _migrate_fts_schema(conn)
     else:
-        conn.execute(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts "
-            "USING fts5(memory_id, title, essence, project, tags, related_ids)"
-        )
+        conn.execute(_CREATE_TABLE_SQL.replace("CREATE VIRTUAL TABLE", "CREATE VIRTUAL TABLE IF NOT EXISTS"))
         conn.commit()
     return conn
 
@@ -151,7 +172,7 @@ def _search_fts_with_graph(
 ) -> list[tuple[str, list[str]]]:
     """FTS5 search returning (memory_id, related_ids) tuples in one query.
 
-    With the `related_ids` column (schema v2) the graph-expansion step no
+    With the `related_ids` column (stored UNINDEXED since schema v3) the graph-expansion step no
     longer needs a follow-up lookup per hit. Callers can build the linked
     memory set directly from the second tuple element.
     """

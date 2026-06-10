@@ -356,7 +356,10 @@ def _classify_relation(src: dict, dst: dict, features: dict[str, Any]) -> str:
         return "contradicts"
 
     src_tags = [str(t).lower() for t in src.get("domain_tags", []) if t]
-    if any(t.startswith("supersedes:") for t in src_tags) and features.get("lexical", 0.0) >= 0.12:
+    # Require exact supersedes:<dst_id8> tag to avoid false supersedes edges
+    # to unrelated-but-similar memories (fixes B11).
+    dst_id8 = (dst.get("id") or "")[:8].lower()
+    if dst_id8 and f"supersedes:{dst_id8}" in src_tags and features.get("lexical", 0.0) >= 0.12:
         return "supersedes"
 
     text = _memory_text(src).lower()

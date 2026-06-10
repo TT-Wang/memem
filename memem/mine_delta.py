@@ -17,6 +17,7 @@ import json
 import os
 import re
 import subprocess
+import uuid
 from pathlib import Path
 
 import structlog
@@ -24,7 +25,7 @@ import structlog
 from memem.haiku_prompts import HAIKU_TIMEOUT_SECONDS
 from memem.mining import extract_from_text
 from memem.models import MEMEM_DIR
-from memem.obsidian_store import _make_memory, _save_memory
+from memem.obsidian_store import _find_memory, _make_memory, _save_memory
 
 log = structlog.get_logger("memem-mine-delta")
 
@@ -241,6 +242,37 @@ def _is_trivial_delta(delta_text: str) -> bool:
 
 
 # -----------------------------------------------------------------------
+# Project detection from transcript path (B13)
+# -----------------------------------------------------------------------
+
+
+def _project_from_transcript_path(transcript_path: str) -> str:
+    """Derive the project name from the transcript file path.
+
+    Claude Code stores transcripts at:
+        ~/.claude/projects/<munged-cwd>/<session>.jsonl
+    where munged-cwd is the original cwd with '/' replaced by '-'.
+
+    e.g. /home/claude-user/cortex-plugin → -home-claude-user-cortex-plugin
+
+    Returns the project basename (the final path component after the home
+    prefix), 'general' for the home dir itself, or the full dir name as a
+    fallback.
+    """
+    try:
+        parent_dir = Path(transcript_path).parent.name
+        home = str(Path.home())
+        munged_home = home.replace("/", "-")  # e.g. "-home-claude-user"
+        if parent_dir == munged_home:
+            return "general"
+        if parent_dir.startswith(munged_home + "-"):
+            return parent_dir[len(munged_home) + 1:]
+        return parent_dir or "general"
+    except Exception:
+        return "general"
+
+
+# -----------------------------------------------------------------------
 # Episode emission
 # -----------------------------------------------------------------------
 
@@ -249,6 +281,7 @@ def _emit_session_episode(
     session_id: str,
     turns: list[dict],
     first_user_msg: str,
+    transcript_path: str = "",
 ) -> bool:
     """Emit a single per-session episodic memory summarising the full turn list.
 
@@ -292,17 +325,52 @@ def _emit_session_episode(
         log.warning("mine_delta: episode Haiku returned empty output", session_id=session_id)
         return False
 
-    # Detect project from cwd if available
-    try:
-        project = os.path.basename(os.getcwd()) or "general"
-    except Exception:
-        project = "general"
+    # B13: Detect project from transcript path instead of os.getcwd()
+    if transcript_path:
+        project = _project_from_transcript_path(transcript_path)
+    else:
+        try:
+            project = os.path.basename(os.getcwd()) or "general"
+        except Exception:
+            project = "general"
 
-    # Strip-then-slice; fall back to placeholder if empty (e.g. all-assistant
-    # turns or whitespace-only first user message) so titles never end in a
-    # dangling em-dash.
-    title_suffix = first_user_msg.strip()[:80] or "(no user prompt)"
-    title = f"Session {session_id[:8]} — {title_suffix}"
+    # B6: Stable episode id — one per session, derived from session_id only.
+    episode_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"memem-episode:{session_id}"))
+
+    # Check if this episode already exists (second or later delta for the same session).
+    existing = _find_memory(episode_id)
+    if existing is None:
+        # Upgrade path: pre-v2.5.0 episodes were saved under random uuid4 ids.
+        # Adopt a legacy episode for this session via its session:<id> tag so
+        # re-mining across the upgrade boundary updates it in place instead of
+        # creating a duplicate episode.
+        try:
+            from memem.obsidian_store import _obsidian_memories
+            for cand in _obsidian_memories():
+                if (
+                    cand.get("source_type") == "mined-episode"
+                    and f"session:{session_id}" in (cand.get("domain_tags") or [])
+                ):
+                    existing = cand
+                    episode_id = cand.get("id") or episode_id
+                    break
+        except Exception:  # noqa: BLE001 — adoption is best-effort
+            pass
+    if existing:
+        # Keep the original title so the filename slug stays stable.
+        title = existing["title"]
+        log.debug("mine_delta: updating existing episode memory", session_id=session_id, episode_id=episode_id[:8])
+    else:
+        # First emission: build a title from the first real user message.
+        # B6 cont.: skip if empty, XML-ish ('<task-notification>', '<system-reminder>',
+        # ...), or a 'Caveat:' harness preamble. run() pre-filters with the same rule
+        # when selecting first_user_msg; this is the last-line defence for direct calls.
+        stripped = first_user_msg.strip()
+        title_suffix = ""
+        if stripped and not stripped.startswith("<") and not stripped.startswith("Caveat:"):
+            title_suffix = stripped[:80]
+        title = f"Session {session_id[:8]} — {title_suffix or '(no user prompt)'}"
+
     tags = ["type:episodic", f"session:{session_id}"]
 
     try:
@@ -315,6 +383,17 @@ def _emit_session_episode(
             source_session=session_id,
             importance=3,
         )
+        # Override id to the stable per-session uuid5.
+        mem["id"] = episode_id
+
+        # Carry over fields from the existing record so filename slug and
+        # created_at stay stable; _write_obsidian_memory will clean up the
+        # old file if title/slug differs.
+        if existing:
+            mem["obsidian_file"] = existing.get("obsidian_file", "")
+            mem["file"] = existing.get("file", "")
+            mem["created_at"] = existing.get("created_at", mem["created_at"])
+
         _save_memory(mem)
         log.info("mine_delta: saved episode memory", session_id=session_id, title=title)
         return True
@@ -421,14 +500,18 @@ def run(session_id: str, transcript_path: str) -> None:
 
         # 8b. Emit per-session episode if session was substantive
         if memories_written >= 1 and len(turns) >= 3:
+            # B6 cont.: Skip messages that are empty, start with '<' (catches
+            # <task-notification>, <system-reminder>, etc.), or start with 'Caveat:'.
             first_user_msg = ""
             for t in turns:
                 role, text = _extract_role_text(t)
-                if role == "user" and text.strip():
-                    first_user_msg = text
-                    break
+                if role == "user":
+                    stripped = text.strip()
+                    if stripped and not stripped.startswith("<") and not stripped.startswith("Caveat:"):
+                        first_user_msg = text
+                        break
             try:
-                _emit_session_episode(session_id, turns, first_user_msg)
+                _emit_session_episode(session_id, turns, first_user_msg, transcript_path=transcript_path)
             except Exception as exc:
                 log.warning(
                     "mine_delta: episode emission raised unexpectedly",

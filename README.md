@@ -30,9 +30,13 @@ memem is a Claude Code plugin that gives Claude persistent memory across session
 
 It's **local-first**: no cloud services, no API keys required, no vendor lock-in. Everything lives in `~/obsidian-brain/memem/memories/` as human-readable markdown.
 
+### What's new in v2.5.0 (Repair & Prune)
+
+v2.5.0 is a maintenance release: 24 audited defects fixed and ~2,256 LOC of dead code removed. No new memory capabilities. Key fixes: self-mining contamination guard (stale-sweep now skips headless mining transcripts), RRF/MMR scoring bugs fixed (18-query benchmark measured during release validation: 74.7% → 78.7%), embedding index staleness fixed (incremental upsert + mtime invalidation + cross-process flock), double access-count stores eliminated (telemetry sidecar is now the single store), episode deduplication (one stable-id episode per session). Removed: `compaction.py`, `reaper.py`, attribution pipeline, `storage.py`, 8 dead settings knobs, and `hybrid` injection mode (was documented but never implemented). New CLI: `python3 -m memem.server --purge-contaminated [--apply]`. See [CHANGELOG](CHANGELOG.md) for full details.
+
 ### What's new in v2.4.0 (passive mode + episode catalog + telemetry)
 
-v2.4.0 flips the default injection mode from `auto` to `tool`: Claude no longer receives memory context on every prompt automatically. Instead, it pulls memory on demand via `memory_search`, `memory_get`, and `active_memory_slice`. This eliminates ~85% per-turn noise that was masking v2.3.0's ranking improvements. At session start, Claude now receives a `## Episode index` section listing up to 50 episodic memories by title — a clean menu without a full content dump. Every retrieval is logged to `~/.memem/.recall_log.jsonl`; run `python3 -m memem.server --analyze-recalls` to inspect recall patterns. All 5 MCP tool descriptions have been rewritten to be trigger-explicit so Claude knows *when* to call each tool. Existing users with `MEMEM_INJECTION_MODE=auto` in their shell profile are unaffected; see the [CHANGELOG breaking change banner](CHANGELOG.md) to restore old behavior.
+v2.4.0 flips the default injection mode from `auto` to `tool`: Claude no longer receives memory context on every prompt automatically. Instead, it pulls memory on demand via `memory_search`, `memory_get`, and `active_memory_slice`. This eliminates ~85% per-turn noise that was masking v2.3.0's ranking improvements. At session start, Claude now receives a `## Episode index` section listing up to 25 episodic memories by title — a clean menu without a full content dump. Every retrieval is logged to `~/.memem/.recall_log.jsonl`; run `python3 -m memem.server --analyze-recalls` to inspect recall patterns. All 5 MCP tool descriptions have been rewritten to be trigger-explicit so Claude knows *when* to call each tool. Existing users with `MEMEM_INJECTION_MODE=auto` in their shell profile are unaffected; see the [CHANGELOG breaking change banner](CHANGELOG.md) to restore old behavior.
 
 ### What's new in v2.3.0 (hybrid retrieval)
 
@@ -158,7 +162,7 @@ The lower-level recall tools still exist for explicit drilling:
 
 A heuristic (`mining.py:classify_layer`) assigns layers based on importance, structural tags, content length, and the per-project L0 cap. `memory_save(content, ..., layer=N)` accepts an explicit override (0-3) when Claude judges better than the heuristic.
 
-Token efficiency: session start injects L0 verbatim plus a compact index for L1-L2 (~50 tokens per entry: ID + L<n> + title + snippet). Claude drills into specific memories via `memory_get(ids=[...])` only when it needs full detail.
+Token efficiency: session start injects only the Episode index (up to 25 recent `type:episodic` titles). There is no L0 full-content dump at session start. Use `memory_search` or `memory_get` to pull project-identity memories on demand.
 
 **Active Memory Slice runtime kernel:**
 
@@ -191,15 +195,10 @@ Opt-in features:
 - **`MEMEM_PRETOOL_GATING=1`** — enrich Read tool calls with memories about the target file (off by default)
 
 Injection mode (v1.9+, default changed in v2.4.0) — controls auto-injection behavior:
-- **`MEMEM_INJECTION_MODE`** — `tool` (**default since v2.4.0** — silence hook, LLM pulls via MCP tools), `hybrid` (apply gating heuristics on auto-inject), `auto` (pre-v2.4.0 behavior — inject on every prompt). To restore the old default: `export MEMEM_INJECTION_MODE=auto`.
-- **`MEMEM_INJECT_CADENCE=2`** — when `hybrid` is on, run full slice every Nth turn
-- **`MEMEM_TOPIC_SHIFT_THRESHOLD=0.85`** — cosine-similarity threshold for reusing the previous turn's slice (`hybrid` only)
-- **`MEMEM_EMPTY_STREAK_MAX=8`** — cap on the exponential backoff after consecutive empty slices
+- **`MEMEM_INJECTION_MODE`** — `tool` (**default since v2.4.0** — silence hook, LLM pulls via MCP tools), `auto` (pre-v2.4.0 behavior — inject on every prompt). To restore the old default: `export MEMEM_INJECTION_MODE=auto`. Note: `hybrid` was removed in v2.5.0 (was documented but never implemented; treated as `auto`).
 
-Selective recall (v1.9.6+) — suppress context injection when the slice is low-confidence or out-of-vault:
-- **`MEMEM_RECALL_MIN_CONFIDENCE=0.45`** — minimum activation confidence required to emit context. Below this, the hook emits a "0 items (low confidence)" systemMessage and suppresses `additionalContext`.
+Selective recall (v2.5.0, live settings only):
 - **`MEMEM_RECALL_MIN_ITEM_SCORE=0.0`** — per-item composite-score floor for recall results (0.0 = disabled). L0 project-identity anchors are always exempt.
-- **`MEMEM_RECALL_OOV_THRESHOLD=0.0`** — out-of-vault detection threshold (0.0 = disabled). When set (e.g. 0.3), queries with no L0 keyword overlap and all candidate scores below threshold emit "0 items (out of vault)" and suppress context. Env-var changes take effect on the next hook invocation (no daemon to restart in v2.1.0+).
 
 Migration note (v2.4.0): if you previously relied on per-turn auto-injection, set `export MEMEM_INJECTION_MODE=auto` in your shell profile. The new `tool` default reduces token overhead ~85% but requires the LLM to pull memory via the MCP tools when it judges context is needed.
 
@@ -252,7 +251,7 @@ At session start, the SessionStart hook tries to prime a slice-first working sta
 
 You work normally. When each conversation turn completes, the Stop hook spawns `mine_delta` in the background to extract memories from the new turns using Claude Haiku and write them to your vault. No daemon, no 5-minute wait — memories appear seconds after each turn.
 
-**During the session:** every user prompt goes through `active_memory_slice`, which builds a structured working-state briefing from the relevant memories, playbooks, transcripts, graph neighbors, environment facts, and current artifacts. The hooks automatically pass session id and working directory, and the prompt hook infers a task mode when the host does not provide one, so ongoing work can carry constraints, artifacts, and tensions forward across slices. You see an active slice prompt with goals, constraints, background, decisions, failure patterns, open tensions, and artifacts. Claude starts with the current working state instead of a generic briefing.
+**During the session:** in `tool` mode (default since v2.4.0), Claude pulls memory on demand via `memory_search`, `memory_get`, and `active_memory_slice` when context is needed. In `auto` mode (`export MEMEM_INJECTION_MODE=auto`), every user prompt goes through `active_memory_slice` automatically, building a structured working-state briefing from relevant memories, playbooks, transcripts, and graph neighbors.
 
 ## 30-Second Setup
 
@@ -419,8 +418,7 @@ memem is split into small, focused modules:
 - `playbook.py` — per-project playbook grow + refine
 - `assembly.py` — `context_assemble` composes via `recall` pipeline
 - `capabilities.py` — runtime feature detection for degraded mode
-- `storage.py` — server-lifecycle helpers (PID management, miner auto-start)
-- `server.py` — thin MCP entrypoint (FastMCP imported lazily)
+- `server.py` — thin MCP entrypoint (FastMCP imported lazily; `storage.py` server-lifecycle helpers folded in v2.5.0)
 - `cli.py` — command dispatcher for non-MCP entrypoints
 - `mining.py` — session mining pipeline (Haiku extraction, `extract_from_text`)
 - `mine_delta.py` — v2.1.0: event-triggered delta miner; reads new turns since last offset, calls `extract_from_text`, marks session complete

@@ -1,4 +1,4 @@
-"""memem v2.3.0 retrieval — BM25+cosine RRF fusion + FTS-conditional supplement + temporal re-rank.
+"""memem v2.5.0 retrieval — BM25+cosine RRF fusion + FTS-conditional supplement + temporal re-rank.
 
 Benchmark-validated at 74% precision on 18-query × 6-category eval
 (vs v1.13.0's 24%). Replaces ~12,400 LOC of legacy retrieval pipeline.
@@ -10,7 +10,16 @@ contains version/date literals.
 v2.2.0 adds temporal awareness:
 - _extract_temporal_range: parse "yesterday", "last week", "N days ago", etc.
 - _fts_temporal_search: supplement results from the temporal date window
-- retrieve() date-aware re-ranking: +0.2 score boost for on-window memories
+- retrieve() date-aware re-ranking: proportional 1.2x multiplier for on-window memories
+
+v2.5.0 fixes RRF scale bugs (B2, B3):
+- B2: After RRF fusion, fused scores are min-max normalized to [0,1] over the
+  candidate pool BEFORE temporal re-ranking. Temporal boost is now a bounded
+  1.2x multiplier (not additive +0.2). Old +0.2 on a 0.033-max scale was a hard
+  override that put any in-window memory above all semantic matches regardless of
+  relevance; the multiplier preserves proportional ordering.
+- B3: _mmr_rerank now receives normalized [0,1] scores, so the diversity term
+  (max cosine sim, also [0,1]) is on the same scale. lam=0.7 is retained.
 
 Thread safety note: module-level caches (_vault_idx_cache, _emb_cache,
 _model) use a "set after compute" pattern that is safe under CPython's GIL.
@@ -25,10 +34,9 @@ import re
 import threading
 import time
 from datetime import UTC, datetime, timedelta
-from typing import TypedDict
+from typing import Any, TypedDict
 
 import numpy as np
-from sentence_transformers import SentenceTransformer
 
 import memem.recall_log as _recall_log
 import memem.settings as _settings
@@ -53,7 +61,7 @@ _DATE_PAT = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 # Module-level caches (lazy-loaded, mtime-invalidated).
 # CPython GIL makes "set after compute" safe — see module docstring.
-_model: SentenceTransformer | None = None
+_model: "Any | None" = None  # SentenceTransformer instance (lazy-loaded)
 _vault_idx_cache: dict | None = None
 _vault_idx_mtime: float = 0
 _vault_idx_count: int = 0  # Phase 4.5 fix: also track file count so deletes invalidate
@@ -79,11 +87,21 @@ class MemoryHit(TypedDict, total=False):
     importance: int
 
 
-def _get_model() -> SentenceTransformer:
-    """Lazily load the sentence-transformers model (singleton per process)."""
+def _get_model() -> "Any | None":
+    """Lazily load the sentence-transformers model (singleton per process).
+
+    Returns None if sentence-transformers is not installed (optional dep).
+    retrieve() checks the return value and skips the cosine channel when None.
+    """
     global _model
     if _model is None:
-        _model = SentenceTransformer(_EMBEDDING_MODEL)
+        try:
+            from sentence_transformers import SentenceTransformer  # noqa: PLC0415
+            _model = SentenceTransformer(_EMBEDDING_MODEL)
+        except Exception:  # noqa: BLE001 — not just ImportError: OSError/RuntimeError
+            # on a missing/corrupt model cache (first run, CI) must also degrade
+            # to the BM25-only channel rather than crash retrieve().
+            return None
     return _model
 
 
@@ -401,27 +419,43 @@ def _rrf_fusion(
     return out
 
 
-def retrieve(query: str, k: int = 8) -> list[MemoryHit]:
+def retrieve(query: str, k: int = 8, log_call_type: str | None = "hook_auto") -> list[MemoryHit]:
     """Main retrieval: cosine top-K + FTS supplement for version/date literals.
 
     Args:
         query: Natural language query string.
         k: Maximum number of cosine results to return (FTS supplement may add
            up to 2 additional results on top of k).
+        log_call_type: Label for the recall_log entry (e.g. "hook_auto",
+           "cli_slice"). When None, retrieve() skips its own log_recall call
+           entirely — callers that log their own telemetry (e.g. server.py
+           active_memory_slice) should pass None to prevent double-logging.
 
     Returns:
         List of MemoryHit dicts ordered FTS-first, then cosine by descending
         score. Each hit has keys: id, path, title, project, created, body,
         score, source.
+
+    Score semantics (v2.3.1+):
+        - FTS hits (source="fts"): score=1.0 always (literal/version match).
+        - Cosine hits (source="cosine"): scores are min-max normalized to [0, 1]
+          over the top-20 RRF candidate pool. A score of 1.0 means the strongest
+          match in the pool; 0.0 means the weakest. For temporal queries, in-window
+          memories receive a 1.2x multiplier (max effective score: 1.2), so they
+          rank proportionally higher without unconditionally overriding relevance.
     """
     t0 = time.monotonic()
     vault_idx = load_vault_index()
     if not vault_idx:
         return []
     emb_data = load_embeddings()
-    if emb_data is None:
-        return []
-    embeddings_norm, ids = emb_data
+    # emb_data is None when embeddings.npy / embedding_ids.json are absent.
+    # When sentence-transformers is also absent, we skip the cosine channel
+    # entirely (degrade to FTS/BM25-only, mirroring the None-embeddings path).
+    embeddings_norm: np.ndarray | None = None
+    ids: list[str] = []
+    if emb_data is not None:
+        embeddings_norm, ids = emb_data
 
     results: list[MemoryHit] = []
     seen_paths: set[str] = set()
@@ -445,37 +479,21 @@ def retrieve(query: str, k: int = 8) -> list[MemoryHit]:
     # benchmark that scores temporal relevance directly (the current 18-query
     # benchmark scores by topic keywords, not date proximity).
 
-    # Cosine top-K
+    # Cosine top-K — skipped gracefully when sentence-transformers is absent
+    # or when embeddings haven't been built yet.
     model = _get_model()
-    q_vec = model.encode(query, normalize_embeddings=True)
-    scores = embeddings_norm @ q_vec
+    cosine_scores: dict[str, float] = {}
+    if model is not None and embeddings_norm is not None:
+        q_vec = model.encode(query, normalize_embeddings=True)
+        scores = embeddings_norm @ q_vec
 
-    # Recency decay scoring (m4): multiply cosine scores by per-memory strength.
-    # L0 and decay_immune memories are exempt (is_immune() → multiplier stays 1.0).
-    # Applies BEFORE argsort so decay changes the ranking.
-    # REVERTED: benchmark regression to 70.0% (gate is 73%) — scaffolding kept,
-    # scoring wiring disabled pending a benchmark-safe calibration.
-    # if _settings.MEMEM_DECAY_ENABLED:
-    #     from memem.decay import compute_strength, is_immune
-    #     decay_mult = np.ones_like(scores)
-    #     for i, mem_id in enumerate(ids):
-    #         if mem_id not in vault_idx:
-    #             continue
-    #         mem = vault_idx[mem_id]
-    #         if is_immune(mem):
-    #             continue  # multiplier stays 1.0
-    #         decay_mult[i] = compute_strength(mem)
-    #     scores = scores * decay_mult
-
-    order = np.argsort(scores)[::-1]
+        order = np.argsort(scores)[::-1]
+        for i in order:
+            if i < len(ids) and ids[i] in vault_idx:
+                cosine_scores[ids[i]] = float(scores[i])
 
     # Build BM25 over vault (cached)
     bm25_data = _build_bm25(vault_idx)
-    # Compute cosine scores into dict[id, float]
-    cosine_scores: dict[str, float] = {}
-    for i in order:
-        if i < len(ids) and ids[i] in vault_idx:
-            cosine_scores[ids[i]] = float(scores[i])
     # Compute BM25 scores
     bm25_scores: dict[str, float] = {}
     if bm25_data is not None:
@@ -484,7 +502,7 @@ def retrieve(query: str, k: int = 8) -> list[MemoryHit]:
         if query_tokens:
             raw_bm25 = bm25_index.get_scores(query_tokens)
             bm25_scores = {bm25_ids[i]: float(raw_bm25[i]) for i in range(len(bm25_ids))}
-    # Fuse
+    # Fuse cosine + BM25 (works even if cosine_scores is empty — degrades to BM25-only)
     fused = _rrf_fusion(cosine_scores, bm25_scores, k=60)
     # Sort by fused score desc, take top 20 (for MMR), build candidate list
     sorted_ids = sorted(fused, key=lambda m: -fused[m])
@@ -505,21 +523,46 @@ def retrieve(query: str, k: int = 8) -> list[MemoryHit]:
                 seen_paths.add(mem["path"])
                 cosine_added += 1
 
+    # Min-max normalize fused scores to [0, 1] over the candidate pool (B2/B3 fix).
+    # This ensures temporal boost and MMR diversity term operate on the same scale.
+    # Raw RRF scores are in ~[1/(60+N), 2/61≈0.033]; +0.2 additive would hard-override
+    # all semantic ranking. Normalization must happen BEFORE temporal boost.
+    # Degenerate case (all scores equal): map to 1.0 (all equivalent relevance).
+    if cosine_candidates:
+        raw_scores = [h["score"] for h in cosine_candidates]
+        score_min = min(raw_scores)
+        score_max = max(raw_scores)
+        if score_max > score_min:
+            for hit in cosine_candidates:
+                hit["score"] = (hit["score"] - score_min) / (score_max - score_min)
+        else:
+            # All scores identical — map to 1.0 (degenerate pool, all equally relevant)
+            for hit in cosine_candidates:
+                hit["score"] = 1.0
+
     # Date-aware re-ranking: boost cosine candidates that fall inside the
     # temporal window extracted from the query (Feature B).  Non-temporal
     # queries → _extract_temporal_range returns None → no-op.
+    # Boost is a bounded 1.2x multiplier (not additive) so that in-window memories
+    # are promoted proportionally to their relevance rather than unconditionally
+    # jumping above all out-of-window matches. A weakly-relevant in-window memory
+    # gets score × 1.2 while a highly-relevant out-of-window one retains its
+    # normalized score — the latter can still win if it is sufficiently stronger.
+    # Scores after boost remain in [0, 1.2]; post-boost sort preserves relative order.
     temporal_range = _extract_temporal_range(query)
     if temporal_range is not None:
         start_dt, end_dt = temporal_range
         for hit in cosine_candidates:
             created_dt = parse_iso_dt(hit.get("created", ""))
             if created_dt is not None and start_dt <= created_dt <= end_dt:
-                hit["score"] = hit["score"] + 0.2
+                hit["score"] = hit["score"] * 1.2
         cosine_candidates.sort(key=lambda h: h["score"], reverse=True)
 
     # MMR re-ranking: diversify top-20 cosine candidates down to k results.
     # L0 / decay_immune memories are pre-seeded (always included).
-    mmr_selected = _mmr_rerank(cosine_candidates, embeddings_norm, ids, k=k)
+    # Pass empty array when embeddings unavailable — _mmr_rerank handles it.
+    _emb_for_mmr = embeddings_norm if embeddings_norm is not None else np.zeros((0, 1), dtype=np.float32)
+    mmr_selected = _mmr_rerank(cosine_candidates, _emb_for_mmr, ids, k=k)
     results.extend(mmr_selected)
 
     # Fire-and-forget access writeback via telemetry sidecar (m3).
@@ -536,15 +579,17 @@ def retrieve(query: str, k: int = 8) -> list[MemoryHit]:
                         pass
         threading.Thread(target=_writeback, daemon=True).start()
 
-    # v2.4.0 telemetry — log every retrieve() call (called from hook in auto/hybrid mode)
-    try:
-        _recall_log.log_recall(
-            call_type="hook_auto",
-            query=query,
-            returned_ids=[h.get("id", "") for h in results],
-            latency_ms=int((time.monotonic() - t0) * 1000),
-            source="hook",
-        )
-    except Exception:  # noqa: BLE001
-        pass
+    # v2.4.0 telemetry — log every retrieve() call (called from hook in auto/hybrid mode).
+    # When log_call_type is None, skip logging entirely (caller handles it themselves).
+    if log_call_type is not None:
+        try:
+            _recall_log.log_recall(
+                call_type=log_call_type,
+                query=query,
+                returned_ids=[h.get("id", "") for h in results],
+                latency_ms=int((time.monotonic() - t0) * 1000),
+                source="hook",
+            )
+        except Exception:  # noqa: BLE001
+            pass
     return results

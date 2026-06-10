@@ -10,6 +10,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
 
+## v2.5.0 — Repair & Prune (2026-06-10)
+
+No new memory capabilities; 24 audited defects fixed and ~2,256 LOC of dead code removed.
+
+### Fixed
+
+- **Self-mining contamination loop** — stale-session sweep in `session-start.sh` now detects headless `claude -p` transcripts (marker phrases in first 20 lines + ≤30 lines total) and skips them, preventing mined episode titles from being re-mined into new memories. Skipped session IDs appended to `.mined_sessions` (zombie guard). Asymmetry with `--purge-contaminated` is intentional: that flag checks `<task-notification` XML to identify already-saved vault contamination.
+- **RRF temporal boost was a hard override** — the temporal boost added `+0.2` to RRF-fused scores that max out around `2/61 ≈ 0.033`, so ANY memory inside the query's time window outranked every semantic match regardless of relevance. Fused scores are now min-max normalized to `[0,1]` over the candidate pool after fusion, and the boost is a bounded `1.2×` multiplier on the normalized score — in-window memories get promoted proportionally to their relevance instead of unconditionally.
+- **MMR diversity dominated relevance** — `_mmr_rerank` mixed RRF-scale relevance (~0.03) with cosine-scale diversity (`[0,1]`), so the diversity term outweighed relevance roughly 10:1 and MMR mostly ignored ranking inside the top-20 pool. After the normalization above, both terms share the `[0,1]` scale and λ=0.7 means what it says. 18-query benchmark measured during release validation on the live vault: 74.7% (112/150) before the two ranking fixes → 78.7% (118/150) after.
+- **Embedding index staleness** — `embeddings.npy` was only refreshed by a full `--rebuild-search-index`; newly saved memories were invisible to the vector channel (426 memories stale at audit time, 47h old). Now: every `_save_memory` incrementally upserts the memory's embedding; the in-process cache invalidates on file mtime; and both the upsert and the full rebuild are serialized by a shared cross-process `flock` so neither can silently drop the other's rows. `retrieve.py` also lazy-imports sentence-transformers — the module imports cleanly without the optional dep and degrades to BM25-only retrieval.
+- **Double access-count stores** — `recall.py` was calling `bump_access()` (rewrites the whole memory markdown file per hit, invalidating every downstream cache) AND `telemetry._record_access()` (sidecar) on every retrieval. Recall no longer rewrites memory files; the telemetry sidecar is the single live access store, and `decay.py` now reads it instead of the never-incremented frontmatter counter.
+- **Episode duplication** — the Stop hook fires per assistant turn, so `_emit_session_episode()` created a new episode memory per substantive delta (one real session had 9 "episodes", some titled from `<task-notification>` XML). Now: one stable `uuid5(session_id)` episode per session, updated in place on later deltas; legacy uuid4 episodes from before this release are adopted via their `session:<id>` tag instead of duplicated; titles skip XML/`Caveat:` noise; project is derived from the transcript path (`~/.claude/projects/<munged-cwd>/`), not `os.getcwd()` (which was wrong for stale-sweep-spawned mining).
+- **Episode catalog padding** — `session-start.sh` episode index padded the list to 50 with arbitrary non-episode memories; now filters strictly to `type:episodic` and caps at 25.
+- **FTS schema v3** — `memory_id` and `related_ids` were indexed as searchable FTS5 columns, letting id-like query tokens pollute BM25 relevance. Both are now `UNINDEXED` (still stored/selectable). Migrates automatically by drop+repopulate from the vault on first open, inside a single `BEGIN IMMEDIATE` transaction so concurrent processes upgrading at once serialize cleanly.
+- **Dreamer dead model id** — `dreamer.py` called `claude -p --model claude-sonnet-4-7`, a nonexistent model id, so every dream-cycle LLM judgment silently failed. Now uses the `haiku` CLI alias (same convention as `consolidation.py`); both dreamer subprocess calls also isolate tools via `--tools ""`.
+- **False `supersedes` graph edges** — `graph_index.py` classified an edge as `supersedes` when the source had ANY `supersedes:*` tag plus mild lexical similarity, then force-boosted those edges to 0.80. Now requires the exact `supersedes:<dst-id8>` tag matching the destination memory.
+- **`clustered_into`/`references` fields silently dropped** — `consolidation.py` and `dreamer.py` set these fields but the frontmatter serializer never persisted them, so cluster back-links and contradiction references were no-ops on disk. Both fields now round-trip through frontmatter.
+- **PreToolUse hook killed by its own registration** — `hooks.json` gave the opt-in PreToolUse hook a 5s harness timeout while the script's internal subprocess timeout is 8s plus a 2–4s cold start, so the hook was killed before it could ever answer. Harness timeout raised to 15s.
+- **SQLite fd leaks** — `session_state_db.py` used `with conn:` (which commits but does not close); connections are now wrapped in `contextlib.closing(...)` at every call site, and bulk-save errors are logged instead of silently swallowed.
+- **Eval vault guard** — `eval/eval_set.py::run_eval_case` could write eval fixtures into the production vault when run outside pytest; it now refuses to run unless `MEMEM_EVAL_VAULT_OVERRIDE` is set or the vault path is explicitly non-default.
+- **Telemetry labeling + returned_ids** — `retrieve()` labeled every call `hook_auto` (including MCP/CLI callers) and `active_memory_slice` double-logged; callers now pass an accurate `log_call_type` (or suppress retrieve's own log). `memory_search`, `memory_recall`, and `active_memory_slice` now log the actual returned memory ids — citation-rate analysis over `.recall_log.jsonl` becomes possible. The tool-mode skip label was renamed `hook_hybrid_skip` → `hook_tool_skip` (hybrid no longer exists).
+
+### Added
+
+- `python3 -m memem.server --purge-contaminated [--apply]` — identify (dry-run default) or delete contaminated memories. Detects mining-envelope phrases (`=== BEGIN CONVERSATION ===`, `Below is a coding conversation`) and `<task-notification` XML in memory title/content.
+- `~/.memem/project_aliases.json` (optional) — map project-name aliases to canonical names. Format: `{"alias": "canonical"}` (key = old/alternate name, value = the scope memories consolidate under). Merged over the built-in defaults; used by recall filtering, FTS indexing, and mining project assignment.
+
+### Removed
+
+- `memem/compaction.py` — dead module (zero callers; imported a module deleted in v2.0.0).
+- `memem/reaper.py` — dead module; its caller was the miner daemon, removed in v2.1.0.
+- Attribution pipeline (`memem/attribution.py`) + `hooks/post-stop-attribution.sh` — the post-stop hook ran on every Stop event but was a guaranteed no-op: it imported two modules deleted in v2.0.0 and read a file nothing writes. Hook entry removed. Note: `dreamer._recent_attribution()` is retained but now always returns `None` (its event writer is gone), so dream-cycle demotion candidates are currently decided by decay strength alone — dreamer remains manual-only with dry-run default; a citation-based replacement signal is planned.
+- `memem/storage.py` — vestigial facade from the daemon era; PID helpers folded into `cli.py`, the opt-in marker constant into `models.py`.
+- 8 dead settings knobs: `MEMEM_INJECT_CADENCE`, `MEMEM_TOPIC_SHIFT_THRESHOLD`, `MEMEM_EMPTY_STREAK_MAX` (hybrid-mode tunables), `MEMEM_RECALL_MIN_CONFIDENCE`, `MEMEM_RECALL_OOV_THRESHOLD` (selective-recall tunables), `MEMEM_DECAY_ENABLED`, `MEMEM_TRIVIAL_REGEX`, and the `_TRIVIAL_PATTERNS` compiled regex. All removed from `settings.py`.
+- `hybrid` injection mode — `MEMEM_INJECTION_MODE=hybrid` was documented since v1.9 but the gating heuristics (cadence, topic-shift, empty-streak) were never wired into the v2.x hook. The value now falls through to `auto` behavior. Users with `hybrid` in their shell profile get auto behavior explicitly (was already de facto).
+- Duplicate `_atomic_write` helper — `io_utils.py` already provided `atomic_write_text`; a second inline implementation in `obsidian_store.py` was removed.
+
+### Breaking / Migration notes
+
+- Users with `MEMEM_INJECTION_MODE=hybrid` now get `auto` behavior (was already the de facto behavior; the gating code was never present in v2.x).
+- Deleted env knobs (`MEMEM_INJECT_CADENCE`, `MEMEM_TOPIC_SHIFT_THRESHOLD`, etc.) are silently ignored if still set in shell profiles.
+- `search.db` FTS schema migrates automatically (drop+repopulate from vault on first open after upgrade). The repopulation is fast for typical vault sizes (≤10s); large vaults (10k+ memories) may take 30–60s on first open.
+- Project aliases previously needed to be hardcoded patches; they now live in the optional `~/.memem/project_aliases.json` file.
+
 ## v2.4.0 — Passive mode + episode catalog + telemetry (2026-06-09)
 
 v2.3.0 fixed ranking (74% → 75.3%); v2.4.0 fixes how the LLM consumes context. Zero algorithmic retrieval changes. The 18-query benchmark stays at 75.3%. This release is a consumption-pattern fix, not a ranking improvement.

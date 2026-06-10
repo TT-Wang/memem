@@ -49,13 +49,13 @@ else:
 CORTEX_DIR = MEMEM_DIR
 
 SERVER_PID_FILE = MEMEM_DIR / "mcp-server.pid"
+MINER_OPT_IN_MARKER = MEMEM_DIR / ".miner-opted-in"
 TELEMETRY_FILE = MEMEM_DIR / "telemetry.json"
 EVENT_LOG = MEMEM_DIR / "events.jsonl"
 SEARCH_DB = MEMEM_DIR / "search.db"
 GRAPH_DB = MEMEM_DIR / "graph.db"
 LAST_BRIEF_PATH = MEMEM_DIR / ".last-brief.json"
 RELEVANCE_SCORES_FILE = MEMEM_DIR / "relevance_scores.json"
-ACTIVE_SLICE_HISTORY_FILE = MEMEM_DIR / "active-slices.jsonl"
 DELTA_AUDIT_LOG = MEMEM_DIR / "delta-audit.jsonl"
 DELTA_STATE_DIR = MEMEM_DIR / "delta-state"
 
@@ -124,20 +124,26 @@ class Memory(TypedDict, total=False):
 # ============================================================================
 
 _PROJECT_ALIASES = {
-    "vibireader": "vibereader",
-    "vibe-reader": "vibereader",
-    "Vibereader": "vibereader",
-    "Vibireader": "vibereader",
-    "hft-strategies": "HFT trading system",
-    "HFT strategies": "HFT trading system",
-    "hft": "HFT trading system",
-    "Tech Feed TUI": "techfeed",
-    "tailor-reader": "techfeed",
-    "tailor-real/techfeed": "techfeed",
+    # Self-aliases for the memem/cortex-plugin rename
     "cortex": "cortex-plugin",
     "memem": "cortex-plugin",  # memem package == cortex-plugin project (renamed)
-    "notes-api": "express-api",
 }
+
+# Override loader: merge user-defined aliases from MEMEM_DIR/project_aliases.json.
+# File format: {"alias": "canonical", ...} — a flat JSON object.
+# Silently no-ops on missing or malformed file; safe to call at import time.
+try:
+    _aliases_override_path = MEMEM_DIR / "project_aliases.json"
+    if _aliases_override_path.exists():
+        import json as _json
+        with open(_aliases_override_path) as _fh:
+            _user_aliases = _json.load(_fh)
+        if isinstance(_user_aliases, dict):
+            _PROJECT_ALIASES.update({str(k): str(v) for k, v in _user_aliases.items()})
+        del _json, _fh, _user_aliases
+    del _aliases_override_path
+except Exception:  # noqa: BLE001 — import-time; never raise
+    pass
 
 
 def _normalize_scope_id(scope_id: str) -> str:

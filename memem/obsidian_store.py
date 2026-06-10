@@ -14,7 +14,7 @@ import functools
 import logging
 import os
 import re
-import tempfile
+
 import threading
 import time
 import uuid
@@ -24,23 +24,6 @@ from typing import Any
 
 import msgpack
 
-
-def _atomic_write(path: Path, content: str) -> None:
-    """Write content to path atomically via temp file + rename."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".tmp_", suffix=path.suffix)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(content)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, str(path))
-    except Exception:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
 
 from memem.io_utils import atomic_write_text
 from memem.models import (
@@ -575,6 +558,11 @@ def _write_obsidian_memory(mem: dict):
         meta["invalid_at"] = mem["invalid_at"]
     if mem.get("replaced_by") is not None:
         meta["replaced_by"] = mem["replaced_by"]
+    if mem.get("clustered_into") is not None:
+        meta["clustered_into"] = str(mem["clustered_into"])
+    references = mem.get("references", [])
+    if references:
+        meta["references"] = [_safe_tag(str(r)) for r in references if _safe_tag(str(r))]
     contradicts = mem.get("contradicts", [])
     if contradicts:
         meta["contradicts"] = [_safe_tag(str(c)) for c in contradicts if _safe_tag(str(c))]
@@ -609,7 +597,7 @@ def _write_obsidian_memory(mem: dict):
     file_content = _fm.dumps(post, handler=_MEM_HANDLER)
 
     filepath = OBSIDIAN_MEMORIES_DIR / filename
-    _atomic_write(filepath, file_content)
+    atomic_write_text(filepath, file_content)
     mem["obsidian_file"] = filename
 
 
@@ -718,6 +706,16 @@ def _parse_obsidian_memory_file(md_file: Path) -> dict | None:
     raw_contradicts = fm_meta.get("contradicts", [])
     if isinstance(raw_contradicts, list) and raw_contradicts:
         mem["contradicts"] = [str(c) for c in raw_contradicts]
+
+    # clustered_into: string pointer to the cluster-summary memory (dreamer-written).
+    raw_clustered_into = fm_meta.get("clustered_into")
+    if raw_clustered_into is not None:
+        mem["clustered_into"] = str(raw_clustered_into)
+
+    # references: list of memory ids this memory references (consolidation contradiction flags).
+    raw_references = fm_meta.get("references", [])
+    if isinstance(raw_references, list) and raw_references:
+        mem["references"] = [str(r) for r in raw_references if r]
 
     # Bi-temporal fields (v2 schema).  valid_at defaults to created_at for
     # memories written before the schema change.
@@ -1147,6 +1145,18 @@ def _save_memory(mem: dict):
         _append_or_update_index_line(mem)
     _log_event("save", mem.get("id", ""), title=mem.get("title", ""))
     _index_memory(mem)
+    # Incremental embedding upsert (B4): encode this memory immediately so the
+    # vector index stays fresh between full rebuilds. Same text composition as
+    # _rebuild_embedding_index (title + " — " + essence). Never raises — any
+    # failure is logged inside _upsert_embedding and save continues normally.
+    try:
+        from memem.embedding_index import _upsert_embedding  # noqa: PLC0415
+        upsert_text = (
+            (mem.get("title", "") or "") + " — " + (mem.get("essence", "") or "")
+        ).strip()
+        _upsert_embedding(mem.get("id", ""), upsert_text)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("embedding upsert failed for %s: %s", mem.get("id", "")[:8], exc)
     try:
         from memem.graph_index import _refresh_edges_for_memory
         refreshed = _find_memory(mem.get("id", ""))
@@ -1385,7 +1395,7 @@ def _generate_index(scope_id: str = "default") -> str:
 
     content = "\n".join(lines) + "\n"
     if OBSIDIAN_VAULT.exists():
-        _atomic_write(INDEX_PATH, content)
+        atomic_write_text(INDEX_PATH, content)
     return content
 
 
@@ -1453,7 +1463,7 @@ def _append_or_update_index_line(mem: dict):
         new_lines.extend(["", f"## {project} (1 memory)", line])
 
     new_lines = _recount_index_sections(new_lines)
-    _atomic_write(INDEX_PATH, "\n".join(new_lines))
+    atomic_write_text(INDEX_PATH, "\n".join(new_lines))
 
 
 @_with_index_lock
@@ -1466,7 +1476,7 @@ def _remove_index_line(memory_id: str):
     new_lines = [entry for entry in lines if not (entry.startswith("- ") and f"({mem_id})" in entry)]
 
     new_lines = _recount_index_sections(new_lines)
-    _atomic_write(INDEX_PATH, "\n".join(new_lines))
+    atomic_write_text(INDEX_PATH, "\n".join(new_lines))
 
 
 # ---------------------------------------------------------------------------

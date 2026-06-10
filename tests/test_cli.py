@@ -32,10 +32,9 @@ def test_events_empty(tmp_cortex_dir, capsys):
 
 
 def test_events_after_log(tmp_cortex_dir, capsys):
-    from memem import models, storage, telemetry
+    from memem import models, telemetry
     importlib.reload(models)
     importlib.reload(telemetry)
-    importlib.reload(storage)
     telemetry._log_event("test_op", "abc12345", detail="hello")
     out = _dispatch(["--events"], capsys)
     assert "test_op" in out.out

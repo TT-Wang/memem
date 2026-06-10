@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memem"
-version = "2.4.0"
+version = "2.5.0"
 description = "Persistent, self-evolving memory for Claude Code — local-first, browsable Obsidian vault."
 readme = "README.md"
 license = {text = "MIT"}
@@ -47,7 +47,7 @@ dev = [
     "mypy~=1.20.0",
     "pre-commit>=3.8",
     # numpy required for cluster/embedding tests (and for the non-test embedding
-    # code paths in attribution.py + dreamer.py). Production users opt into
+    # code paths in embedding_index.py + dreamer.py). Production users opt into
     # numpy via the `embedding` extra, but CI tests need it directly. Without
     # this, every PR adding a numpy-using test had to hand-write
     # pytest.importorskip("numpy") — a recurring tax we paid in v1.3.0 + v1.4.0.

@@ -113,7 +113,27 @@ def run_eval_case(case: EvalCase) -> dict:
 
     Returns: {'case_id': str, 'pass': bool, 'expected_present_missing': [],
               'expected_absent_present': [], 'errors': []}
+
+    Safety guard: refuses to write into the live vault unless
+    MEMEM_EVAL_VAULT_OVERRIDE is set OR the active OBSIDIAN_VAULT path
+    differs from the default ~/obsidian-brain. Tests using tmp vaults
+    set MEMEM_OBSIDIAN_VAULT (which satisfies the "differs" check);
+    scripts/run_eval.py sets MEMEM_EVAL_VAULT_OVERRIDE.
     """
+    import os
+    from pathlib import Path
+
+    _default_vault = str(Path.home() / "obsidian-brain")
+    _active_vault = os.environ.get("MEMEM_OBSIDIAN_VAULT", _default_vault)
+    _override_set = bool(os.environ.get("MEMEM_EVAL_VAULT_OVERRIDE"))
+    _vault_is_default = (Path(_active_vault).resolve() == Path(_default_vault).resolve())
+    if not _override_set and _vault_is_default:
+        raise RuntimeError(
+            "run_eval_case refuses to write into the live vault (~~/obsidian-brain). "
+            "Set MEMEM_EVAL_VAULT_OVERRIDE=1 or point MEMEM_OBSIDIAN_VAULT at a tmp "
+            "directory before calling run_eval_case."
+        )
+
     from memem.obsidian_store import _make_memory, _save_memory, invalidate_memory
     from memem.recall import _search_memories
 

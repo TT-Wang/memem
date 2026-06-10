@@ -15,7 +15,6 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 HOOKS = {
     "auto-recall": REPO / "hooks" / "auto-recall.sh",
-    "post-stop-attribution": REPO / "hooks" / "post-stop-attribution.sh",
     "session-start": REPO / "hooks" / "session-start.sh",
 }
 
@@ -178,33 +177,6 @@ class TestAutoRecallHookGuard:
         subprocess.run(
             ["bash", str(HOOKS["auto-recall"])],
             input='{"session_id": "guard-test", "user_prompt": "hello world"}',
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env=env,
-        )
-        assert _no_files_created(tmp_path), "Hook must not create files when MEMEM_HOOK_DISABLE=1"
-
-
-class TestPostStopAttributionHookGuard:
-    def test_exits_zero_silently_when_disabled(self, tmp_path):
-        env = _base_env(tmp_path)
-        result = subprocess.run(
-            ["bash", str(HOOKS["post-stop-attribution"])],
-            input='{"session_id": "guard-test", "transcript_path": "/dev/null"}',
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env=env,
-        )
-        assert result.returncode == 0, f"Expected exit 0, got {result.returncode}: {result.stderr}"
-        assert result.stdout == "", f"Expected no stdout, got: {result.stdout!r}"
-
-    def test_no_side_effects_when_disabled(self, tmp_path):
-        env = _base_env(tmp_path)
-        subprocess.run(
-            ["bash", str(HOOKS["post-stop-attribution"])],
-            input='{"session_id": "guard-test", "transcript_path": "/dev/null"}',
             capture_output=True,
             text=True,
             timeout=10,

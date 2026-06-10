@@ -12,7 +12,6 @@ Use:
 """
 from __future__ import annotations
 
-import json
 import time
 from pathlib import Path
 from typing import Any
@@ -164,23 +163,3 @@ def format_replay_report(result: dict[str, Any]) -> str:
             if err:
                 lines.append(f"           error: {err}")
     return "\n".join(lines)
-
-
-def export_baseline(
-    *,
-    since_seconds: float | None = None,
-    output_path: Path | None = None,
-) -> int:
-    """Write captures to NDJSON. Returns count written.
-
-    If output_path is None, writes to stdout via the caller (we just return rows).
-    """
-    rows = load_captures(since_seconds=since_seconds)
-    if output_path is None:
-        return len(rows)  # caller does the printing
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as fh:
-        for row in rows:
-            fh.write(json.dumps(row, sort_keys=True))
-            fh.write("\n")
-    return len(rows)

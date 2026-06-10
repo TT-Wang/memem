@@ -1,9 +1,12 @@
 """Runtime capability detection + serialization.
 
 memem writes a small JSON file at ``~/.memem/.capabilities`` during the
-bootstrap shim (bootstrap.sh) and on every ``--doctor`` invocation. The rest
-of the package reads it to decide whether optional features (Haiku-powered
-assembly, smart recall) should run or fall back to a degraded mode.
+bootstrap shim (bootstrap.sh) and on every ``--doctor`` invocation.
+
+The capabilities file is written by ``write_capabilities()`` (called by
+--doctor/bootstrap) and is used by ``pretty_report()`` for diagnostic output.
+The package itself does NOT read this file at runtime — capability checks are
+done live (e.g. shutil.which) at the point of use.
 
 Schema (v1)::
 
@@ -18,9 +21,6 @@ Schema (v1)::
       "uv": true,
       "notes": []
     }
-
-``claude_cli=false`` means the ``claude`` binary is not on PATH and any
-Haiku-backed code path must degrade silently.
 """
 
 from __future__ import annotations
@@ -108,50 +108,6 @@ def write_capabilities(caps: dict[str, Any] | None = None) -> dict[str, Any]:
         os.fsync(fh.fileno())
     os.replace(tmp, CAPABILITIES_FILE)
     return caps
-
-
-def read_capabilities() -> dict[str, Any]:
-    """Return the cached capabilities, or an empty-but-valid dict if unavailable.
-
-    Unknown-state is modeled as ``{"schema_version": 0}`` — callers should
-    treat that as "assume degraded / run detect on next preflight".
-    """
-    if not CAPABILITIES_FILE.exists():
-        return {"schema_version": 0}
-    try:
-        data = json.loads(CAPABILITIES_FILE.read_text())
-        if not isinstance(data, dict):
-            return {"schema_version": 0}
-        return data
-    except (OSError, json.JSONDecodeError) as exc:
-        log.warning("capabilities file unreadable (%s); treating as degraded", exc)
-        return {"schema_version": 0}
-
-
-def assembly_available() -> bool:
-    """True when Haiku-backed context assembly can run (requires claude CLI)."""
-    caps = read_capabilities()
-    if caps.get("schema_version", 0) < SCHEMA_VERSION:
-        # Cache miss — probe live rather than degrading unconditionally
-        caps = detect_capabilities()
-    return bool(caps.get("claude_cli", False))
-
-
-def format_status_banner(memory_count: int, miner_running: bool) -> str:
-    """One-line status string suitable for the SessionStart banner."""
-    caps = read_capabilities()
-    miner_glyph = "✓" if miner_running else "✗"
-    assembly_glyph = "✓" if caps.get("claude_cli") else "⚠"
-    parts = [
-        f"[memem] {memory_count} memories",
-        f"miner {miner_glyph}",
-        f"assembly {assembly_glyph}",
-    ]
-    if not caps.get("claude_cli", True):
-        parts.append("(claude CLI missing — FTS-only)")
-    if not caps.get("writable_vault", True):
-        parts.append("(vault read-only!)")
-    return " · ".join(parts)
 
 
 def pretty_report(caps: dict[str, Any] | None = None) -> str:

@@ -18,8 +18,9 @@ import os
 import subprocess
 from datetime import UTC, datetime
 
+from memem.io_utils import atomic_write_text
 from memem.models import PLAYBOOK_DIR
-from memem.obsidian_store import _atomic_write, _obsidian_memories
+from memem.obsidian_store import _obsidian_memories
 from memem.security import scan_memory_content
 from memem.telemetry import _log_event
 
@@ -127,7 +128,7 @@ def _playbook_refine(project: str, force: bool = False) -> dict:
     if len(combined) < HAIKU_BYPASS_SIZE:
         final = combined + f"\n\n<!-- memem-source-hash:{src_hash} -->\n"
         PLAYBOOK_DIR.mkdir(parents=True, exist_ok=True)
-        _atomic_write(playbook_path, final)
+        atomic_write_text(playbook_path, final)
         _log_event("refine", project=project)
         return {"action": "written_raw", "count": len(memories)}
 
@@ -158,7 +159,7 @@ def _playbook_refine(project: str, force: bool = False) -> dict:
 
     final = refined + f"\n\n<!-- memem-source-hash:{src_hash} -->\n"
     PLAYBOOK_DIR.mkdir(parents=True, exist_ok=True)
-    _atomic_write(playbook_path, final)
+    atomic_write_text(playbook_path, final)
     _log_event("refine", project=project)
     return {"action": "written_refined", "count": len(memories)}
 

@@ -100,56 +100,20 @@ except Exception:
 session_id = str(hook.get("session_id", "") or "")
 cwd = str(hook.get("cwd") or os.environ.get("PWD") or os.getcwd())
 scope = detect_scope(cwd)
-query = "Prime the current working state for this session"
-if scope != "default":
-    query += f" in project {scope}"
-
-environment = {
-    "session_id": session_id,
-    "task_mode": "session_start",
-    "repo_path": cwd,
-    "cwd": cwd,
-    "scope_id": scope,
-    "prompt_budget_chars": parse_budget(),
-}
-
-try:
-    from memem.active_slice_engine import generate_session_start_slice  # noqa: F401
-
-    content = generate_session_start_slice(
-        scope_id=scope,
-        session_id=session_id,
-        memem_dir=str(memem_dir),
-    )
-except ImportError:
-    # v2.0.0: active_slice_engine deleted — session-start emits empty context.
-    # The UserPromptSubmit hook (auto-recall.sh) handles per-prompt retrieval.
-    content = ""
-except Exception:
-    content = ""
+# session-start context = episode index below; the per-prompt slice engine was removed in v2.0.0
+content = ""
 
 # Episode catalog (v2.4.0) — list recent episodic memories so LLM
 # knows what stories it can pull via memory_get(id).
 try:
     from memem.obsidian_store import _obsidian_memories
     all_mems = _obsidian_memories()
-    # Sort all memories by created desc
-    all_mems_sorted = sorted(
-        all_mems,
+    # Filter strictly to episodic memories, sort by created desc, cap at 25
+    episodic = sorted(
+        [m for m in all_mems if "type:episodic" in (m.get("domain_tags") or [])],
         key=lambda m: m.get("created_at") or m.get("created") or "",
         reverse=True,
-    )
-    # Prefer type:episodic, then fill to 50 with most-recent of any type
-    episodic = [m for m in all_mems_sorted
-                if "type:episodic" in (m.get("domain_tags") or [])]
-    if len(episodic) < 50:
-        seen_ids = {m["id"] for m in episodic}
-        for m in all_mems_sorted:
-            if m["id"] not in seen_ids:
-                episodic.append(m)
-                if len(episodic) >= 50:
-                    break
-    episodic = episodic[:50]
+    )[:25]
     if episodic:
         cat_lines = ["", "## Episode index"]
         for m in episodic:
@@ -205,6 +169,23 @@ if [ -f "$MEMEM_STATE_DIR/.miner-opted-in" ]; then
         SID=$(basename "$jsonl" .jsonl)
         # Skip if already mined
         grep -Fxq "$SID" "$MINED_LIST" 2>/dev/null && continue
+        # Skip mining artifacts: headless `claude -p` transcripts spawned by mine_delta/mining.
+        # Detection = marker anywhere in the first 20 raw JSONL lines AND a small file
+        # (headless calls produce only a handful of JSONL records — even a huge embedded
+        # prompt lives inside ONE user line). The line-count conjunct protects real
+        # conversations that merely QUOTE a marker phrase: a falsely-skipped session would
+        # be PERMANENTLY excluded from auto-mining via the zombie guard below. Residual
+        # risk: a <=30-line real session quoting a marker is skipped — recoverable via
+        # `python3 -m memem.server --mine-session <id>`.
+        # Note: cli.py --purge-contaminated additionally checks '<task-notification' —
+        # intentional asymmetry: that marker identifies already-saved vault memories whose
+        # episode titles inherited task-notification text, not transcript-level artifacts.
+        if head -20 "$jsonl" 2>/dev/null | grep -qm1 -F -e '=== BEGIN CONVERSATION ===' -e 'Below is a coding conversation' \
+           && [ "$(wc -l < "$jsonl" 2>/dev/null || echo 0)" -le 30 ]; then
+            # Zombie-session guard: append to mined list so sweep ignores it on future SessionStart.
+            grep -Fxq "$SID" "$MINED_LIST" 2>/dev/null || printf '%s\n' "$SID" >> "$MINED_LIST"
+            continue
+        fi
         # Spawn detached
         setsid nohup "${MEMEM_PYTHON:-python3}" -m memem.mine_delta --session-id "$SID" --transcript-path "$jsonl" </dev/null >/dev/null 2>&1 &
         disown 2>/dev/null || true

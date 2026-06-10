@@ -12,11 +12,6 @@ from pathlib import Path
 log = logging.getLogger("memem-obsidian")
 
 
-# Module-level constant — read once at import. Tests that need a different mode
-# should set MEMEM_FRONTMATTER_STRICT before importing (or reload this module).
-_FRONTMATTER_STRICT_MODE = os.environ.get("MEMEM_FRONTMATTER_STRICT", "quarantine").lower()
-
-
 def _handle_malformed_frontmatter(md_file: Path, reason: str) -> None:
     """Dispatch a malformed-frontmatter file per MEMEM_FRONTMATTER_STRICT.
 

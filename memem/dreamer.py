@@ -41,7 +41,7 @@ DREAMS_DIR = MEMEM_DIR / "dreams"
 LOW_ATTRIBUTION_THRESHOLD = 0.2
 CLUSTER_SIMILARITY_THRESHOLD = 0.7
 CLUSTER_MIN_SIZE = 5
-SONNET_MODEL = "claude-sonnet-4-7"  # strong offline model
+_HAIKU_MODEL_ALIAS = "haiku"  # model alias consistent with consolidation.py + mining.py
 
 
 def _is_protected(memory: dict) -> bool:
@@ -56,7 +56,17 @@ def _is_protected(memory: dict) -> bool:
 
 def _recent_attribution(memory_id: str, sample_size: int = 20) -> float | None:
     """Mean aggregate attribution score over the most recent N events for this memory.
-    Returns None if no events yet."""
+    Returns None if no events yet.
+
+    v2.5.0 NOTE: the only writer of 'slice_attribution' events
+    (telemetry.log_slice_attribution) was deleted with the dead attribution
+    pipeline, so this currently ALWAYS returns None and the
+    "still-being-used → don't demote" guard in find_demotion_candidates is
+    inert: demotion candidates are decided by decay strength alone. Retained
+    because the planned citation-based attribution (recall_log `cited` events)
+    will repoint this reader at a live signal. Dreamer remains manual-only
+    with dry-run default, so the inert guard is safe in the interim.
+    """
     from memem.models import MEMEM_DIR
     events_path = MEMEM_DIR / "events.jsonl"
     if not events_path.exists():
@@ -267,7 +277,7 @@ def find_cluster_summaries(memories: list[dict]) -> list[dict]:
 
             try:
                 result = subprocess.run(
-                    ["claude", "-p", "--model", SONNET_MODEL],
+                    ["claude", "-p", "--model", _HAIKU_MODEL_ALIAS, "--tools", ""],
                     input=prompt,
                     capture_output=True, text=True, timeout=60,
                     start_new_session=True,  # signal isolation; matches contradiction subprocess
@@ -360,7 +370,7 @@ def _judge_contradiction_with_sonnet(pair: dict) -> dict | None:
     )
     try:
         result = subprocess.run(
-            ["claude", "-p", "--model", SONNET_MODEL, "--tools", ""],
+            ["claude", "-p", "--model", _HAIKU_MODEL_ALIAS, "--tools", ""],
             input=prompt,
             capture_output=True, text=True, timeout=60,
             start_new_session=True,

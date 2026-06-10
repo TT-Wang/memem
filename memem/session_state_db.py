@@ -12,12 +12,16 @@ Why no fcntl:
     at the same time). Let SQLite handle concurrency.
 """
 
+import logging
 import shutil
 import sqlite3
 import sys
 import threading
 import time
+from contextlib import closing
 from pathlib import Path
+
+log = logging.getLogger("memem-session-state-db")
 
 from memem.models import MEMEM_DIR, _now
 from memem.session_state import MINER_STATE_VERSION
@@ -108,27 +112,28 @@ def _ensure_db(db_path: Path) -> None:
             return
 
         # Create the DB and table.
-        with _connect(db_path) as conn:
-            conn.execute(_CREATE_TABLE_SQL)
+        with closing(_connect(db_path)) as conn:
+            with conn:
+                conn.execute(_CREATE_TABLE_SQL)
 
-            # Add offset_bytes column to existing DBs that predate this column.
-            try:
-                conn.execute(_ADD_OFFSET_BYTES_SQL)
-            except sqlite3.OperationalError:
-                # "duplicate column name: offset_bytes" — already migrated
-                pass
+                # Add offset_bytes column to existing DBs that predate this column.
+                try:
+                    conn.execute(_ADD_OFFSET_BYTES_SQL)
+                except sqlite3.OperationalError:
+                    # "duplicate column name: offset_bytes" — already migrated
+                    pass
 
-            # Add timeout_failures column to existing DBs that predate v1.7.
-            try:
-                conn.execute(_ADD_TIMEOUT_FAILURES_SQL)
-            except sqlite3.OperationalError:
-                # "duplicate column name: timeout_failures" — already migrated
-                pass
+                # Add timeout_failures column to existing DBs that predate v1.7.
+                try:
+                    conn.execute(_ADD_TIMEOUT_FAILURES_SQL)
+                except sqlite3.OperationalError:
+                    # "duplicate column name: timeout_failures" — already migrated
+                    pass
 
-            # Check for an existing JSONL to migrate.
-            jsonl_path = db_path.parent / ".mined_sessions"
-            if jsonl_path.exists():
-                _migrate_jsonl(conn, jsonl_path)
+                # Check for an existing JSONL to migrate.
+                jsonl_path = db_path.parent / ".mined_sessions"
+                if jsonl_path.exists():
+                    _migrate_jsonl(conn, jsonl_path)
 
         # Mark as initialized so the fast path fires on subsequent calls.
         _INITIALIZED.add(key)
@@ -216,7 +221,7 @@ def load_mined_session_state(db_path: Path | None = None) -> dict[str, dict]:
         db_path = DB_PATH
     _ensure_db(db_path)
     try:
-        with _connect(db_path) as conn:
+        with closing(_connect(db_path)) as conn:
             rows = conn.execute(
                 "SELECT session_id, status, attempts, mtime_ns, size, version,"
                 "       updated_at, message, offset_bytes, timeout_failures FROM mined_sessions"
@@ -254,41 +259,42 @@ def save_mined_session_state(
         db_path = DB_PATH
     _ensure_db(db_path)
     try:
-        with _connect(db_path) as conn:
-            conn.execute("DELETE FROM mined_sessions;")
-            rows = []
-            for session_id, state in states.items():
-                rows.append(
-                    {
-                        "session_id": session_id,
-                        "status": state.get("status", ""),
-                        "attempts": int(state.get("attempts", 0)),
-                        "last_error": state.get("message", "")[:500],
-                        "mtime_ns": int(state.get("mtime_ns", 0)),
-                        "size": int(state.get("size", 0)),
-                        "version": str(state.get("version", MINER_STATE_VERSION)),
-                        "updated_at": str(state.get("updated_at", _now())),
-                        "message": state.get("message", "")[:500],
-                        "offset_bytes": int(state.get("offset_bytes", 0)),
-                        "timeout_failures": int(state.get("timeout_failures", 0)),
-                    }
-                )
-            if rows:
-                conn.executemany(
-                    """
-                    INSERT OR REPLACE INTO mined_sessions
-                        (session_id, status, attempts, last_error,
-                         mtime_ns, size, version, updated_at, message, offset_bytes,
-                         timeout_failures)
-                    VALUES
-                        (:session_id, :status, :attempts, :last_error,
-                         :mtime_ns, :size, :version, :updated_at, :message, :offset_bytes,
-                         :timeout_failures)
-                    """,
-                    rows,
-                )
-    except sqlite3.Error:
-        pass
+        with closing(_connect(db_path)) as conn:
+            with conn:
+                conn.execute("DELETE FROM mined_sessions;")
+                rows = []
+                for session_id, state in states.items():
+                    rows.append(
+                        {
+                            "session_id": session_id,
+                            "status": state.get("status", ""),
+                            "attempts": int(state.get("attempts", 0)),
+                            "last_error": state.get("message", "")[:500],
+                            "mtime_ns": int(state.get("mtime_ns", 0)),
+                            "size": int(state.get("size", 0)),
+                            "version": str(state.get("version", MINER_STATE_VERSION)),
+                            "updated_at": str(state.get("updated_at", _now())),
+                            "message": state.get("message", "")[:500],
+                            "offset_bytes": int(state.get("offset_bytes", 0)),
+                            "timeout_failures": int(state.get("timeout_failures", 0)),
+                        }
+                    )
+                if rows:
+                    conn.executemany(
+                        """
+                        INSERT OR REPLACE INTO mined_sessions
+                            (session_id, status, attempts, last_error,
+                             mtime_ns, size, version, updated_at, message, offset_bytes,
+                             timeout_failures)
+                        VALUES
+                            (:session_id, :status, :attempts, :last_error,
+                             :mtime_ns, :size, :version, :updated_at, :message, :offset_bytes,
+                             :timeout_failures)
+                        """,
+                        rows,
+                    )
+    except sqlite3.Error as exc:
+        log.warning("save_mined_session_state failed: %s", exc)
 
 
 def update_session_state(
@@ -330,20 +336,21 @@ def update_session_state(
         "timeout_failures": int(timeout_failures),
     }
 
-    with _connect(db_path) as conn:
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO mined_sessions
-                (session_id, status, attempts, last_error,
-                 mtime_ns, size, version, updated_at, message, offset_bytes,
-                 timeout_failures)
-            VALUES
-                (:session_id, :status, :attempts, :last_error,
-                 :mtime_ns, :size, :version, :updated_at, :message, :offset_bytes,
-                 :timeout_failures)
-            """,
-            row,
-        )
+    with closing(_connect(db_path)) as conn:
+        with conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO mined_sessions
+                    (session_id, status, attempts, last_error,
+                     mtime_ns, size, version, updated_at, message, offset_bytes,
+                     timeout_failures)
+                VALUES
+                    (:session_id, :status, :attempts, :last_error,
+                     :mtime_ns, :size, :version, :updated_at, :message, :offset_bytes,
+                     :timeout_failures)
+                """,
+                row,
+            )
 
     return {
         "session_id": session_id,

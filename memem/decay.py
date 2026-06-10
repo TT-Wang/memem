@@ -7,6 +7,10 @@ reinforcement. L0 memories and decay_immune-flagged memories are exempt.
 This module is COMPUTE + READ only. It produces 'should_demote' suggestions
 that m4 dreamer may execute. m3 never mutates layer assignments directly.
 
+Access counts are read from the telemetry sidecar (~/.memem/telemetry.json),
+NOT from the frontmatter access_count field. The frontmatter field is
+initialized to 0 and is never incremented; real counts live in the sidecar.
+
 References:
   - MemoryBank (arXiv 2305.10250): exponential strength + access reinforcement
   - Neural Howlround / RISM (arXiv 2504.07992): 3-phase dynamic attenuation
@@ -19,6 +23,7 @@ import math
 from datetime import UTC, datetime
 
 from memem.models import DEFAULT_LAYER, LAYER_L0, parse_iso_dt
+from memem.telemetry import _get_telemetry
 
 # Tunables — keep conservative; the dreamer (m4) will rarely act on borderline scores
 DECAY_HALF_LIFE_DAYS = 30.0     # base — a memory accessed once and then ignored loses half its strength in 30 days
@@ -57,6 +62,7 @@ def compute_decay_factor(access_count: int) -> float:
         # phi-function (golden-ratio inspired smooth damping)
         x = (n - PHI_DAMPING_KNEE) / max(1, LOG_DAMPING_KNEE - PHI_DAMPING_KNEE)
         return 1.0 - 0.5 * x  # 1.0 at knee, 0.5 at log knee
+    # KNOWN: non-monotonic at phase boundary, recalibration deferred to v2.6
     # log dampening — heavy reinforcement is heavily damped
     return 0.5 / (1.0 + math.log1p(n - LOG_DAMPING_KNEE))
 
@@ -67,12 +73,26 @@ def compute_strength(memory: dict, now: datetime | None = None) -> float:
     S = importance_weight * exp(-hours_since_access / (HALF_LIFE * effective_m))
     where effective_m = 1 + ACCESS_REINFORCEMENT * access_count * damping_factor
 
+    Access counts and last-accessed timestamp are read from the telemetry
+    sidecar (~/.memem/telemetry.json), not from frontmatter fields.
+
     Returns float in (0, 1+importance_bonus]. Higher = stronger / fresher.
     """
     now = now or datetime.now(UTC)
-    access_count = int(memory.get("access_count", 0) or 0)
+    mem_id = memory.get("id", "")
+    tel = _get_telemetry(mem_id)
+    access_count = int(tel.get("access_count", 0) or 0)
     importance = float(memory.get("importance", 3) or 3)
-    last_access = memory.get("last_accessed_at") or memory.get("created_at", "")
+    # Use telemetry last_accessed first; fall back to frontmatter fields then
+    # created_at. `updated_at` is in the chain so decay and the recall.py
+    # scoring paths (which fall back to updated_at) compute the same
+    # effective age for the same memory.
+    last_access = (
+        tel.get("last_accessed")
+        or memory.get("last_accessed_at")
+        or memory.get("updated_at")
+        or memory.get("created_at", "")
+    )
 
     hours = _hours_since(last_access, now)
     half_life_hours = DECAY_HALF_LIFE_DAYS * 24.0

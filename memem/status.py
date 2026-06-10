@@ -28,15 +28,6 @@ def _format_age(seconds: int) -> str:
         return f"{hours}h {minutes}m"
 
 
-def _pid_alive(pid: int) -> bool:
-    """Return True if pid is alive (kill -0)."""
-    try:
-        os.kill(pid, 0)
-        return True
-    except (ProcessLookupError, OSError):
-        return False
-
-
 # ---------------------------------------------------------------------------
 # [1] Recent mining activity
 # ---------------------------------------------------------------------------

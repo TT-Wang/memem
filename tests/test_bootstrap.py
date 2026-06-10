@@ -158,30 +158,7 @@ def test_capabilities_module_roundtrip(tmp_path, monkeypatch):
     assert caps["writable_vault"] is True
 
     capabilities.write_capabilities(caps)
-    read_back = capabilities.read_capabilities()
-    assert read_back["schema_version"] == 1
-    assert read_back["writable_state_dir"] is True
 
     report = capabilities.pretty_report(caps)
     assert "memem Doctor" in report
     assert "RESULT:" in report
-
-
-def test_format_status_banner(tmp_path, monkeypatch):
-    """Banner must include memory count, miner glyph, assembly glyph."""
-    monkeypatch.setenv("MEMEM_DIR", str(tmp_path / ".memem"))
-    monkeypatch.setenv("MEMEM_OBSIDIAN_VAULT", str(tmp_path / "vault"))
-    (tmp_path / "vault" / "memem" / "memories").mkdir(parents=True)
-
-    import importlib
-
-    from memem import capabilities, models
-    importlib.reload(models)
-    importlib.reload(capabilities)
-
-    capabilities.write_capabilities()
-    banner = capabilities.format_status_banner(memory_count=42, miner_running=True)
-    assert "[memem]" in banner
-    assert "42 memories" in banner
-    assert "miner ✓" in banner
-    assert "assembly" in banner

@@ -33,7 +33,7 @@ SETTLE_SECONDS = int(_env("MEMEM_MINER_SETTLE_SECONDS", "CORTEX_MINER_SETTLE_SEC
 # was added. Default 5 = MAX_SESSION_FAILURES (3) + headroom for transient fails
 # that recovered before the file went live again.
 HARD_RETRY_CAP = int(_env("MEMEM_MINER_HARD_RETRY_CAP", default="5"))
-DEFAULT_EXCLUDED_SESSION_PROJECTS = ("-home-claude-user-lexie",)
+DEFAULT_EXCLUDED_SESSION_PROJECTS = ()
 
 
 def _excluded_session_projects() -> set[str]:
@@ -132,23 +132,6 @@ def update_session_state(path: Path, status: str, message: str = "", attempts: i
     return session_state_db.update_session_state(
         path, status, message=message, attempts=attempts, offset_bytes=offset_bytes,
         timeout_failures=timeout_failures, db_path=_db_path()
-    )
-
-
-def session_is_complete(path: Path, state: dict | None) -> bool:
-    if not state or state.get("status") != STATUS_COMPLETE:
-        return False
-    if str(state.get("version", "")) != MINER_STATE_VERSION:
-        return False
-
-    try:
-        fingerprint = session_fingerprint(path)
-    except OSError:
-        return False
-
-    return (
-        state.get("mtime_ns") == fingerprint["mtime_ns"]
-        and state.get("size") == fingerprint["size"]
     )
 
 
@@ -262,7 +245,6 @@ def clear_installed_at():
 #   - "EXISTING:"                          -> mining._merge_memories
 #   - "You were asked to extract memories" -> mining corrective retry
 #   - "QUERY: "                            -> assembly.context_assemble (explicit secondary projection)
-#   - "Review these memory entries"        -> assembly._consolidate_project
 #   - "USER MESSAGE:\n"                    -> recall.smart_recall
 #   - "# <project> — Project Playbook"     -> playbook._playbook_refine
 _MEMEM_SUBPROCESS_PROMPT_PREFIXES = (
@@ -270,7 +252,6 @@ _MEMEM_SUBPROCESS_PROMPT_PREFIXES = (
     "EXISTING:",
     "You were asked to extract memories",
     "QUERY: ",
-    "Review these memory entries",
     "USER MESSAGE:\n",
 )
 
