@@ -223,8 +223,29 @@ class TestEpisodeFailureDoesntBreakRun:
 
         monkeypatch.setattr(md, "extract_from_text", _fake_extract)
 
-        # Make _emit_session_episode raise an exception
-        def _raising_emit(session_id, turns, first_user_msg):
+        # Patch the reconcile subprocess with a canned ADD response — without
+        # this the test makes a LIVE Haiku call whose op routing (e.g. PROFILE)
+        # is nondeterministic and can route the candidate away from the vault.
+        import subprocess as _subprocess
+        original_run = _subprocess.run
+
+        def _fake_run(cmd, **kwargs):
+            if "--system-prompt" in cmd and md._HAIKU_RECONCILE_SYSTEM in cmd:
+                class FakeResult:
+                    returncode = 0
+                    stdout = ('[{"index": 0, "op": "ADD", "target": null, '
+                              '"content": null, "reason": "new info"}]')
+                    stderr = ""
+                return FakeResult()
+            return original_run(cmd, **kwargs)
+
+        monkeypatch.setattr(_subprocess, "run", _fake_run)
+        monkeypatch.setattr(md.subprocess, "run", _fake_run)
+
+        # Make _emit_session_episode raise an exception. Signature-proof:
+        # accept anything so future kwargs (e.g. transcript_path) can't make
+        # this mock silently mismatch the call site.
+        def _raising_emit(*args, **kwargs):
             raise RuntimeError("Simulated episode emission failure")
 
         monkeypatch.setattr(md, "_emit_session_episode", _raising_emit)

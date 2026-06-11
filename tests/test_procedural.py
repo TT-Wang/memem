@@ -1,230 +1,294 @@
-"""Tests for M-1: procedural memory layer (queued instruction rewrites)."""
+"""Tests for D3: procedural memory type.
+
+Covers:
+1. _mine_one_chunk validation: kind passes through only for 'procedural'
+2. mine_delta tags candidates type:procedural in reconcile-ADD path
+3. mine_delta tags candidates type:procedural in fallback path
+4. Imperative content lands intact
+"""
 
 from __future__ import annotations
 
-import importlib
-from datetime import UTC, datetime
-from typing import Any
+import json
 from unittest import mock
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Test 1: _mine_one_chunk passes through kind=='procedural' only
 # ---------------------------------------------------------------------------
 
+def test_mine_one_chunk_passes_procedural_kind(monkeypatch):
+    """kind=='procedural' must be preserved; all other kinds must be dropped."""
+    import memem.mining as mining_mod
 
-def _make_procedural_mem(
-    title: str = "Instruction suggestion: do not add comments",
-    reason: str = "User said: don't add comments unless asked",
-    current_text: str | None = "Add inline comments to complex code",
-    proposed_text: str = "Do not add comments unless the user explicitly asks",
-    status: str = "pending_review",
-    created_iso: str = "",
-) -> dict[str, Any]:
-    """Build a synthetic procedural-suggestion memory dict."""
-    now_str = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    if current_text:
-        body = (
-            f"## Instruction rewrite suggestion\n\n"
-            f"**Reason:** {reason}\n\n"
-            f"**Current:**\n```\n{current_text}\n```\n\n"
-            f"**Proposed:**\n```\n{proposed_text}\n```"
-        )
-    else:
-        body = (
-            f"## New instruction suggestion\n\n"
-            f"**Reason:** {reason}\n\n"
-            f"**Proposed:**\n```\n{proposed_text}\n```"
-        )
-    mem_id = f"proc-{title.replace(' ', '-')[:12]}-{'a' * 8}"
-    return {
-        "id": mem_id,
-        "title": title,
-        "essence": body,
-        "full_record": body,
-        "domain_tags": ["procedural", "suggestion", "pending", "kind:procedural-suggestion"],
-        "project": "general",
-        "source_type": "mined",
-        "source_session": "test1234",
-        "importance": 4,
-        "layer": 1,
-        "status": status,
-        "created_at": created_iso or now_str,
-        "updated_at": now_str,
-        "created_iso": created_iso or now_str,
-        "schema_version": 1,
-        "invalid_at": None,
-        "replaced_by": None,
-        "decay_immune": False,
-        "access_count": 0,
-        "last_accessed_at": now_str,
-        "valid_to": "",
-        "valid_at": now_str,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Test 1: mine_session emits a procedural suggestion when correction is found
-# (Skipped: mine_session and helpers _save_memory/_make_memory/_find_best_match
-# were removed from mining.py in the v2.1.0 slim refactor; procedural suggestion
-# logic now lives in mine_delta.py which uses a different calling convention.)
-# ---------------------------------------------------------------------------
-
-import pytest
-
-
-@pytest.mark.skip(reason="mine_session removed from mining.py in v2.1.0 slim refactor")
-def test_mine_session_emits_procedural_suggestion(tmp_vault, tmp_cortex_dir, tmp_path, monkeypatch):
-    """When transcript has a clear user correction and CLAUDE.md exists,
-    a kind:procedural-suggestion memory should be saved."""
-    import json as _json
-
-    import memem.obsidian_store as obs
-    importlib.reload(obs)
-
-    # Create a CLAUDE.md in the session cwd
-    project_dir = tmp_path / "myproject"
-    project_dir.mkdir()
-    claude_md = project_dir / "CLAUDE.md"
-    claude_md.write_text("# Instructions\n\nAdd inline comments to complex code.\n", encoding="utf-8")
-
-    # Create a synthetic JSONL session with a correction message
-    session_file = tmp_path / "sessions" / "abc12345.jsonl"
-    session_file.parent.mkdir()
-    session_file.write_text(
-        "\n".join([
-            _json.dumps({"type": "user", "cwd": str(project_dir), "message": {"content": "don't add comments unless asked"}}),
-            _json.dumps({"type": "assistant", "cwd": str(project_dir), "message": {"content": "understood"}}),
-        ]),
-        encoding="utf-8",
-    )
-
-    # The haiku system prompt returns a rewrite suggestion for the knowledge pass
-    knowledge_response = _json.dumps([
-        {"title": "No inline comments by default", "project": "myproject", "content": "Don't add comments unless asked.", "importance": 4}
+    haiku_response = json.dumps([
+        {
+            "title": "Always X rule",
+            "project": "general",
+            "content": "Always confirm before overwriting files.",
+            "importance": 4,
+            "kind": "procedural",
+        },
+        {
+            "title": "Some factual memory",
+            "project": "general",
+            "content": "The project uses Python 3.12.",
+            "importance": 3,
+            "kind": "episodic",  # not procedural — must be dropped
+        },
+        {
+            "title": "Another fact",
+            "project": "general",
+            "content": "Tests live in tests/ directory.",
+            "importance": 2,
+            # no kind field at all
+        },
+        {
+            "title": "Bad kind value",
+            "project": "general",
+            "content": "Never skip linting.",
+            "importance": 3,
+            "kind": "PROCEDURAL",  # wrong case — must be dropped
+        },
     ])
 
-    # Procedural haiku returns one rewrite
-    procedural_response = _json.dumps([
+    fake_result = mock.Mock(returncode=0, stdout=haiku_response, stderr="")
+    monkeypatch.setattr("memem.mining.subprocess.run", lambda *a, **kw: fake_result)
+
+    results = mining_mod._mine_one_chunk(["User: hello\nAssistant: world"])
+
+    assert len(results) == 4, f"Expected 4 results, got {len(results)}"
+
+    # First: kind==procedural should pass through
+    assert results[0].get("kind") == "procedural", (
+        f"Expected kind='procedural', got {results[0].get('kind')!r}"
+    )
+    assert results[0]["content"] == "Always confirm before overwriting files."
+
+    # Second: kind=='episodic' should be dropped (not procedural)
+    assert "kind" not in results[1], (
+        f"Non-procedural kind must be dropped, got {results[1].get('kind')!r}"
+    )
+
+    # Third: no kind field — should have no kind
+    assert "kind" not in results[2], (
+        f"Missing kind must not appear in result, got {results[2].get('kind')!r}"
+    )
+
+    # Fourth: wrong-case 'PROCEDURAL' must be dropped
+    assert "kind" not in results[3], (
+        f"'PROCEDURAL' (wrong case) must be dropped, got {results[3].get('kind')!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 2: mine_delta reconcile-ADD path tags type:procedural
+# ---------------------------------------------------------------------------
+
+def test_reconcile_add_prepends_type_procedural(tmp_vault, tmp_cortex_dir, monkeypatch):
+    """When reconcile op is ADD and candidate has kind=='procedural',
+    domain_tags must include 'type:procedural' in the saved memory."""
+    import memem.mine_delta as md
+
+    # Candidate with kind='procedural'
+    candidate = {
+        "title": "Always use absolute paths in Bash",
+        "content": "Always use absolute paths in Bash tool calls to avoid cwd ambiguity.",
+        "project": "general",
+        "importance": 4,
+        "kind": "procedural",
+        "keys": [],
+    }
+
+    # Mock reconcile Haiku call to return ADD for the single candidate
+    haiku_response = json.dumps([
+        {"index": 0, "op": "ADD", "target": None, "content": None,
+         "profile": None, "section": None, "line": None, "reason": "new rule"}
+    ])
+    haiku_result = mock.Mock(returncode=0, stdout=haiku_response, stderr="")
+
+    saved_mems: list[dict] = []
+
+    def fake_save_memory(mem: dict) -> None:
+        saved_mems.append(mem)
+
+    # Pre-filter score must be < 0.95 so it survives to Haiku
+    monkeypatch.setattr("memem.mine_delta._find_best_match", lambda *a, **kw: (None, 0.0))
+    monkeypatch.setattr("memem.mine_delta._ngram_search_candidates", lambda *a, **kw: [])
+    monkeypatch.setattr("memem.mine_delta._find_memory", lambda *a, **kw: None)
+    monkeypatch.setattr("memem.mine_delta._find_memory_unambiguous", lambda *a, **kw: None)
+    monkeypatch.setattr("memem.mine_delta._save_memory", fake_save_memory)
+    monkeypatch.setattr("memem.mine_delta.subprocess.run", lambda *a, **kw: haiku_result)
+    monkeypatch.setattr("memem.mine_delta._stable_mined_memory_id",
+                        lambda *a, **kw: "aabbccdd-0000-0000-0000-000000000001")
+    monkeypatch.setattr("memem.mine_delta._log_event", lambda *a, **kw: None)
+
+    saved_list, written, _ = md._reconcile_candidates([candidate], session_id="testsess01")
+
+    assert written == 1, f"Expected 1 memory written, got {written}"
+    assert len(saved_mems) == 1, f"Expected 1 saved mem, got {len(saved_mems)}"
+    saved_tags = saved_mems[0].get("domain_tags") or []
+    assert "type:procedural" in saved_tags, (
+        f"Expected 'type:procedural' in domain_tags, got {saved_tags}"
+    )
+    assert saved_tags[0] == "type:procedural", (
+        f"Expected 'type:procedural' to be first tag, got {saved_tags}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 3: mine_delta fallback path tags type:procedural
+# ---------------------------------------------------------------------------
+
+def test_fallback_add_prepends_type_procedural(tmp_vault, tmp_cortex_dir, monkeypatch):
+    """When fallback ADD-all runs and candidate has kind=='procedural',
+    domain_tags in the saved memory must include 'type:procedural'."""
+    import memem.mine_delta as md
+
+    candidate = {
+        "title": "Never run git push --force on main",
+        "content": "Never run git push --force on main branch without explicit user request.",
+        "project": "general",
+        "importance": 5,
+        "kind": "procedural",
+        "keys": [],
+    }
+
+    saved_mems: list[dict] = []
+
+    def fake_save_memory(mem: dict) -> None:
+        saved_mems.append(mem)
+
+    monkeypatch.setattr("memem.mine_delta._save_memory", fake_save_memory)
+    monkeypatch.setattr("memem.mine_delta._log_event", lambda *a, **kw: None)
+
+    written = md._fallback_add_all([candidate], session_id="testsess02")
+
+    assert written == 1, f"Expected 1 memory written, got {written}"
+    assert len(saved_mems) == 1
+    saved_tags = saved_mems[0].get("domain_tags") or []
+    assert "type:procedural" in saved_tags, (
+        f"Expected 'type:procedural' in domain_tags, got {saved_tags}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 4: type:procedural NOT added when kind is absent or non-procedural
+# ---------------------------------------------------------------------------
+
+def test_fallback_does_not_add_procedural_tag_for_normal_memory(
+    tmp_vault, tmp_cortex_dir, monkeypatch
+):
+    """A candidate without kind=='procedural' must NOT get a type:procedural tag."""
+    import memem.mine_delta as md
+
+    candidate_normal = {
+        "title": "Project uses SQLite",
+        "content": "The project uses SQLite for the search index.",
+        "project": "general",
+        "importance": 3,
+        # No kind field
+        "keys": [],
+    }
+    candidate_wrong_kind = {
+        "title": "Some episodic note",
+        "content": "The user worked on auth today.",
+        "project": "general",
+        "importance": 2,
+        "kind": "episodic",  # not procedural
+        "keys": [],
+    }
+
+    saved_mems: list[dict] = []
+
+    def fake_save_memory(mem: dict) -> None:
+        saved_mems.append(mem)
+
+    monkeypatch.setattr("memem.mine_delta._save_memory", fake_save_memory)
+    monkeypatch.setattr("memem.mine_delta._log_event", lambda *a, **kw: None)
+
+    written = md._fallback_add_all(
+        [candidate_normal, candidate_wrong_kind], session_id="testsess03"
+    )
+
+    assert written == 2
+    for mem in saved_mems:
+        tags = mem.get("domain_tags") or []
+        assert "type:procedural" not in tags, (
+            f"type:procedural must not appear in non-procedural memory, got {tags}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Test 5: Imperative content lands intact through validation
+# ---------------------------------------------------------------------------
+
+def test_imperative_content_passes_through_validation(monkeypatch):
+    """Imperative procedural content survives _mine_one_chunk validation unchanged."""
+    import memem.mining as mining_mod
+
+    imperative_rule = "Always quote file paths that contain spaces with double quotes."
+    haiku_response = json.dumps([
         {
-            "current_text": "Add inline comments to complex code.",
-            "proposed_text": "Do not add inline comments unless the user explicitly asks.",
-            "reason": "User explicitly said: don't add comments unless asked.",
+            "title": "Quote paths with spaces",
+            "project": "general",
+            "content": imperative_rule,
+            "importance": 4,
+            "kind": "procedural",
         }
     ])
 
-    saved_memories: list[dict] = []
+    fake_result = mock.Mock(returncode=0, stdout=haiku_response, stderr="")
+    monkeypatch.setattr("memem.mining.subprocess.run", lambda *a, **kw: fake_result)
 
-    def fake_save_memory(mem: dict) -> None:
-        saved_memories.append(mem)
+    results = mining_mod._mine_one_chunk(["User: what should I do?\nAssistant: use quotes"])
 
-    def fake_run(cmd, input="", **kwargs):  # noqa: A002
-        # Return appropriate response based on prompt content
-        if "CURRENT INSTRUCTIONS" in (input or ""):
-            # Procedural pass
-            return mock.Mock(returncode=0, stdout=procedural_response, stderr="")
-        else:
-            # Knowledge extraction pass
-            return mock.Mock(returncode=0, stdout=knowledge_response, stderr="")
-
-    monkeypatch.setattr("memem.mining.subprocess.run", fake_run)
-    monkeypatch.setattr("memem.mining._save_memory", fake_save_memory)
-    monkeypatch.setattr("memem.mining._make_memory", obs._make_memory)
-    monkeypatch.setattr("memem.mining._find_best_match", lambda *a, **kw: (None, 0.0))
-    monkeypatch.setattr("memem.session_state.load_mined_session_state", lambda: {})
-    monkeypatch.setattr("memem.session_state.session_is_terminal", lambda p, s: False)  # session_is_complete deleted in v2.5.0
-    monkeypatch.setattr("memem.session_state.update_session_state", lambda *a, **kw: None)
-    monkeypatch.setattr("memem.mining._generate_index", lambda: None)
-    monkeypatch.setattr("memem.mining._obsidian_memories", lambda: [])
-    monkeypatch.setattr("memem.mining._deprecate_memory", lambda *a, **kw: None)
-
-    from memem.mining import mine_session
-
-    mine_session(str(session_file))
-
-    # At least one procedural-suggestion memory should be saved
-    procedural_mems = [
-        m for m in saved_memories
-        if "kind:procedural-suggestion" in (m.get("domain_tags") or [])
-    ]
-    assert len(procedural_mems) >= 1, (
-        f"Expected at least 1 procedural-suggestion memory, got {len(procedural_mems)}. "
-        f"All saved memories: {[m.get('domain_tags') for m in saved_memories]}"
-    )
-    ps = procedural_mems[0]
-    assert ps.get("status") == "pending_review"
-    assert "pending" in (ps.get("domain_tags") or [])
-    assert ps.get("importance") == 4
+    assert len(results) == 1
+    assert results[0]["kind"] == "procedural"
+    assert results[0]["content"] == imperative_rule
 
 
 # ---------------------------------------------------------------------------
-# Test 2: No CLAUDE.md → procedural pass skipped
-# (Skipped: same reason as Test 1 — mine_session removed in v2.1.0)
+# Test 6: Existing tag list not mutated by reconcile ADD path
 # ---------------------------------------------------------------------------
 
+def test_reconcile_add_does_not_mutate_original_tags(tmp_vault, tmp_cortex_dir, monkeypatch):
+    """type:procedural prepend must NOT mutate the original candidate tags list."""
+    import memem.mine_delta as md
 
-@pytest.mark.skip(reason="mine_session removed from mining.py in v2.1.0 slim refactor")
-def test_mine_session_no_claudemd_no_suggestion(tmp_vault, tmp_cortex_dir, tmp_path, monkeypatch):
-    """If CLAUDE.md does not exist, the procedural pass is skipped entirely."""
-    import json as _json
+    original_tags = ["type:skill"]
+    candidate = {
+        "title": "When debugging, add print first",
+        "content": "When debugging, add print statements before adding logs.",
+        "project": "general",
+        "importance": 3,
+        "kind": "procedural",
+        "tags": original_tags,
+        "keys": [],
+    }
 
-    import memem.obsidian_store as obs
-    importlib.reload(obs)
-
-    # Project dir WITHOUT CLAUDE.md
-    project_dir = tmp_path / "noconfig"
-    project_dir.mkdir()
-    # (no CLAUDE.md created)
-
-    session_file = tmp_path / "sessions2" / "def98765.jsonl"
-    session_file.parent.mkdir()
-    session_file.write_text(
-        _json.dumps({"type": "user", "cwd": str(project_dir), "message": {"content": "don't add comments please"}}),
-        encoding="utf-8",
-    )
-
-    knowledge_response = _json.dumps([
-        {"title": "Some fact", "project": "noconfig", "content": "A useful fact.", "importance": 3}
+    haiku_response = json.dumps([
+        {"index": 0, "op": "ADD", "target": None, "content": None,
+         "profile": None, "section": None, "line": None, "reason": "new"}
     ])
+    haiku_result = mock.Mock(returncode=0, stdout=haiku_response, stderr="")
 
-    procedural_called = []
+    saved_mems: list[dict] = []
+    monkeypatch.setattr("memem.mine_delta._find_best_match", lambda *a, **kw: (None, 0.0))
+    monkeypatch.setattr("memem.mine_delta._ngram_search_candidates", lambda *a, **kw: [])
+    monkeypatch.setattr("memem.mine_delta._find_memory", lambda *a, **kw: None)
+    monkeypatch.setattr("memem.mine_delta._find_memory_unambiguous", lambda *a, **kw: None)
+    monkeypatch.setattr("memem.mine_delta._save_memory", lambda m: saved_mems.append(m))
+    monkeypatch.setattr("memem.mine_delta.subprocess.run", lambda *a, **kw: haiku_result)
+    monkeypatch.setattr("memem.mine_delta._stable_mined_memory_id",
+                        lambda *a, **kw: "aabbccdd-0000-0000-0000-000000000002")
+    monkeypatch.setattr("memem.mine_delta._log_event", lambda *a, **kw: None)
 
-    def fake_run(cmd, input="", **kwargs):  # noqa: A002
-        if "CURRENT INSTRUCTIONS" in (input or ""):
-            procedural_called.append(True)
-        return mock.Mock(returncode=0, stdout=knowledge_response, stderr="")
+    md._reconcile_candidates([candidate], session_id="testsess04")
 
-    saved_memories: list[dict] = []
-
-    def fake_save_memory(mem: dict) -> None:
-        saved_memories.append(mem)
-
-    monkeypatch.setattr("memem.mining.subprocess.run", fake_run)
-    monkeypatch.setattr("memem.mining._save_memory", fake_save_memory)
-    monkeypatch.setattr("memem.mining._make_memory", obs._make_memory)
-    monkeypatch.setattr("memem.mining._find_best_match", lambda *a, **kw: (None, 0.0))
-    monkeypatch.setattr("memem.session_state.load_mined_session_state", lambda: {})
-    monkeypatch.setattr("memem.session_state.session_is_terminal", lambda p, s: False)  # session_is_complete deleted in v2.5.0
-    monkeypatch.setattr("memem.session_state.update_session_state", lambda *a, **kw: None)
-    monkeypatch.setattr("memem.mining._generate_index", lambda: None)
-    monkeypatch.setattr("memem.mining._obsidian_memories", lambda: [])
-    monkeypatch.setattr("memem.mining._deprecate_memory", lambda *a, **kw: None)
-
-    from memem.mining import mine_session
-
-    mine_session(str(session_file))
-
-    # Procedural Haiku should NOT have been called
-    assert not procedural_called, "Procedural pass was called despite missing CLAUDE.md"
-    procedural_mems = [
-        m for m in saved_memories
-        if "kind:procedural-suggestion" in (m.get("domain_tags") or [])
-    ]
-    assert len(procedural_mems) == 0, f"Unexpected procedural memories saved: {procedural_mems}"
-
-
-# ---------------------------------------------------------------------------
-# Test 5: Old suggestions get auto-archived after TTL
-# (Removed: _archive_expired_procedural_suggestions lived in miner_daemon which
-# was deleted in the v2.1.0 daemon-removal refactor. TTL archival is no longer
-# part of the event-triggered mining pipeline.)
-# ---------------------------------------------------------------------------
+    # Original list must not be mutated
+    assert original_tags == ["type:skill"], (
+        f"Original tags list was mutated: {original_tags}"
+    )
+    if saved_mems:
+        saved_tags = saved_mems[0].get("domain_tags") or []
+        assert "type:procedural" in saved_tags

@@ -473,8 +473,10 @@ def test_make_memory_assigns_layer_when_explicit(tmp_vault, tmp_cortex_dir):
     assert mem["layer"] == 0
 
 
-def test_make_memory_auto_classifies_when_layer_none(tmp_vault, tmp_cortex_dir):
-    """When layer is not passed, _make_memory auto-classifies (returns int 0-3)."""
+def test_make_memory_no_layer_when_none(tmp_vault, tmp_cortex_dir):
+    """v2.8.0: When layer is not passed, _make_memory omits the layer field (retired)."""
+    # DELETED(v2.8): layer system retired — auto-classification removed.
+    # New memories have no layer field when not explicitly passed.
     import importlib
 
     from memem import obsidian_store
@@ -486,8 +488,9 @@ def test_make_memory_auto_classifies_when_layer_none(tmp_vault, tmp_cortex_dir):
         project="general",
         source_type="user",
     )
-    assert isinstance(mem["layer"], int)
-    assert 0 <= mem["layer"] <= 3
+    assert "layer" not in mem, (
+        f"Expected no layer field (retired), got layer={mem.get('layer')}"
+    )
 
 
 def test_make_memory_rejects_invalid_layer(tmp_vault, tmp_cortex_dir):

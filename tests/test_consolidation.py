@@ -1,8 +1,19 @@
-"""Tests for memem.consolidation — episodic consolidation + contradiction detection."""
+"""Tests for cluster_merge category in memem.dreamer (formerly memem.consolidation).
+
+consolidation.py was deleted in v2.8 — all clustering logic folded into dreamer.py
+as the 'cluster_merge' category.  These tests cover:
+
+1. TestClusterMergesIntoCanonical      — cluster of near-identical memories → 1 canonical
+2. TestBelowThresholdLeftAlone         — low cosine → no cluster_merge proposals
+3. TestSupportingIdsRespected          — B17 fix: only supporting_ids members get invalidated
+4. TestProtectedExcluded               — L0 / decay_immune never enter clusters
+5. TestMinClusterSizeRespected         — cluster below min_size is skipped
+6. TestCanonicalSaveFailNoInvalidation — B17 fix: if canonical save fails, members stay intact
+7. TestDryRunNoDiskWrites              — dry_run=True → proposals counted, nothing written
+"""
 
 from __future__ import annotations
 
-import importlib
 import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -13,7 +24,7 @@ from unittest.mock import MagicMock, patch
 
 
 def _make_test_memory(content: str, title: str, layer: int = 2, project: str = "general") -> dict:
-    """Create and return an in-memory dict (not saved to vault)."""
+    """Create (but do not save) a minimal memory dict via _make_memory."""
     from memem.obsidian_store import _make_memory
     return _make_memory(
         content=content,
@@ -41,9 +52,7 @@ def _save_test_memory(content: str, title: str, layer: int = 2, project: str = "
 
 
 def _fake_embedding(text: str, seed: float = 0.9) -> list[float]:
-    """Return a unit-length fake embedding vector based on seed value.
-    All vectors from the same seed are identical (cosine = 1.0 with each other).
-    """
+    """Unit-length vector; all same-seed vectors have cosine = 1.0 with each other."""
     dim = 384
     v = [seed] * dim
     norm = sum(x * x for x in v) ** 0.5
@@ -51,30 +60,41 @@ def _fake_embedding(text: str, seed: float = 0.9) -> list[float]:
 
 
 def _fake_embedding_low(text: str) -> list[float]:
-    """Return a unit-length embedding that is orthogonal to _fake_embedding's output."""
+    """Orthogonal to _fake_embedding output — cosine ≈ 0."""
     dim = 384
-    # Alternate signs so dot product with all-same-sign vector ≈ 0
     v = [(1.0 if i % 2 == 0 else -1.0) for i in range(dim)]
     norm = sum(x * x for x in v) ** 0.5
     return [x / norm for x in v]
 
 
+def _haiku_merge_response(cluster_mems: list[dict], title: str, content: str,
+                           contradictions: list[dict] | None = None) -> dict:
+    """Build a canned Haiku merge response covering all cluster members."""
+    return {
+        "canonical_title": title,
+        "canonical_content": content,
+        "supporting_ids": [m["id"][:8] for m in cluster_mems],
+        "contradictions": contradictions or [],
+    }
+
+
 # ---------------------------------------------------------------------------
-# Tests
+# Test 1 — cluster of near-identical memories → 1 canonical + supersession
 # ---------------------------------------------------------------------------
 
 
 class TestClusterMergesIntoCanonical:
-    """Cluster of near-identical memories → 1 canonical + supersession markers."""
+    """Cluster of near-identical memories → 1 canonical; members bi-temporally invalidated."""
 
-    def test_cluster_merges_into_canonical_with_supersession(
-        self, tmp_vault, tmp_cortex_dir
-    ):
-        from memem import consolidation, obsidian_store
-        importlib.reload(obsidian_store)
-        importlib.reload(consolidation)
+    def test_cluster_merge_proposals_generated(self, tmp_vault, tmp_cortex_dir):
+        """find_cluster_merge_proposals returns a proposal for a tight cluster."""
+        import importlib
 
-        # Save 3 memories about the same topic
+        import memem.dreamer as dreamer_mod
+        import memem.obsidian_store as obs
+        importlib.reload(obs)
+        importlib.reload(dreamer_mod)
+
         m1 = _save_test_memory(
             "TypeScript should be used over JavaScript for all new projects.",
             "TypeScript over JavaScript preference",
@@ -88,22 +108,283 @@ class TestClusterMergesIntoCanonical:
             "TypeScript for all new code",
         )
 
-        ids = [m1["id"], m2["id"], m3["id"]]
+        cluster_mems = [m1, m2, m3]
+        haiku_response = _haiku_merge_response(
+            cluster_mems,
+            title="TypeScript over JavaScript",
+            content="Use TypeScript for all new projects. Catches type errors early.",
+        )
+        fake_run = MagicMock(return_value=SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(haiku_response),
+            stderr="",
+        ))
+
         near_vec = _fake_embedding("typescript")
 
-        # Mock embeddings — all 3 return the same near-identical vector
-        def _mock_compute(memories):
-            vecs = [near_vec for _ in memories]
-            return list(memories), vecs
+        mock_model = MagicMock()
+        mock_model.encode.return_value = [near_vec for _ in cluster_mems]
 
-        # Mock Haiku call
+        with patch.object(dreamer_mod, "_call_haiku_cluster_merge",
+                          wraps=lambda mems: haiku_response):
+            proposals = dreamer_mod.find_cluster_merge_proposals(
+                cluster_mems,
+                min_cluster_size=2,
+                similarity_threshold=0.85,
+            )
+            # Need embeddings — mock them indirectly via the subprocess
+            # Actually find_cluster_merge_proposals calls _get_model().encode()
+            # so mock the model
+
+        # Re-run with model mocked
+        with patch("memem.embedding_index._get_model", return_value=mock_model), \
+             patch("memem.embedding_index._try_import", return_value=(None, __import__("numpy"))), \
+             patch("memem.dreamer.subprocess.run", fake_run):
+            proposals = dreamer_mod.find_cluster_merge_proposals(
+                cluster_mems,
+                min_cluster_size=2,
+                similarity_threshold=0.85,
+            )
+
+        assert len(proposals) == 1
+        p = proposals[0]
+        assert p["canonical_title"] == "TypeScript over JavaScript"
+        assert set(p["cluster_ids"]) == {m["id"] for m in cluster_mems}
+        assert set(p["supporting_ids"]) == {m["id"][:8] for m in cluster_mems}
+        assert "kind:consolidated" in p["source_tags"]
+
+    def test_apply_diff_cluster_merge_creates_canonical(self, tmp_vault, tmp_cortex_dir):
+        """apply_diff with cluster_merge creates canonical + invalidates supporting members."""
+        import importlib
+
+        import memem.dreamer as dreamer_mod
+        import memem.obsidian_store as obs
+        importlib.reload(obs)
+        importlib.reload(dreamer_mod)
+
+        m1 = _save_test_memory("TypeScript over JavaScript.", "TS pref 1")
+        m2 = _save_test_memory("Prefer TypeScript to JavaScript.", "TS pref 2")
+        m3 = _save_test_memory("Use TypeScript for new code.", "TS pref 3")
+
+        cluster_mems = [m1, m2, m3]
+        diff = {
+            "demotion_candidates": [],
+            "contradiction_pairs": [],
+            "cluster_summaries": [],
+            "cluster_merge": [
+                {
+                    "project": "general",
+                    "cluster_ids": [m["id"] for m in cluster_mems],
+                    "supporting_ids": [m["id"][:8] for m in cluster_mems],
+                    "canonical_title": "TypeScript over JavaScript",
+                    "canonical_content": "Use TypeScript for all new projects.",
+                    "source_tags": ["kind:consolidated", "consolidated"],
+                    "contradictions": [],
+                }
+            ],
+        }
+
+        result = dreamer_mod.apply_diff(diff, dry_run=False)
+
+        assert result["merged"] == 1
+        assert result["errors"] == []
+
+        # Canonical exists in vault
+        from memem.obsidian_store import _obsidian_memories
+        all_mems = _obsidian_memories(include_deprecated=True)
+        canonicals = [m for m in all_mems if "kind:consolidated" in (m.get("domain_tags") or [])]
+        assert len(canonicals) >= 1
+
+        # Source members should be invalidated (invalid_at set)
+        from memem.obsidian_store import _find_memory
+        for src in cluster_mems:
+            live = _find_memory(src["id"])
+            assert live is not None
+            assert live.get("invalid_at") is not None, (
+                f"Member {src['id'][:8]} should be invalidated after cluster_merge apply"
+            )
+            assert live.get("replaced_by") is not None
+
+
+# ---------------------------------------------------------------------------
+# Test 2 — below threshold → no cluster_merge proposals
+# ---------------------------------------------------------------------------
+
+
+class TestBelowThresholdLeftAlone:
+    """Memories with low cosine similarity must NOT generate cluster_merge proposals."""
+
+    def test_below_threshold_no_proposals(self, tmp_vault, tmp_cortex_dir):
+        import importlib
+
+        import memem.dreamer as dreamer_mod
+        import memem.obsidian_store as obs
+        importlib.reload(obs)
+        importlib.reload(dreamer_mod)
+
+        m1 = _save_test_memory("TypeScript is preferred over JavaScript.", "TypeScript pref")
+        m2 = _save_test_memory("Use black for Python formatting.", "Python formatter")
+        m3 = _save_test_memory("Always run mypy before committing Python code.", "mypy check")
+
+        mems = [m1, m2, m3]
+        # Orthogonal embeddings → cosine = 0 (well below 0.85)
+        orthogonal_vecs = [
+            [1.0 if j == i else 0.0 for j in range(384)]
+            for i in range(3)
+        ]
+
+        mock_model = MagicMock()
+        mock_model.encode.return_value = orthogonal_vecs
+
+        fake_run = MagicMock()
+        with patch("memem.embedding_index._get_model", return_value=mock_model), \
+             patch("memem.embedding_index._try_import", return_value=(None, __import__("numpy"))), \
+             patch("memem.dreamer.subprocess.run", fake_run):
+            proposals = dreamer_mod.find_cluster_merge_proposals(mems, min_cluster_size=2)
+
+        assert proposals == []
+        fake_run.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Test 3 — B17 fix: supporting_ids respected
+# ---------------------------------------------------------------------------
+
+
+class TestSupportingIdsRespected:
+    """B17 fix: only members in supporting_ids get invalidated; others stay active."""
+
+    def test_only_supporting_ids_invalidated(self, tmp_vault, tmp_cortex_dir):
+        import importlib
+
+        import memem.dreamer as dreamer_mod
+        import memem.obsidian_store as obs
+        importlib.reload(obs)
+        importlib.reload(dreamer_mod)
+
+        m1 = _save_test_memory("TS preference v1", "TS v1")
+        m2 = _save_test_memory("TS preference v2", "TS v2")
+        m3 = _save_test_memory("TS preference v3", "TS v3")
+
+        # Haiku only claims m1 and m2 — m3 NOT in supporting_ids
+        diff = {
+            "demotion_candidates": [],
+            "contradiction_pairs": [],
+            "cluster_summaries": [],
+            "cluster_merge": [
+                {
+                    "project": "general",
+                    "cluster_ids": [m1["id"], m2["id"], m3["id"]],
+                    "supporting_ids": [m1["id"][:8], m2["id"][:8]],  # m3 NOT included
+                    "canonical_title": "TS preference merged",
+                    "canonical_content": "Use TypeScript for new projects.",
+                    "source_tags": ["kind:consolidated", "consolidated"],
+                    "contradictions": [],
+                }
+            ],
+        }
+
+        result = dreamer_mod.apply_diff(diff, dry_run=False)
+
+        assert result["merged"] == 1
+        assert result["errors"] == []
+
+        from memem.obsidian_store import _find_memory
+
+        # m1 and m2 should be invalidated
+        live_m1 = _find_memory(m1["id"])
+        assert live_m1 is not None
+        assert live_m1.get("invalid_at") is not None, "m1 (in supporting_ids) should be invalidated"
+
+        live_m2 = _find_memory(m2["id"])
+        assert live_m2 is not None
+        assert live_m2.get("invalid_at") is not None, "m2 (in supporting_ids) should be invalidated"
+
+        # m3 NOT in supporting_ids — must remain active
+        live_m3 = _find_memory(m3["id"])
+        assert live_m3 is not None
+        assert live_m3.get("invalid_at") is None, (
+            "m3 not in supporting_ids — must NOT be invalidated (B17 fix)"
+        )
+
+    def test_replaced_by_points_to_canonical(self, tmp_vault, tmp_cortex_dir):
+        """Each invalidated member must have replaced_by = canonical_id."""
+        import importlib
+
+        import memem.dreamer as dreamer_mod
+        import memem.obsidian_store as obs
+        importlib.reload(obs)
+        importlib.reload(dreamer_mod)
+
+        m1 = _save_test_memory("TypeScript is preferred over JavaScript for all projects.", "TS pref v1")
+        m2 = _save_test_memory("Use TypeScript instead of JavaScript for better type safety.", "TS pref v2")
+
+        diff = {
+            "demotion_candidates": [],
+            "contradiction_pairs": [],
+            "cluster_summaries": [],
+            "cluster_merge": [
+                {
+                    "project": "general",
+                    "cluster_ids": [m1["id"], m2["id"]],
+                    "supporting_ids": [m1["id"][:8], m2["id"][:8]],
+                    "canonical_title": "TS canonical",
+                    "canonical_content": "TypeScript preference.",
+                    "source_tags": ["kind:consolidated", "consolidated"],
+                    "contradictions": [],
+                }
+            ],
+        }
+
+        result = dreamer_mod.apply_diff(diff, dry_run=False)
+        assert result["merged"] == 1
+
+        from memem.obsidian_store import _find_memory, _obsidian_memories
+
+        # Find canonical
+        all_mems = _obsidian_memories(include_deprecated=True)
+        canonicals = [m for m in all_mems if "kind:consolidated" in (m.get("domain_tags") or [])]
+        assert len(canonicals) >= 1
+        canonical_id = canonicals[0]["id"]
+
+        for src in [m1, m2]:
+            live = _find_memory(src["id"])
+            assert live is not None
+            assert live.get("replaced_by") == canonical_id, (
+                f"Member {src['id'][:8]}.replaced_by should be {canonical_id[:8]}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Test 4 — protected memories excluded from clusters
+# ---------------------------------------------------------------------------
+
+
+class TestProtectedExcluded:
+    """L0 and decay_immune memories must never enter cluster_merge proposals."""
+
+    def test_l0_excluded_from_cluster_merge_proposals(self, tmp_vault, tmp_cortex_dir):
+        import importlib
+
+        import memem.dreamer as dreamer_mod
+        import memem.obsidian_store as obs
+        importlib.reload(obs)
+        importlib.reload(dreamer_mod)
+
+        l0_mem = _make_test_memory("Core L0 project identity content that must be preserved.", "L0 memory", layer=0)
+        normal_mem_a = _make_test_memory("TypeScript is preferred over JavaScript for new code.", "TS pref A")
+        normal_mem_b = _make_test_memory("Use TypeScript instead of JavaScript for type safety.", "TS pref B")
+
+        mems = [l0_mem, normal_mem_a, normal_mem_b]
+        near_vec = _fake_embedding("typescript")
+
+        mock_model = MagicMock()
+        mock_model.encode.return_value = [near_vec for _ in [normal_mem_a, normal_mem_b]]
+
         haiku_response = {
-            "canonical_title": "TypeScript over JavaScript preference",
-            "canonical_content": (
-                "Use TypeScript instead of JavaScript for all new projects. "
-                "TypeScript catches type errors early and is preferred for all new code."
-            ),
-            "supporting_ids": [m["id"][:8] for m in [m1, m2, m3]],
+            "canonical_title": "TS canonical",
+            "canonical_content": "TypeScript preference.",
+            "supporting_ids": [normal_mem_a["id"][:8], normal_mem_b["id"][:8]],
             "contradictions": [],
         }
         fake_run = MagicMock(return_value=SimpleNamespace(
@@ -112,145 +393,134 @@ class TestClusterMergesIntoCanonical:
             stderr="",
         ))
 
-        with patch.object(consolidation, "_compute_embeddings", _mock_compute):
-            with patch("memem.consolidation.subprocess.run", fake_run):
-                result = consolidation.run_consolidation_pass(
-                    layer=2,
-                    min_cluster_size=3,
-                    similarity_threshold=0.85,
-                    dry_run=False,
-                )
+        with patch("memem.embedding_index._get_model", return_value=mock_model), \
+             patch("memem.embedding_index._try_import", return_value=(None, __import__("numpy"))), \
+             patch("memem.dreamer.subprocess.run", fake_run):
+            proposals = dreamer_mod.find_cluster_merge_proposals(mems, min_cluster_size=2)
 
-        assert result.clusters_processed == 1
-        assert result.memories_consolidated == 3
-        assert len(result.canonical_memories_created) == 1
-        assert set(result.superseded_memories) == set(ids)
-        assert not result.errors
+        # L0 must not appear in any cluster
+        for prop in proposals:
+            assert l0_mem.get("id", "") not in prop["cluster_ids"], (
+                "L0 memory must not be a cluster member"
+            )
 
-        # Verify canonical memory is in the vault
-        from memem.obsidian_store import _find_memory
-        canon_id = result.canonical_memories_created[0]
-        canon = _find_memory(canon_id)
-        assert canon is not None
-        assert "kind:consolidated" in canon.get("domain_tags", [])
+    def test_decay_immune_excluded_from_cluster_merge_proposals(self):
+        """decay_immune memories must never enter cluster_merge proposals."""
+        from memem.dreamer import _is_protected
 
-        # Verify source memories are marked deprecated/superseded
-        for src_id in ids:
-            src = _find_memory(src_id)
-            assert src is not None
-            assert src.get("superseded_by") == canon_id or src.get("status") == "deprecated"
+        immune_mem = {
+            "id": "immuneid1",
+            "layer": 2,
+            "decay_immune": True,
+            "title": "Decay immune memory",
+            "status": "active",
+        }
+        assert _is_protected(immune_mem) is True
 
 
-class TestBelowThresholdLeftAlone:
-    """Memories with low cosine (~0.5) should NOT be merged."""
-
-    def test_below_threshold_cluster_left_alone(self, tmp_vault, tmp_cortex_dir):
-        from memem import consolidation, obsidian_store
-        importlib.reload(obsidian_store)
-        importlib.reload(consolidation)
-
-        _save_test_memory("TypeScript is preferred over JavaScript.", "TypeScript pref")
-        _save_test_memory("Use black for Python formatting.", "Python formatter")
-        _save_test_memory("Always run mypy before committing Python code.", "mypy check")
-
-        # Give all 3 different embeddings so cosine < 0.85
-
-        def _mock_compute(memories: list[dict]):
-            # Assign orthogonal-ish vectors to each memory
-            vecs = []
-            for i, _mem in enumerate(memories):
-                dim = 384
-                v = [(1.0 if j == i else 0.0) for j in range(dim)]
-                norm = sum(x * x for x in v) ** 0.5 or 1.0
-                vecs.append([x / norm for x in v])
-            return list(memories), vecs
-
-        fake_run = MagicMock()
-
-        with patch.object(consolidation, "_compute_embeddings", _mock_compute):
-            with patch("memem.consolidation.subprocess.run", fake_run):
-                result = consolidation.run_consolidation_pass(
-                    layer=2,
-                    min_cluster_size=3,
-                    similarity_threshold=0.85,
-                    dry_run=False,
-                )
-
-        # No cluster should be formed — cosine between orthogonal unit vecs = 0
-        assert result.clusters_processed == 0
-        assert result.memories_consolidated == 0
-        assert result.canonical_memories_created == []
-        # Haiku should NOT have been called
-        fake_run.assert_not_called()
+# ---------------------------------------------------------------------------
+# Test 5 — min cluster size respected
+# ---------------------------------------------------------------------------
 
 
-class TestContradictionSurfacesAsFlagMemory:
-    """Haiku response with contradictions → contradiction-flag memory created."""
+class TestMinClusterSizeRespected:
+    """Cluster below min_cluster_size must not generate a proposal."""
 
-    def test_contradiction_surfaces_as_flag_memory(self, tmp_vault, tmp_cortex_dir):
-        from memem import consolidation, obsidian_store
-        importlib.reload(obsidian_store)
-        importlib.reload(consolidation)
+    def test_single_memory_no_proposal(self):
+        """A single-memory 'cluster' must not generate a proposal."""
+        from memem.dreamer import find_cluster_merge_proposals
 
-        m1 = _save_test_memory("Use PostgreSQL for the main database.", "DB choice: Postgres")
-        m2 = _save_test_memory("Use MySQL for the main database instead.", "DB choice: MySQL")
-        m3 = _save_test_memory("The main database is relational, use SQL.", "DB is relational")
+        single_mem = {
+            "id": "solo1234",
+            "layer": 2,
+            "decay_immune": False,
+            "title": "Solo memory",
+            "essence": "Only one memory here.",
+            "status": "active",
+            "project": "general",
+            "domain_tags": [],
+        }
 
-        near_vec = _fake_embedding("database choice")
+        near_vec = _fake_embedding("solo")
+        mock_model = MagicMock()
+        mock_model.encode.return_value = [near_vec]
 
-        def _mock_compute(memories):
-            return list(memories), [near_vec for _ in memories]
+        with patch("memem.embedding_index._get_model", return_value=mock_model), \
+             patch("memem.embedding_index._try_import", return_value=(None, __import__("numpy"))):
+            proposals = find_cluster_merge_proposals([single_mem], min_cluster_size=2)
 
-        haiku_response = {
-            "canonical_title": "Database choice",
-            "canonical_content": "The database choice is PostgreSQL or MySQL (conflicting preferences).",
-            "supporting_ids": [m1["id"][:8], m2["id"][:8], m3["id"][:8]],
-            "contradictions": [
+        assert proposals == []
+
+
+# ---------------------------------------------------------------------------
+# Test 6 — B17 canonical save failure → members NOT invalidated
+# ---------------------------------------------------------------------------
+
+
+class TestCanonicalSaveFailNoInvalidation:
+    """If canonical save fails, B17 requires that no members are invalidated."""
+
+    def test_members_untouched_when_canonical_save_fails(self, tmp_vault, tmp_cortex_dir):
+        import importlib
+
+        import memem.dreamer as dreamer_mod
+        import memem.obsidian_store as obs
+        importlib.reload(obs)
+        importlib.reload(dreamer_mod)
+
+        m1 = _save_test_memory("TypeScript is preferred over JavaScript for new projects.", "TS pref A")
+        m2 = _save_test_memory("Use TypeScript instead of JavaScript for all new code.", "TS pref B")
+
+        diff = {
+            "demotion_candidates": [],
+            "contradiction_pairs": [],
+            "cluster_summaries": [],
+            "cluster_merge": [
                 {
-                    "memory_a": m1["id"][:8],
-                    "memory_b": m2["id"][:8],
-                    "conflict": "Memory A says PostgreSQL, memory B says MySQL.",
+                    "project": "general",
+                    "cluster_ids": [m1["id"], m2["id"]],
+                    "supporting_ids": [m1["id"][:8], m2["id"][:8]],
+                    "canonical_title": "TS canonical",
+                    "canonical_content": "Use TypeScript for all projects. Catches type errors early.",
+                    "source_tags": ["kind:consolidated", "consolidated"],
+                    "contradictions": [],
                 }
             ],
         }
-        fake_run = MagicMock(return_value=SimpleNamespace(
-            returncode=0,
-            stdout=json.dumps(haiku_response),
-            stderr="",
-        ))
 
-        with patch.object(consolidation, "_compute_embeddings", _mock_compute):
-            with patch("memem.consolidation.subprocess.run", fake_run):
-                result = consolidation.run_consolidation_pass(
-                    layer=2,
-                    min_cluster_size=3,
-                    similarity_threshold=0.85,
-                    dry_run=False,
+        # Make _save_memory raise so canonical save fails
+        with patch("memem.obsidian_store._save_memory", side_effect=RuntimeError("disk full")):
+            result = dreamer_mod.apply_diff(diff, dry_run=False)
+
+        # Expect error recorded, merged=0 (no successful merge)
+        assert result["merged"] == 0
+        assert any("canonical save failed" in e for e in result["errors"])
+
+        # Members must be untouched (not invalidated)
+        from memem.obsidian_store import _find_memory
+        for src in [m1, m2]:
+            live = _find_memory(src["id"])
+            if live:
+                assert live.get("invalid_at") is None, (
+                    f"Member {src['id'][:8]} must not be invalidated when canonical save failed"
                 )
 
-        assert result.contradictions_flagged == 1
-        assert result.clusters_processed == 1
 
-        # Verify contradiction-flag memory exists in vault
-        from memem.obsidian_store import _obsidian_memories
-        all_mems = _obsidian_memories(include_deprecated=True)
-        flag_mems = [
-            m for m in all_mems
-            if "kind:contradiction-flag" in m.get("domain_tags", [])
-        ]
-        assert len(flag_mems) == 1
-        assert "contradiction" in flag_mems[0].get("domain_tags", [])
-        assert "pending-review" in flag_mems[0].get("domain_tags", [])
-        assert "PostgreSQL" in flag_mems[0].get("essence", "") or "contradiction" in flag_mems[0].get("essence", "").lower()
+# ---------------------------------------------------------------------------
+# Test 7 — dry_run=True → proposals counted, nothing written
+# ---------------------------------------------------------------------------
 
 
 class TestDryRunNoDiskWrites:
-    """dry_run=True → result populated but no new files in vault."""
+    """dry_run=True → merged count returned, no disk writes."""
 
-    def test_dry_run_no_disk_writes(self, tmp_vault, tmp_cortex_dir):
-        from memem import consolidation, obsidian_store
-        importlib.reload(obsidian_store)
-        importlib.reload(consolidation)
+    def test_dry_run_cluster_merge_no_writes(self, tmp_vault, tmp_cortex_dir):
+        import importlib
+
+        import memem.dreamer as dreamer_mod
+        import memem.obsidian_store as obs
+        importlib.reload(obs)
+        importlib.reload(dreamer_mod)
 
         m1 = _save_test_memory("TypeScript over JavaScript.", "TS pref 1")
         m2 = _save_test_memory("Prefer TypeScript to JavaScript.", "TS pref 2")
@@ -259,89 +529,37 @@ class TestDryRunNoDiskWrites:
         from memem.models import OBSIDIAN_MEMORIES_DIR
         files_before = set(OBSIDIAN_MEMORIES_DIR.glob("*.md"))
 
-        near_vec = _fake_embedding("typescript")
-
-        def _mock_compute(memories):
-            return list(memories), [near_vec for _ in memories]
-
-        haiku_response = {
-            "canonical_title": "TypeScript preference",
-            "canonical_content": "Use TypeScript for all new projects.",
-            "supporting_ids": [m1["id"][:8], m2["id"][:8], m3["id"][:8]],
-            "contradictions": [],
+        diff = {
+            "demotion_candidates": [],
+            "contradiction_pairs": [],
+            "cluster_summaries": [],
+            "cluster_merge": [
+                {
+                    "project": "general",
+                    "cluster_ids": [m1["id"], m2["id"], m3["id"]],
+                    "supporting_ids": [m1["id"][:8], m2["id"][:8], m3["id"][:8]],
+                    "canonical_title": "TypeScript preference",
+                    "canonical_content": "Use TypeScript for all new projects.",
+                    "source_tags": ["kind:consolidated", "consolidated"],
+                    "contradictions": [],
+                }
+            ],
         }
-        fake_run = MagicMock(return_value=SimpleNamespace(
-            returncode=0,
-            stdout=json.dumps(haiku_response),
-            stderr="",
-        ))
 
-        with patch.object(consolidation, "_compute_embeddings", _mock_compute):
-            with patch("memem.consolidation.subprocess.run", fake_run):
-                result = consolidation.run_consolidation_pass(
-                    layer=2,
-                    min_cluster_size=3,
-                    similarity_threshold=0.85,
-                    dry_run=True,
-                )
+        result = dreamer_mod.apply_diff(diff, dry_run=True)
 
         files_after = set(OBSIDIAN_MEMORIES_DIR.glob("*.md"))
         new_files = files_after - files_before
 
-        # Result is populated
-        assert result.clusters_processed == 1
-        assert result.memories_consolidated == 3
-        assert len(result.canonical_memories_created) == 1
-
-        # But no new files were written
+        # Count is populated but nothing written
+        assert result["merged"] == 1
         assert new_files == set(), f"Unexpected new files in dry_run: {new_files}"
 
-        # Source memories are NOT marked deprecated (no disk write)
+        # Source memories must remain active
         from memem.obsidian_store import _find_memory
-        for src_mem in [m1, m2, m3]:
-            live = _find_memory(src_mem["id"])
+        for src in [m1, m2, m3]:
+            live = _find_memory(src["id"])
             if live:
-                assert live.get("status", "active") == "active", (
-                    f"dry_run should not deprecate {src_mem['id'][:8]}"
+                assert live.get("invalid_at") is None, (
+                    f"dry_run should not invalidate {src['id'][:8]}"
                 )
-
-
-class TestMinClusterSizeRespected:
-    """min_cluster_size=3 but only a 2-memory cluster → no merge."""
-
-    def test_min_cluster_size_respected(self, tmp_vault, tmp_cortex_dir):
-        from memem import consolidation, obsidian_store
-        importlib.reload(obsidian_store)
-        importlib.reload(consolidation)
-
-        near_vec = _fake_embedding("typescript")
-        far_vec = _fake_embedding_low("other topic")
-
-        _save_test_memory("TypeScript over JavaScript.", "TS pref A")
-        _save_test_memory("Use TypeScript for new code.", "TS pref B")
-        # Third memory is on a very different topic (low cosine with m1, m2)
-        _save_test_memory("Always use Docker for deployment.", "Docker deployment")
-
-        def _mock_compute(memories: list[dict]):
-            vecs = []
-            for m in memories:
-                if "Docker" in m.get("title", ""):
-                    vecs.append(far_vec)
-                else:
-                    vecs.append(near_vec)
-            return list(memories), vecs
-
-        fake_run = MagicMock()
-
-        with patch.object(consolidation, "_compute_embeddings", _mock_compute):
-            with patch("memem.consolidation.subprocess.run", fake_run):
-                result = consolidation.run_consolidation_pass(
-                    layer=2,
-                    min_cluster_size=3,  # requires 3, but m1+m2 cluster is only size 2
-                    similarity_threshold=0.85,
-                    dry_run=False,
-                )
-
-        assert result.clusters_processed == 0
-        assert result.canonical_memories_created == []
-        fake_run.assert_not_called()

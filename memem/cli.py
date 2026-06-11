@@ -10,7 +10,14 @@ from typing import Any
 FATAL_EXIT_CODE = 75
 TRANSIENT_EXIT_CODE = 20
 
-from memem.models import INDEX_PATH, MINER_OPT_IN_MARKER, MEMEM_DIR, OBSIDIAN_MEMORIES_DIR, PLAYBOOK_DIR, SERVER_PID_FILE
+from memem.models import (
+    INDEX_PATH,
+    MEMEM_DIR,
+    MINER_OPT_IN_MARKER,
+    OBSIDIAN_MEMORIES_DIR,
+    PLAYBOOK_DIR,
+    SERVER_PID_FILE,
+)
 from memem.obsidian_store import (
     _generate_index,
     purge_mined_memories,
@@ -792,58 +799,67 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         return
 
     if cmd == "--consolidate":
-        from memem.consolidation import run_consolidation_pass
-        from memem.models import LAYER_L2
+        # Back-compat alias: --consolidate now routes to the dreamer's cluster_merge
+        # category. consolidation.py was deleted in v2.8 (folded into dreamer.py).
+        # This alias preserves the old CLI surface while using the unified engine.
+        # The --layer, --min-cluster, --threshold flags are accepted but silently
+        # ignored (dreamer uses project-scoped thresholds, no layer filter).
+        import fcntl
+
+        from memem.dreamer import apply_diff, build_diff, write_diff_log
+        from memem.obsidian_store import _obsidian_memories
 
         dry_run = "--dry-run" in argv
-        layer = LAYER_L2
-        min_cluster_size = 3
-        threshold = 0.85
+        apply = not dry_run
 
-        # Parse optional overrides
-        i = 2
-        while i < len(argv):
-            arg = argv[i]
-            if arg == "--layer" and i + 1 < len(argv):
-                try:
-                    layer = int(argv[i + 1])
-                except ValueError:
-                    pass
-                i += 2
-            elif arg == "--min-cluster" and i + 1 < len(argv):
-                try:
-                    min_cluster_size = int(argv[i + 1])
-                except ValueError:
-                    pass
-                i += 2
-            elif arg == "--threshold" and i + 1 < len(argv):
-                try:
-                    threshold = float(argv[i + 1])
-                except ValueError:
-                    pass
-                i += 2
-            else:
-                i += 1
+        print("[memem dreamer] (back-compat --consolidate alias)")
+        print("  NOTE: consolidation.py deleted in v2.8; use --dream for the full dreamer pass.")
+        ignored = [f for f in ("--layer", "--min-cluster", "--threshold") if f in argv]
+        if ignored:
+            print(f"  NOTE: {', '.join(ignored)} ignored in v2.8 (dreamer uses "
+                  "project-scoped thresholds; use --dream for the full pass).")
+        if not dry_run:
+            print("  WARNING: --consolidate runs LIVE (back-compat default); "
+                  "pass --dry-run to preview without mutating the vault.")
+        print(f"  Running cluster_merge category only. {'DRY-RUN' if dry_run else 'LIVE'}")
 
-        mode = "DRY-RUN" if dry_run else "LIVE"
-        print(
-            f"[memem consolidation] {mode} — layer={layer} "
-            f"min_cluster={min_cluster_size} threshold={threshold}"
-        )
-        cons_result = run_consolidation_pass(
-            layer=layer,
-            min_cluster_size=min_cluster_size,
-            similarity_threshold=threshold,
-            dry_run=dry_run,
-        )
-        print(f"  Clusters processed:        {cons_result.clusters_processed}")
-        print(f"  Memories consolidated:     {cons_result.memories_consolidated}")
-        print(f"  Contradictions flagged:    {cons_result.contradictions_flagged}")
-        print(f"  Canonical memories created:{len(cons_result.canonical_memories_created)}")
-        print(f"  Superseded memories:       {len(cons_result.superseded_memories)}")
-        if cons_result.errors:
-            print(f"  Errors ({len(cons_result.errors)}):")
-            for err in cons_result.errors:
+        # Share the dream lock so --consolidate can't run concurrently with an
+        # auto-spawned --dream pass (two unsynchronized dream actors would
+        # produce duplicate merges).
+        _dlock = open(MEMEM_DIR / ".dream.lock", "w")
+        try:
+            fcntl.flock(_dlock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            _dlock.close()
+            print("  A dream pass is currently running (.dream.lock held) — retry shortly.")
+            return
+
+        try:
+            memories = _obsidian_memories(include_deprecated=False)
+            diff = build_diff(memories)
+            # CONTRACT: the old --consolidate ONLY clustered. Filter the diff to
+            # the cluster_merge category before applying so a live run cannot
+            # silently execute demotions/contradictions/rewrites the old command
+            # never did. Use --dream for the full pass.
+            diff = {
+                **{k: ([] if isinstance(v, list) else v) for k, v in diff.items()},
+                "cluster_merge": diff.get("cluster_merge", []),
+            }
+            diff_path = write_diff_log(diff)
+            apply_result = apply_diff(diff, dry_run=dry_run)
+        finally:
+            try:
+                fcntl.flock(_dlock.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+            _dlock.close()
+
+        print(f"  Diff log: {diff_path}")
+        print(f"  Cluster-merge proposals:   {len(diff.get('cluster_merge', []))}")
+        print(f"  Merged (applied):          {apply_result.get('merged', 0)}")
+        if apply_result.get("errors"):
+            print(f"  Errors ({len(apply_result['errors'])}):")
+            for err in apply_result["errors"]:
                 print(f"    - {err}")
         if dry_run:
             print("  (Pass without --dry-run to execute)")
@@ -852,25 +868,42 @@ def dispatch_cli(argv: list[str], mcp) -> None:
     if cmd == "--dream":
         from memem.dreamer import run_dream_cycle
         apply = "--apply" in argv
-        result = run_dream_cycle(dry_run=not apply)
+        safe_auto = "--safe-auto" in argv
+        # --safe-auto implies not dry-run (it applies additive categories automatically)
+        dry_run = False if safe_auto and not apply else not apply
+        result = run_dream_cycle(dry_run=dry_run, safe_auto=safe_auto)
         diff = result["diff"]
         apply_result = result["apply_result"]
-        mode = "DRY-RUN" if result["dry_run"] else "APPLIED"
+        if result["dry_run"]:
+            mode = "DRY-RUN"
+        elif result.get("safe_auto"):
+            mode = "SAFE-AUTO"
+        else:
+            mode = "APPLIED"
         print(f"[memem dreamer] {mode}")
         print(f"  Diff log:            {result['diff_path']}")
         print(f"  Vault size:          {diff['vault_size']}")
-        print(f"  Demotion candidates: {len(diff['demotion_candidates'])}")
-        print(f"  Contradiction pairs: {len(diff['contradiction_pairs'])}")
-        print(f"  Cluster summaries:   {len(diff['cluster_summaries'])}")
+        print(f"  Demotion candidates: {len(diff.get('demotion_candidates', []))}")
+        print(f"  Contradiction pairs: {len(diff.get('contradiction_pairs', []))}")
+        print(f"  Cluster summaries:   {len(diff.get('cluster_summaries', []))}")
+        print(f"  Cluster merges:      {len(diff.get('cluster_merge', []))}")
+        print(f"  Reflections:         {len(diff.get('reflection_with_citations', []))}")
+        print(f"  Tense rewrites:      {len(diff.get('tense_rewrite', []))}")
         if apply_result:
-            print(f"  Demoted:             {apply_result['demoted']}")
-            print(f"  Invalidated:         {apply_result['invalidated']}")
+            print(f"  Demoted:             {apply_result.get('demoted', 0)}")
+            print(f"  Invalidated:         {apply_result.get('invalidated', 0)}")
+            print(f"  Clustered:           {apply_result.get('clustered', 0)}")
+            print(f"  Merged:              {apply_result.get('merged', 0)}")
+            print(f"  Reflected (applied): {apply_result.get('reflected', 0)}")
+            print(f"  Rewritten (applied): {apply_result.get('rewritten', 0)}")
             if apply_result.get("errors"):
                 print(f"  Errors ({len(apply_result['errors'])}):")
                 for err in apply_result["errors"]:
                     print(f"    - {err}")
         if result["dry_run"]:
-            print("  (Pass --apply to execute proposals)")
+            print("  (Pass --apply to execute all proposals)")
+        elif result.get("safe_auto"):
+            print("  (Reflections + tense-rewrites applied; demotions/merges await --apply)")
         return
 
     if cmd == "--record-lesson":
@@ -917,6 +950,52 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         )
         print(f"Lesson recorded: {lesson_id}")
         return
+
+    if cmd == "--migrate-layers":
+        import re as _re
+        from pathlib import Path as _Path
+
+        apply_mode = "--apply" in argv
+        yes = "--yes" in argv
+
+        # --report PATH
+        report_path: _Path | None = None
+        if "--report" in argv:
+            idx = argv.index("--report")
+            if idx + 1 < len(argv):
+                report_path = _Path(argv[idx + 1])
+            else:
+                print("--migrate-layers: --report requires a path argument.", file=sys.stderr)
+                raise SystemExit(1)
+
+        # --exclude id8,...
+        exclude_ids: set[str] = set()
+        if "--exclude" in argv:
+            exc_idx = argv.index("--exclude")
+            if exc_idx + 1 >= len(argv):
+                print("--migrate-layers: --exclude requires an argument.", file=sys.stderr)
+                raise SystemExit(1)
+            raw_exc = argv[exc_idx + 1]
+            tokens = [t.strip() for t in raw_exc.split(",") if t.strip()]
+            _HEX8 = _re.compile(r"^[0-9a-f]{8}$")
+            for tok in tokens:
+                if not _HEX8.match(tok):
+                    print(
+                        f"--migrate-layers: invalid --exclude token {tok!r} "
+                        "(must be exactly 8 lowercase hex chars).",
+                        file=sys.stderr,
+                    )
+                    raise SystemExit(1)
+                exclude_ids.add(tok)
+
+        from memem.migrate_layers import run_migration
+        rc = run_migration(
+            apply_mode=apply_mode,
+            yes=yes,
+            report_path=report_path,
+            exclude_ids=exclude_ids if exclude_ids else None,
+        )
+        raise SystemExit(rc)
 
     if cmd == "--analyze-recalls":
         from memem.recall_log import analyze_recalls

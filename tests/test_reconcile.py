@@ -872,3 +872,34 @@ class TestReconcileTruncationGuard:
             if "hostile merge result" in f.read_text()
         ]
         assert len(added) == 1, "Degraded candidate must be saved as ADD"
+
+
+class TestDreamAutoOptOut:
+    """MEMEM_DREAM_AUTO=0 must disable the autonomous dream spawn (Phase 4.5:
+    unattended LLM spend always needs a kill switch)."""
+
+    def test_opt_out_blocks_spawn_at_threshold(self, mine_env, monkeypatch):
+        import memem.mine_delta as md
+
+        monkeypatch.setenv("MEMEM_DREAM_AUTO", "0")
+        # Counter at threshold-1 so this delta would normally fire the spawn
+        counter = md._dream_counter_path()
+        counter.write_text(str(md._DREAM_COUNTER_THRESHOLD - 1))
+
+        canned = [{"title": "Opt-out check", "project": "general",
+                   "content": "A substantive fact to make the delta count.", "importance": 3}]
+        monkeypatch.setattr(md, "extract_from_text", lambda t, context_hint="": list(canned))
+        reconcile_resp = _canned_reconcile_response([
+            {"index": 0, "op": "ADD", "target": None, "content": None, "reason": "new"}
+        ])
+        _make_subprocess_patcher(md, monkeypatch, [reconcile_resp])
+
+        spawns = []
+        monkeypatch.setattr(md.subprocess, "Popen",
+                            lambda *a, **k: spawns.append(a) or None)
+
+        transcript = mine_env["tmp_path"] / "session.jsonl"
+        _write_jsonl(transcript, _make_turns(6))
+        md.run(session_id="dream-optout-test", transcript_path=str(transcript))
+
+        assert spawns == [], "MEMEM_DREAM_AUTO=0 must suppress the dream spawn"

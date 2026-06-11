@@ -1,4 +1,7 @@
-"""Comprehensive tests for v0.10.0 features: layered recall, compact index, classify_layer."""
+"""Comprehensive tests for v0.10.0 features: layered recall, compact index.
+
+Note: classify_layer tests (Tests 10-13) removed in v2.8.0 — layer system retired.
+"""
 
 import os
 import subprocess
@@ -89,11 +92,16 @@ def test_layer_frontmatter_roundtrip(tmp_vault):
 
 
 # ---------------------------------------------------------------------------
-# Test 3: Layer defaults when missing from frontmatter
+# Test 3: Absent layer field in frontmatter → no layer key in parsed dict (v2.8.0)
 # ---------------------------------------------------------------------------
 
-def test_layer_defaults_when_missing(tmp_vault):
-    from memem.models import DEFAULT_LAYER, OBSIDIAN_MEMORIES_DIR
+def test_layer_absent_when_missing_from_frontmatter(tmp_vault):
+    """v2.8.0: absent layer: frontmatter → layer key absent in parsed dict (not DEFAULT_LAYER).
+    DELETED(v2.8): layer system retired — parser no longer injects DEFAULT_LAYER for
+    memories missing the layer: field. Existing vault files without layer: parse
+    with no layer key; callers use .get("layer", DEFAULT_LAYER) for compat.
+    """
+    from memem.models import OBSIDIAN_MEMORIES_DIR
     from memem.obsidian_store import _parse_obsidian_memory_file, _write_obsidian_memory
 
     # Write without layer field
@@ -116,7 +124,10 @@ def test_layer_defaults_when_missing(tmp_vault):
 
     parsed = _parse_obsidian_memory_file(md_path)
     assert parsed is not None
-    assert parsed["layer"] == DEFAULT_LAYER
+    # v2.8.0: absent layer → key absent (not DEFAULT_LAYER injection)
+    assert "layer" not in parsed, (
+        f"Expected no layer key for absent-layer memory, got layer={parsed.get('layer')}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -316,96 +327,11 @@ def test_graph_traversal_two_hop_is_superset_of_one_hop():
 
 
 # ---------------------------------------------------------------------------
-# Test 10: classify_layer defaults to L2
+# Tests 10-13: classify_layer tests
+# DELETED(v2.8): layer system retired — classify_layer function deleted from
+# mining.py. Layer auto-classification no longer fires for new memories.
+# Explicit layer passthrough (layer=0..3) still works via _make_memory.
 # ---------------------------------------------------------------------------
-
-def test_classify_layer_defaults_to_l2():
-    from memem.mining import classify_layer
-    from memem.models import LAYER_L2
-
-    mem = {
-        "importance": 3,
-        "essence": "x" * 300,
-        "tags": [],
-        "project": "myproj",
-    }
-    result = classify_layer(mem, [])
-    assert result == LAYER_L2
-
-
-# ---------------------------------------------------------------------------
-# Test 11: classify_layer returns L1 for high importance
-# ---------------------------------------------------------------------------
-
-def test_classify_layer_l1_for_high_importance():
-    from memem.mining import classify_layer
-    from memem.models import LAYER_L1
-
-    mem = {
-        "importance": 4,
-        "essence": "x" * 300,
-        "tags": [],
-        "project": "myproj",
-        "source_type": "mined",
-    }
-    result = classify_layer(mem, [])
-    assert result == LAYER_L1
-
-
-# ---------------------------------------------------------------------------
-# Test 12: classify_layer returns L3 for rare low-importance
-# ---------------------------------------------------------------------------
-
-def test_classify_layer_l3_for_rare_low_importance():
-    from memem.mining import classify_layer
-    from memem.models import LAYER_L3
-
-    mem = {
-        "importance": 1,
-        "essence": "short",
-        "tags": [],
-        "project": "myproj",
-        "related": [],
-    }
-    result = classify_layer(mem, [])
-    assert result == LAYER_L3
-
-
-# ---------------------------------------------------------------------------
-# Test 13: classify_layer L0 cap per project
-# ---------------------------------------------------------------------------
-
-def test_classify_layer_l0_cap_per_project():
-    from memem.mining import _L0_CAP_PER_PROJECT, classify_layer
-    from memem.models import LAYER_L0, LAYER_L1
-
-    # Create 20 L0 memories in project "x" to hit the cap
-    fake_list = [
-        {"project": "x", "layer": LAYER_L0}
-        for _ in range(_L0_CAP_PER_PROJECT)
-    ]
-
-    mem_x = {
-        "title": "convention: new",
-        "tags": ["convention"],
-        "importance": 5,
-        "source_type": "user",
-        "project": "x",
-    }
-    # Cap hit — should fall through to L1
-    result_x = classify_layer(mem_x, fake_list)
-    assert result_x == LAYER_L1
-
-    # Project "y" has no L0 memories, should get L0
-    mem_y = {
-        "title": "convention: new",
-        "tags": ["convention"],
-        "importance": 5,
-        "source_type": "user",
-        "project": "y",
-    }
-    result_y = classify_layer(mem_y, fake_list)
-    assert result_y == LAYER_L0
 
 
 # ---------------------------------------------------------------------------

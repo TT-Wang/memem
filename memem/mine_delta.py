@@ -17,12 +17,13 @@ import json
 import os
 import re
 import subprocess
+import sys
 import uuid
 from pathlib import Path
 
 import structlog
 
-from memem.haiku_prompts import HAIKU_TIMEOUT_SECONDS, _HAIKU_RECONCILE_SYSTEM
+from memem.haiku_prompts import _HAIKU_RECONCILE_SYSTEM, HAIKU_TIMEOUT_SECONDS
 from memem.mining import _extract_json_string, _repair_json, extract_from_text
 from memem.models import MEMEM_DIR
 from memem.obsidian_store import (
@@ -91,6 +92,14 @@ def _empty_streak_path(session_id: str) -> Path:
 
 def _mined_sessions_path() -> Path:
     return _state_dir() / ".mined_sessions"
+
+
+def _dream_counter_path() -> Path:
+    return _state_dir() / ".dream-counter"
+
+
+# Number of substantive deltas that trigger a detached dream pass.
+_DREAM_COUNTER_THRESHOLD = 25
 
 
 # -----------------------------------------------------------------------
@@ -602,6 +611,7 @@ def _emit_citations_if_any(session_id: str, turns: list[dict]) -> None:
     citation row via recall_log.log_citation.
     """
     from datetime import UTC, datetime  # local import — datetime is NOT at module level in mine_delta
+
     from memem.models import parse_iso_dt  # noqa: PLC0415
     from memem.recall_log import log_citation  # noqa: PLC0415
 
@@ -661,6 +671,7 @@ def _emit_citations_if_any(session_id: str, turns: list[dict]) -> None:
 # -----------------------------------------------------------------------
 
 _RECONCILE_UPDATE_SUPERSEDE_CAP = 5
+_RECONCILE_PROFILE_CAP = 3
 
 
 def _reconcile_candidates(
@@ -679,10 +690,12 @@ def _reconcile_candidates(
       4. Execute ops with safety rails:
          - Invalid target → degrade to ADD
          - UPDATE+SUPERSEDE cap ≤ 5 per delta
+         - PROFILE cap ≤ 3 per delta (separate counter)
          - ADD: stable-id via _stable_mined_memory_id (idempotent re-mining)
          - UPDATE: _update_memory with merged content + extra tags/keys
          - SUPERSEDE: save new memory, then invalidate old
          - NOOP: skip
+         - PROFILE: append_fact to user/project profile (NOT saved as vault memory)
       5. Every op → telemetry._log_event with reconcile_* op name.
 
     Returns (memories_saved_list, memories_written_count, idempotent_skips).
@@ -834,8 +847,9 @@ def _reconcile_candidates(
             item_map[item["index"]] = item
 
     # ---- Execute ops with rails ------------------------------------------------
-    _VALID_OPS = {"ADD", "UPDATE", "SUPERSEDE", "NOOP"}
+    _VALID_OPS = {"ADD", "UPDATE", "SUPERSEDE", "NOOP", "PROFILE"}
     update_supersede_count = 0
+    profile_op_count = 0
     memories_saved: list[dict] = []
     idempotent_skips = 0  # stable-id hits = definite re-mine of identical content
 
@@ -859,6 +873,136 @@ def _reconcile_candidates(
                         op=op, index=i, session_id=session_id)
             op = "ADD"
             reason = f"invalid-op-degraded: {reason}"
+
+        # Handle PROFILE op — separate path, does NOT save a vault memory.
+        # PROFILE ops are exempt from the UPDATE+SUPERSEDE cap (own cap ≤ 3).
+        if op == "PROFILE":
+            profile_field = str(item.get("profile") or "").strip().lower()
+            profile_section = str(item.get("section") or "").strip()
+            profile_line = str(item.get("line") or "").strip()
+
+            # Validate profile field value
+            if profile_field not in ("user", "project"):
+                log.warning(
+                    "mine_delta: PROFILE op has unknown profile value, degrading to ADD",
+                    profile=profile_field, index=i, session_id=session_id,
+                )
+                op = "ADD"
+                reason = f"unknown-profile-field-degraded: {reason}"
+                # Fall through to normal ADD path below
+
+            # Degrade project PROFILE to ADD when project scope is 'general'
+            elif profile_field == "project" and project == "general":
+                log.warning(
+                    "mine_delta: PROFILE project op with general scope, degrading to ADD",
+                    index=i, session_id=session_id,
+                )
+                op = "ADD"
+                reason = f"general-project-profile-degraded: {reason}"
+                # Fall through to normal ADD path below
+
+            else:
+                # Resolve profile name
+                if profile_field == "user":
+                    profile_name = "user"
+                else:
+                    # project profile: normalize project name as slug
+                    from memem.models import _normalize_scope_id  # noqa: PLC0415 — lazy
+                    profile_name = _normalize_scope_id(project) or project
+
+                # Cap ≤ 3 PROFILE ops per delta
+                profile_op_count += 1
+                if profile_op_count > _RECONCILE_PROFILE_CAP:
+                    log.warning(
+                        "mine_delta: PROFILE cap exceeded, degrading to ADD",
+                        index=i, session_id=session_id,
+                    )
+                    op = "ADD"
+                    reason = f"profile-cap-exceeded-degraded: {reason}"
+                    # Fall through to normal ADD path below
+
+                else:
+                    # Lazy import profiles to keep module-level imports light
+                    import memem.profiles as _profiles  # noqa: PLC0415
+
+                    # Validate section against schema. Canonicalize common LLM
+                    # spelling variants first ('Stack and Structure' → the
+                    # schema's 'Stack & Structure') so prompt-following
+                    # paraphrases don't silently lose profile routing.
+                    _norm_section = profile_section.lower().strip().replace(" and ", " & ")
+                    valid_sections_lower = {
+                        s.lower() for s in _profiles._sections_for(profile_name)
+                    }
+                    if _norm_section in valid_sections_lower:
+                        profile_section = next(
+                            s for s in _profiles._sections_for(profile_name)
+                            if s.lower() == _norm_section
+                        )
+                    if _norm_section not in valid_sections_lower:
+                        log.warning(
+                            "mine_delta: PROFILE op invalid section, degrading to ADD",
+                            section=profile_section, profile=profile_name,
+                            index=i, session_id=session_id,
+                        )
+                        # Count this degrade so section-invalid doesn't steal from cap
+                        profile_op_count -= 1
+                        op = "ADD"
+                        reason = f"unknown-section-degraded:{profile_section}: {reason}"
+                        # Fall through to normal ADD path below
+
+                    else:
+                        # Execute the PROFILE write
+                        result_status = "error"
+                        try:
+                            result_status = _profiles.append_fact(
+                                profile_name, profile_section, profile_line
+                            )
+                        except Exception as exc:  # noqa: BLE001 — never crash reconciler
+                            log.warning(
+                                "mine_delta: PROFILE append_fact raised unexpectedly, degrading to ADD",
+                                exc=str(exc), index=i, session_id=session_id,
+                            )
+                            result_status = "error"
+
+                        if result_status in ("appended", "compacted+appended"):
+                            _log_event(
+                                "reconcile_profile",
+                                memory_id="",
+                                profile=profile_name,
+                                section=profile_section,
+                                session=session_id[:8],
+                            )
+                            log.info(
+                                "mine_delta: reconcile PROFILE",
+                                session_id=session_id,
+                                profile=profile_name,
+                                section=profile_section,
+                            )
+                            continue  # PROFILE written — do NOT also save as vault memory
+
+                        if result_status == "duplicate":
+                            _log_event(
+                                "reconcile_noop",
+                                memory_id="",
+                                reason="profile-duplicate",
+                                session=session_id[:8],
+                            )
+                            log.debug(
+                                "mine_delta: PROFILE duplicate, skipping",
+                                session_id=session_id, profile=profile_name,
+                            )
+                            continue  # Duplicate — skip
+
+                        # invalid_section / rejected_full / error → degrade to ADD
+                        if result_status not in ("appended", "compacted+appended", "duplicate"):
+                            log.warning(
+                                "mine_delta: PROFILE append_fact failed, degrading to ADD",
+                                status=result_status, profile=profile_name,
+                                section=profile_section, index=i, session_id=session_id,
+                            )
+                            op = "ADD"
+                            reason = f"profile-{result_status}-degraded: {reason}"
+                            # Fall through to normal ADD path below
 
         # Validate target for UPDATE/SUPERSEDE
         target_full = None
@@ -925,6 +1069,9 @@ def _reconcile_candidates(
         # Execute op
         if op == "ADD":
             try:
+                # Prepend type:procedural tag when candidate has kind=='procedural'
+                if cand.get("kind") == "procedural" and "type:procedural" not in tags:
+                    tags = ["type:procedural"] + list(tags)
                 mem = _make_memory(
                     content=content,
                     title=title,
@@ -993,6 +1140,12 @@ def _reconcile_candidates(
 
         elif op == "SUPERSEDE" and target_full:
             try:
+                # Prepend type:procedural tag when candidate has kind=='procedural'
+                # (same convention as the ADD and fallback paths — a procedural
+                # rule that supersedes an older rule must stay discoverable by
+                # render_working_rules).
+                if cand.get("kind") == "procedural" and "type:procedural" not in tags:
+                    tags = ["type:procedural"] + list(tags)
                 mem = _make_memory(
                     content=content,
                     title=title,
@@ -1055,6 +1208,9 @@ def _fallback_add_all(
             tags = mem_dict.get("tags") or mem_dict.get("domain_tags") or []
             project = mem_dict.get("project") or "general"
             importance = int(mem_dict.get("importance") or 3)
+            # Prepend type:procedural tag when candidate has kind=='procedural'
+            if mem_dict.get("kind") == "procedural" and "type:procedural" not in tags:
+                tags = ["type:procedural"] + list(tags)
             mem = _make_memory(
                 content=content,
                 title=title,
@@ -1235,6 +1391,49 @@ def run(session_id: str, transcript_path: str) -> None:
 
         # 9. Update offset
         _write_offset(session_id, eof)
+
+        # 9b. Dream counter — increment on substantive deltas (memories non-empty)
+        # and spawn a detached dream pass when threshold reached. Tolerable int drift
+        # (read-int/write-int is atomic enough for this use case).
+        if memories:
+            try:
+                counter_path = _dream_counter_path()
+                try:
+                    current_count = int(counter_path.read_text().strip())
+                except (FileNotFoundError, ValueError):
+                    current_count = 0
+                current_count += 1
+                if current_count >= _DREAM_COUNTER_THRESHOLD and (
+                    os.environ.get("MEMEM_DREAM_AUTO", "1") != "0"
+                ):
+                    # Opt-out: MEMEM_DREAM_AUTO=0 disables the autonomous dream
+                    # trigger (unattended Haiku spend + auto-applied vault
+                    # mutations must always have a kill switch on a local-first
+                    # tool). Default on for miner-opted-in users.
+                    # Reset counter before spawning to avoid double-firing on
+                    # concurrent mine calls (drift is acceptable; the dream
+                    # pass's own .dream.lock NB-flock is the real guard).
+                    counter_path.write_text("0")
+                    try:
+                        dream_env = {**os.environ, "MEMEM_HOOK_DISABLE": "1"}
+                        subprocess.Popen(
+                            [sys.executable, "-m", "memem.server", "--dream", "--safe-auto"],
+                            start_new_session=True,
+                            env=dream_env,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                        )
+                        log.info(
+                            "mine_delta: dream counter reached %d; spawned detached dream pass",
+                            _DREAM_COUNTER_THRESHOLD,
+                        )
+                    except Exception as exc:
+                        log.warning("mine_delta: failed to spawn dream pass: %s", exc)
+                else:
+                    counter_path.write_text(str(current_count))
+            except Exception as exc:
+                # Never break mining due to counter errors
+                log.debug("mine_delta: dream counter update failed (non-fatal): %s", exc)
 
         # 10. Record session
         _record_mined_session(session_id)

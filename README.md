@@ -30,6 +30,10 @@ memem is a Claude Code plugin that gives Claude persistent memory across session
 
 It's **local-first**: no cloud services, no API keys required, no vendor lock-in. Everything lives in `~/obsidian-brain/memem/memories/` as human-readable markdown.
 
+### What's new in v2.8.0 (Vault Structure)
+
+v2.8.0 retires the L0–L3 layer system and replaces it with a context model that reflects how memory actually works. The starting point was honest data: 462 memories had been auto-classified L0 ("always relevant"), which was not a layer, it was a full briefing that no session could absorb. The new model has three tiers: (1) **profiles** — schema-shaped always-injected documents per user (`profile_user.md`: Preferences / Conventions / Environment) and per project (`profile_<project>.md`: Identity / Stack & Structure / Conventions), stored at `<vault>/memem/profiles/`, populated by the miner's new `PROFILE` reconcile op and bootstrappable from your existing vault via `--migrate-layers`; (2) **working rules** — `type:procedural` memories (failure→fix patterns, corrections) ranked by citation count and injected as a `## Working rules` block at session start (≤1200 chars); (3) **episode index** — the existing 25-entry episodic title index, unchanged. Consolidation logic moves from the deleted `consolidation.py` into the dreamer's `cluster_merge` category with a bug fix: only the members listed in `supporting_ids` are bi-temporally invalidated after a successful merge, not all cluster members unconditionally. The dreamer gains `reflection_with_citations` (synthesizes `type:insight` memories from episodic clusters) and `tense_rewrite` (corrects expired future-tense memories) as additive-safe categories that fire automatically every 25 substantive mining deltas via `--dream --safe-auto`. The 18-query benchmark improved to **80.0% (120/150)** after L0 MMR pre-seeding was removed — the anchor mechanism was penalizing relevance, not helping it (measured during release validation; up from 79.3%/119/150 in v2.7.0). See [CHANGELOG](CHANGELOG.md) for full details.
+
 ### What's new in v2.7.0 (Write Path + Instrumentation)
 
 v2.7.0 makes the miner smarter about what it writes: instead of adding every extracted candidate blindly, it compares each one against its nearest vault neighbors in a single batched Haiku call and picks ADD, UPDATE, SUPERSEDE, or NOOP with safety rails (protected-target guard, truncation guard, ≤5 destructive ops per delta, global fallback to ADD-all on any exception). The previously unreachable bi-temporal invalidation path (`invalid_at` / `replaced_by`) is now exercised by SUPERSEDE ops. Every retrieval is now linked to a session id, and the miner scans assistant text for cited memory ids and writes `{"type":"citation"}` rows to `.recall_log.jsonl` — closing the feedback loop so `--analyze-recalls` shows citation rate per tool and the dreamer demotion guard is live again after sitting inert since v2.5. Additional improvements: key expansion (miner emits up to 8 synonyms/aliases per memory, FTS+BM25 indexed), tool-trace digest (Bash/Edit decisions are now minable), `memory_save` three-band dedup (merge instead of reject for 0.70–0.92 near-duplicates), `--purge-contaminated --exclude`, and flock-safe feedback EMA writes. Benchmark unchanged at 79.3%. See [CHANGELOG](CHANGELOG.md) for full details.
@@ -159,18 +163,15 @@ The lower-level recall tools still exist for explicit drilling:
 3. `memory_timeline(id)` -> chronological thread
 4. `context_assemble(query, project)` -> optional secondary narrative briefing
 
-**Memory layers (auto-classified at save AND mining time; Claude can override):**
+**Context model (v2.8+) — three tiers injected at session start:**
 
-| Layer | Purpose | Slice behavior |
-|-------|---------|-----------|
-| **L0** | Project identity — tech stack, repo structure, core conventions | **Always pinned** in every active slice for that project (anchor score 0.95) |
-| **L1** | Generic conventions — testing, style, commit patterns | Ranked + scored alongside L2 |
-| **L2** | Domain-specific — most memories (default) | Ranked + scored (default search hits) |
-| **L3** | Rare/archival — niche failure modes, one-off lessons | **Excluded from auto-recall**; only via explicit `memory_search`/`memory_get` |
+| Tier | What | Budget |
+|------|------|--------|
+| **Profiles** | `profile_user.md` + `profile_<project>.md` — always-injected, schema-shaped, populated by the `PROFILE` reconcile op | ≤~600 tokens |
+| **Working rules** | `type:procedural` memories ranked by citation count (last 30d) | ≤~300 tokens |
+| **Episode index** | Up to 25 recent `type:episodic` titles | ~25 entries |
 
-A heuristic (`mining.py:classify_layer`) assigns layers based on importance, structural tags, content length, and the per-project L0 cap. `memory_save(content, ..., layer=N)` accepts an explicit override (0-3) when Claude judges better than the heuristic.
-
-Token efficiency: session start injects only the Episode index (up to 25 recent `type:episodic` titles). There is no L0 full-content dump at session start. Use `memory_search` or `memory_get` to pull project-identity memories on demand.
+Everything else is available on demand via `memory_search` / `memory_get`. Legacy memories with `layer:` frontmatter are readable; `memory_save(layer=N)` is still accepted but deprecated.
 
 **Active Memory Slice runtime kernel:**
 
@@ -205,8 +206,8 @@ Opt-in features:
 Injection mode (v1.9+, default changed in v2.4.0) — controls auto-injection behavior:
 - **`MEMEM_INJECTION_MODE`** — `tool` (**default since v2.4.0** — silence hook, LLM pulls via MCP tools), `auto` (pre-v2.4.0 behavior — inject on every prompt). To restore the old default: `export MEMEM_INJECTION_MODE=auto`. Note: `hybrid` was removed in v2.5.0 (was documented but never implemented; treated as `auto`).
 
-Selective recall (v2.5.0, live settings only):
-- **`MEMEM_RECALL_MIN_ITEM_SCORE=0.0`** — per-item composite-score floor for recall results (0.0 = disabled). L0 project-identity anchors are always exempt.
+Selective recall:
+- **`MEMEM_RECALL_MIN_ITEM_SCORE=0.0`** — per-item composite-score floor for recall results (0.0 = disabled).
 
 Migration note (v2.4.0): if you previously relied on per-turn auto-injection, set `export MEMEM_INJECTION_MODE=auto` in your shell profile. The new `tool` default reduces token overhead ~85% but requires the LLM to pull memory via the MCP tools when it judges context is needed.
 
@@ -328,10 +329,10 @@ All recall tools return **slice-formatted markdown** via a unified `render_slice
 
 | Tool | What it does |
 |------|------|
-| `memory_save(content, title, tags, layer?)` | Store a lesson. Security-scanned for prompt injection and credential exfil before writing. `layer` is optional (0-3); auto-classifies via `classify_layer` if omitted. |
-| `memory_search(query, limit, scope_id)` | **[L1]** Compact index slice — IDs + layer + title + 1-line snippet. Use first to narrow candidates. |
-| `memory_get(ids, scope_id)` | **[L2]** Full content slice for specific memory IDs. Use after `memory_search`. |
-| `memory_timeline(memory_id, scope_id)` | **[L3]** Chronological thread via `related[]` graph + same-project window. |
+| `memory_save(content, title, tags, layer?)` | Store a lesson. Security-scanned for prompt injection and credential exfil before writing. `layer` param is accepted for backward compat but deprecated (v2.8.0: new memories carry no layer field). |
+| `memory_search(query, limit, scope_id)` | Compact index slice — IDs + title + 1-line snippet. Use first to narrow candidates. |
+| `memory_get(ids, scope_id)` | Full content slice for specific memory IDs. Use after `memory_search`. |
+| `memory_timeline(memory_id, scope_id)` | Chronological thread via `related[]` graph + same-project window. |
 | `memory_recall(query, scope_id, limit)` | Legacy alias — search + full content in one slice. |
 | `memory_list(scope_id)` | List all memories with stats, grouped by project. |
 | `memory_import(source_path)` | Bulk import from files, directories, or chat exports. |
@@ -340,7 +341,7 @@ All recall tools return **slice-formatted markdown** via a unified `render_slice
 | `memory_graph(memory_id)` | Inspect typed/scored graph neighbors for one memory. |
 | `memory_graph_audit()` | Report graph quality issues: orphans, dead links, hubs, stale edges. |
 | `memory_graph_rebuild(scope_id)` | Rebuild the graph side index from the Obsidian vault. |
-| `active_memory_slice(query, task_mode?)` | v2.3.0: thin wrapper over `retrieve()` + `render_slice()`. Returns markdown with `## Working` + `## Relevant`. Retrieval uses BM25 + cosine RRF fusion (top-20 pool) followed by MMR diversification (λ=0.7) to select the final 8 results. FTS supplement retained for version/date literals. L0 project-identity memories are exempt from MMR diversity penalty. |
+| `active_memory_slice(query, task_mode?)` | On-demand working-state slice. Uses three-way RRF (cosine + BM25 + FTS5, top-20 pool) + MMR diversification (λ=0.7, 8 results). |
 
 ## How do I inspect slices or writeback manually?
 

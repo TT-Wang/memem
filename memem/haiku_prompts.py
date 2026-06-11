@@ -29,6 +29,13 @@ _HAIKU_MINE_SYSTEM = (
     '- "importance": integer 1-5 rating how important this is for a future AI session. '
     "1=trivial fact, 2=useful info, 3=convention/pattern, 4=architecture decision, "
     "5=critical user preference or correction (required)\n\n"
+    '- "kind": (optional) set to "procedural" when the memory captures a behavioral '
+    "rule — emit it when: (1) the conversation shows a failure→fix sequence where "
+    "the assistant did X and the user corrected it, (2) the user explicitly corrects "
+    "the assistant's approach ('don't do X', 'always Y', 'never Z'), or (3) the "
+    "session establishes a do-this-not-that instruction. Procedural content MUST be "
+    "phrased imperatively ('Always X', 'Never Y', 'When Z, do W'). Keep content "
+    "≤200 chars. One rule per memory. If not a behavioral rule, omit this field.\n\n"
     "SAVE these (durable knowledge):\n"
     "- User preferences, conventions, and corrections\n"
     "- Architecture decisions with rationale\n"
@@ -76,22 +83,37 @@ _HAIKU_RECONCILE_SYSTEM = (
     "(existing memories already in the vault). "
     "For each candidate, decide what to do:\n\n"
     "Output a strict JSON array with one object per candidate (same order). Each object:\n"
-    '{"index": <int>, "op": "ADD"|"UPDATE"|"SUPERSEDE"|"NOOP", '
+    '{"index": <int>, "op": "ADD"|"UPDATE"|"SUPERSEDE"|"NOOP"|"PROFILE", '
     '"target": "<8-char-id or null>", '
     '"content": "<merged content, only for UPDATE>"|null, '
+    '"profile": "user"|"project"|null, '
+    '"section": "<section name or null>", '
+    '"line": "<distilled fact, ≤200 chars, only for PROFILE>"|null, '
     '"reason": "<10 words max>"}\n\n'
     "Decision guidance:\n"
     "- ADD: new information not covered by any neighbor\n"
     "- UPDATE: candidate refines or extends a neighbor (provide merged content preserving both)\n"
     "- SUPERSEDE: candidate makes a neighbor obsolete (contradicts or replaces it)\n"
-    "- NOOP: candidate is fully redundant with an existing neighbor\n\n"
+    "- NOOP: candidate is fully redundant with an existing neighbor\n"
+    "- PROFILE: stable user preference / habit / project identity / convention that should "
+    "ALWAYS be in context rather than retrieved on demand. "
+    "Prefer PROFILE over ADD for facts that are permanently relevant to every future session. "
+    "Use profile='user' for stable user preferences, habits, and environment facts. "
+    "Use profile='project' for project identity, stack, and project-level conventions.\n\n"
+    "Valid sections for profile='user': Preferences, Conventions, Environment\n"
+    "Valid sections for profile='project': Identity, Stack & Structure, Conventions\n\n"
     "Rules:\n"
-    "- target must be the 8-char id of the neighbor, or null for ADD\n"
+    "- target must be the 8-char id of the neighbor, or null for ADD/PROFILE\n"
     "- content is REQUIRED for UPDATE (merged text), null for others\n"
     "- For UPDATE: merged content must preserve ALL substantive information from BOTH the "
     "neighbor and the candidate — never shorter than the neighbor's content\n"
     "- NEVER choose UPDATE or SUPERSEDE for a neighbor that looks like project-identity or "
     "core-convention content unless the candidate explicitly contradicts it\n"
+    "- For PROFILE: set profile ('user' or 'project'), section (must be a valid section "
+    "for that profile type), and line (the distilled fact ≤200 chars); "
+    "target and content must be null\n"
     "- Output ONLY the JSON array, no other text\n"
-    "- If unsure, prefer ADD over NOOP to avoid losing information"
+    "- If unsure, prefer ADD over NOOP to avoid losing information\n"
+    "- Candidates tagged type:procedural (behavioral rules) usually ADD — "
+    "rules accumulate; only UPDATE when refining the exact same rule"
 )

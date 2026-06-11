@@ -10,6 +10,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
 
+## v2.8.0 — Vault Structure (2026-06-11)
+
+The L0 promise is finally real — as profiles. Layers are retired because the data falsified them: 462 memories were classified L0 ("always relevant"), which is not a layer, it's a full briefing. v2.8.0 replaces the layer architecture with a three-tier context model that works: (1) profiles — schema-shaped always-injected documents per user and per project; (2) working rules — procedural memories ranked by citation count, capped and injected at session start; (3) episode index + on-demand retrieval for everything else. The 18-query benchmark improved to **80.0% (120/150)** after L0 MMR pre-seeding was removed — the anchor mechanism was penalizing relevance, not helping it.
+
+### Added
+
+- **Profiles (`memem/profiles.py`)** — schema-shaped always-injected context documents stored at `<vault>/memem/profiles/`. Two document types: `profile_user.md` (sections: Preferences / Conventions / Environment) and `profile_<project>.md` (sections: Identity / Stack & Structure / Conventions). `append_fact()` writes structured bullet-point facts under the correct section using fuzzy deduplication (rapidfuzz `token_set_ratio ≥ 85` → skip), security scanning, and Haiku compaction at the 2500-character cap (compacts to ≤2000 chars rather than blind-truncating; rejects the write if compaction fails). Profiles are deliberately NOT in the FTS/embedding retrieval corpus — their consumer is SessionStart injection, not relevance-ranked recall.
+- **Reconciler PROFILE op (`mine_delta.py`)** — the Haiku reconciler can now emit `op: PROFILE` to write facts directly into a user or project profile instead of saving a vault memory. Capped at ≤3 PROFILE ops per delta (own counter, separate from the UPDATE+SUPERSEDE cap). Schema-validated against the profile type's allowed section list. 'general'-project degrades to ADD (no project profile for the global scope). Any PROFILE failure degrades to ADD. Audited as `reconcile_profile` in `events.jsonl`.
+- **`type:procedural` memory kind** — the extractor now emits `kind: procedural` for failure→fix and correction-type knowledge (imperative phrasing). Tagged `type:procedural` through ADD, SUPERSEDE, and fallback save paths in `mine_delta.py`.
+- **`## Working rules` block in SessionStart (`session_blocks.py`)** — procedural memories are ranked by citation count (last 30 days, `recall_log.jsonl`) then by recency, capped to ≤1200 chars, and injected as a `## Working rules` block at session start.
+- **`render_session_start()` in `session_blocks.py`** — unified composer for three independently-budgeted SessionStart blocks: profiles (≤~600 tokens), working rules (≤~300 tokens), episode index (25 entries). Uses a single vault load shared across the working-rules and episode-index blocks. `session-start.sh` updated to call this function via bash heredoc; the hook is hardened with an `|| emit_empty` fallback so SessionStart always returns valid JSON on Python failure.
+- **`memem/dreamer.py` new dream categories**:
+  - `reflection_with_citations`: when ≥8 new episodic memories have accumulated since the last dream pass, synthesizes ≤3 `type:insight` memories with `related[]` links to their supporting episodes.
+  - `tense_rewrite`: scans for memories with future-tense phrases (e.g. "will be", "planning to") older than 30 days, rewrites them to past/present tense (≤10 per dream pass); memories shorter than 50% of the original after rewrite are rejected; `type:procedural`, `type:skill`, and `type:insight` memories are excluded from scanning, and **user-authored memories (`source_type: user`) are never tense-rewritten in any mode** — automated rewriting is reserved for machine-mined content.
+- **SAFE-AUTO mode (`--dream --safe-auto`)** — additive and content-preserving dream categories (`reflection_with_citations`, `tense_rewrite`) auto-apply without human review; destructive categories (demotions, contradiction detection, cluster merges) remain dry-run-report-only. The `--consolidate` flag is retained as a back-compat alias that filters the diff to `cluster_merge` proposals only. Legacy `--consolidate` flags (`--layer`, `--min-cluster`, `--threshold`) are accepted but ignored (a NOTE is printed); it shares `.dream.lock` with the auto-dream and still runs LIVE by default for back-compat (`--dry-run` to preview).
+- **Event-triggered dream pass** — every 25 substantive mining deltas (deltas that produce ≥1 vault write) spawn a detached `--dream --safe-auto` pass. A counter file at `$MEMEM_DIR/.dream-counter` tracks progress; a `.dream.lock` flock prevents double-firing. **Opt-out: `MEMEM_DREAM_AUTO=0`** disables the autonomous trigger entirely (manual `--dream` still works) — unattended LLM spend always has a kill switch. Cost: up to ~3 Haiku calls per 25 deltas.
+- **`cluster_merge` folded into dreamer** — `consolidation.py` is deleted; embedding-based greedy clustering and Haiku canonical merge now live as the `cluster_merge` dream category in `dreamer.py`. `supporting_ids` from Haiku are respected: only the members listed in `supporting_ids` are bi-temporally invalidated via `invalidate_memory()`, and only after the canonical memory saves successfully.
+- **`--migrate-layers` CLI** — `python3 -m memem.server --migrate-layers` (dry-run by default) produces a migration report at `$MEMEM_DIR/migrate-layers-report.md` and a proposals JSON. Pass `--apply` to execute: calls `profiles.append_fact()` for each proposed PROFILE item. Idempotent and additive-only — memories are never deleted or modified. Pass `--exclude id8[,...]` to skip specific memories. **HUMAN REVIEW REQUIRED before `--apply`**: the report shows what will be written to profiles; review it first.
+
+### Changed
+
+- **Layer retirement** — `classify_layer` is deleted from `mining.py`. New memories no longer receive a `layer:` frontmatter field. The explicit `layer` parameter on `memory_save` is still accepted for API backward compatibility, but it is deprecated. Legacy memories with `layer:` frontmatter remain fully readable; L0 / `decay_immune` legacy memories retain dreamer protection.
+- **L0 MMR pre-seeding removed (`retrieve.py`)** — the mechanism that pre-seeded L0 and `decay_immune` memories into the MMR selected set (bypassing diversity scoring) has been removed. This was identified as a source of ranking noise: the 18-query benchmark improved from **79.3% (119/150)** to **80.0% (120/150)** after removal (measured during release validation).
+
+### Removed
+
+- **`memem/consolidation.py`** — deleted. Clustering logic lives in `dreamer.py::find_cluster_merge_proposals()`. The `--consolidate` CLI flag is retained as a back-compat alias.
+
+### Fixed
+
+- **Cluster merge deprecate-all-members bug** — the old `consolidation.py` path invalidated all cluster members even when the Haiku merge call failed or returned empty output. The new `cluster_merge` path in `dreamer.py` only bi-temporally invalidates members listed in `supporting_ids`, and only after the canonical memory saves successfully.
+
+### Migration notes
+
+- **Run `--migrate-layers` to bootstrap profiles from your existing vault:**
+  ```bash
+  python3 -m memem.server --migrate-layers          # dry-run — writes report to $MEMEM_DIR/migrate-layers-report.md
+  # REVIEW THE REPORT before proceeding
+  python3 -m memem.server --migrate-layers --apply  # idempotent, additive-only
+  ```
+  Migration is optional — the vault works without it. Existing L0/L1 memories remain retrievable; they just won't appear in the always-injected profile documents until you run the migration.
+- **Legacy `layer:` frontmatter fields are inert but readable.** Existing memories keep their `layer:` field; it is never modified or deleted by v2.8.0 code. The field is simply no longer written for new memories and no longer drives retrieval behavior (L0 MMR pre-seeding is gone; dreamer protection for `decay_immune` memories remains).
+- **`memory_save(layer=N)` still accepted** — but the `layer` parameter is deprecated.
+- **Benchmark note:** 18-query precision measured during release validation on the live vault: **80.0% (120/150)**, up from 79.3% (119/150) in v2.7.0. The +0.7 pp step is attributed to removal of L0 MMR pre-seeding.
+
 ## v2.7.0 — Write Path + Instrumentation (2026-06-10)
 
 The miner now reconciles instead of blindly adding: each new candidate is compared against its nearest vault neighbors in one batched Haiku call and assigned ADD, UPDATE, SUPERSEDE, or NOOP — with a full audit trail per op. Every retrieval and inline citation is now measured via structured rows in `.recall_log.jsonl`, closing the feedback loop between what Claude reads and what the miner produces.

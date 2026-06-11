@@ -33,7 +33,10 @@ INPUT_FILE=$(mktemp)
 trap 'rm -f "$INPUT_FILE"' EXIT
 cat > "$INPUT_FILE" || true
 
-"${MEMEM_PYTHON:-python3}" - "$PLUGIN_ROOT" "$INPUT_FILE" "$MEMEM_DIR" << 'HOOKPY'
+# `|| emit_empty`: if the python heredoc itself dies before emitting JSON
+# (interpreter missing, import explosion), hand the harness a valid empty
+# envelope instead of silence + non-zero exit under `set -e`.
+"${MEMEM_PYTHON:-python3}" - "$PLUGIN_ROOT" "$INPUT_FILE" "$MEMEM_DIR" << 'HOOKPY' || emit_empty
 import json
 import os
 import sys
@@ -100,29 +103,16 @@ except Exception:
 session_id = str(hook.get("session_id", "") or "")
 cwd = str(hook.get("cwd") or os.environ.get("PWD") or os.getcwd())
 scope = detect_scope(cwd)
-# session-start context = episode index below; the per-prompt slice engine was removed in v2.0.0
+# session-start context = three-block budgeted assembly (v2.8):
+#   1. Profiles block (user + project profile, ~2400 chars)
+#   2. ## Working rules (procedural memories, ~1200 chars)
+#   3. ## Episode index (recent episodic memories, ~1600 chars, capped at 25)
+# All blocks composed by render_session_start; total target ≤ 5200 chars.
 content = ""
-
-# Episode catalog (v2.4.0) — list recent episodic memories so LLM
-# knows what stories it can pull via memory_get(id).
 try:
-    from memem.obsidian_store import _obsidian_memories
-    all_mems = _obsidian_memories()
-    # Filter strictly to episodic memories, sort by created desc, cap at 25
-    episodic = sorted(
-        [m for m in all_mems if "type:episodic" in (m.get("domain_tags") or [])],
-        key=lambda m: m.get("created_at") or m.get("created") or "",
-        reverse=True,
-    )[:25]
-    if episodic:
-        cat_lines = ["", "## Episode index"]
-        for m in episodic:
-            mid = (m.get("id") or "")[:8]
-            date = (m.get("created_at") or m.get("created") or "")[:10] or "----"
-            title = (m.get("title") or "(untitled)")[:80]
-            cat_lines.append(f"- {mid} [{date}]: {title}")
-        content += "\n" + "\n".join(cat_lines)
-except Exception:  # noqa: BLE001 — never break SessionStart on catalog failure
+    from memem.session_blocks import render_session_start
+    content = render_session_start(scope) or ""
+except Exception:  # noqa: BLE001 — never break SessionStart
     pass
 
 # v2.0.0 Phase 4.5 fix: write .last-brief.json BEFORE the emit_empty() check.

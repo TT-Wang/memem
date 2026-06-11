@@ -111,9 +111,11 @@ def test_save_memory_emits_expected_live_fields(tmp_vault, tmp_cortex_dir):
     assert written_files
 
     # These are the live fields _write_obsidian_memory always emits.
+    # v2.8.0: "layer" removed from required set — new memories omit layer field
+    # (layer retirement). Explicit layer=N passthrough still works.
     expected_live = {"id", "schema_version", "title", "project", "tags",
                      "created", "updated", "source_type", "source_session",
-                     "importance", "status", "valid_to", "layer"}
+                     "importance", "status", "valid_to"}
 
     for md_file in written_files:
         text = md_file.read_text(encoding="utf-8")

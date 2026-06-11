@@ -11,15 +11,26 @@ In `auto` mode, the UserPromptSubmit hook fires on every message and builds an `
 
 For on-demand recall, use the MCP tools below.
 
-## Layered recall (v0.10)
+## Context model (v2.8+)
 
-Memories are organized into layers:
-- **L0 (always-loaded):** project identity — tech stack, repo structure, core conventions. L0 memories are pre-seeded in MMR (decay_immune) so they anchor every retrieval.
-- **L1 (generic conventions):** broadly useful patterns (testing, style, commit conventions)
-- **L2 (domain-specific):** most memories — the default bucket
-- **L3 (rare/archival):** niche failure modes, one-off lessons
+v2.8.0 replaces the L0–L3 layer system with a three-tier context model. Layers are retired — the data falsified them.
 
-**At session start** you receive only the Episode index (up to 25 recent `type:episodic` memories listed by title). There is no L0 briefing injected at session start. Use `memory_search` or `memory_get` to pull L0 project-identity content on demand.
+### Tier 1 — Profiles (always-injected)
+
+Profile documents at `<vault>/memem/profiles/` are injected at every session start before any memory recall occurs. Two document types:
+
+- **`profile_user.md`** — sections: Preferences / Conventions / Environment
+- **`profile_<project>.md`** — sections: Identity / Stack & Structure / Conventions
+
+Profiles are NOT in the retrieval corpus (you will never see them in `memory_search` results). Their consumer is the SessionStart hook. The miner writes to profiles via the `PROFILE` reconcile op; you can also populate them via `--migrate-layers --apply`.
+
+### Tier 2 — Working rules (procedural, citation-ranked)
+
+At session start you receive a `## Working rules` block containing `type:procedural` memories — failure→fix patterns and correction knowledge — ranked by citation count (last 30 days) then by recency, capped to ≤1200 chars. These are the rules you have cited most recently in your work.
+
+### Tier 3 — Episode index + on-demand retrieval
+
+At session start you also receive a `## Episode index` of up to 25 recent `type:episodic` memory titles. Everything else is available on demand via the recall tools below.
 
 **During the session**, use the 3-tier recall workflow:
 
@@ -44,18 +55,23 @@ Memories are organized into layers:
 
 Set this in your Claude Code environment or shell profile (e.g. `export MEMEM_INJECTION_MODE=auto`).
 
-Selective-recall tunables (v1.9.6+, env vars, all optional):
+Selective-recall tunables (env vars, all optional):
 
 | Var | Default | Behaviour |
 |-----|---------|-----------|
-| `MEMEM_RECALL_MIN_ITEM_SCORE` | `0.0` | Per-item composite-score floor for recall results (0.0 = disabled). L0 project-identity anchors are always exempt. Clamped to `[0.0, 1.0]`. |
+| `MEMEM_RECALL_MIN_ITEM_SCORE` | `0.0` | Per-item composite-score floor for recall results (0.0 = disabled). Clamped to `[0.0, 1.0]`. |
 | `MEMEM_RERANK_MODEL` | `""` | Cross-encoder reranker model name (e.g. `cross-encoder/ms-marco-MiniLM-L-12-v2`). When set, all `memory_search`/`memory_recall` calls apply a CE reranking pass over the top-50 unified-engine candidates before truncating to `limit`. Model downloaded on first use. Not required — three-way RRF produces strong results without CE. |
+| `MEMEM_DREAM_AUTO` | `1` | Set `0` to disable the autonomous every-25-deltas dream pass (unattended Haiku spend + auto-applied additive vault mutations). Manual `--dream` is unaffected. |
 
 **Retrieval engine (v2.6.0+)** — `memory_search`, `memory_recall`, and `active_memory_slice` all use the same unified engine: three-way RRF (cosine + BM25 + FTS5) with a rerank signal bundle (usage, scope, link, importance) and MMR diversification. There is no separate heuristic engine.
 
 **Scope semantics (v2.6.0+)** — `scope_id` is a **soft bonus** (not a hard filter). Memories in the named project rank higher, but strong cross-project results are not excluded. Default `"default"` applies no scope bonus.
 
 **Graph traversal** — `memory_search` and `memory_get` automatically follow the `related[]` field one hop and include linked memories in a separate section.
+
+### Layer field (deprecated)
+
+The `layer` parameter on `memory_save` is still accepted for backward compatibility but deprecated — new memories are written without a `layer:` field and the value has no effect on retrieval. Legacy memories with `layer:` frontmatter remain readable; L0 / `decay_immune` memories retain dreamer protection. To migrate your existing L0/L1 content into profiles, run `python3 -m memem.server --migrate-layers`.
 
 ## Auto-save
 
@@ -82,13 +98,14 @@ Call `mcp__memem__memory_save` with:
 - Score **0.70–0.92** — similar content; Haiku merges the new content into the existing memory and unions tags. Returns "Merged into existing memory [id8] title..." Merge failures fall back to reject.
 - Score **< 0.70** — genuinely new; saved normally.
 
-## Kind tags (v1.10)
+## Kind tags
 
 Tag `memory_save` calls with a `type:*` tag to help recall-time grouping:
 
 - `type:episodic` — timestamped event (decision made, problem encountered, status update at a moment in time)
 - `type:skill` — reusable approach, pattern, or convention (something to do again)
 - `type:case` — full task narrative: problem → approach → result
+- `type:procedural` — failure→fix or correction knowledge (imperative phrasing); miner emits this automatically; surfaced in `## Working rules` at session start, ranked by citation count
 
 **Multi-label OK:** a memory can carry both `type:episodic` and `type:case` (e.g., a debugging session that tells a full story).
 
@@ -124,14 +141,15 @@ rm ~/.memem/.miner-opted-in
 
 **Purging contaminated memories:** if mining artifacts were saved to the vault before the v2.5.0 stale-sweep guard, run `python3 -m memem.server --purge-contaminated` to identify them (dry-run by default). Add `--apply` to permanently delete the flagged memories. Use `--exclude id8[,id8,...]` to skip specific memories by 8-char id prefix.
 
-**Reconciliation (v2.7.0):** the miner no longer blindly adds every extracted candidate. Before saving, `_reconcile_candidates` compares each candidate against its top-5 vault neighbors (ngram search) in one batched Haiku call and assigns one of four ops:
+**Reconciliation (v2.7.0+):** the miner no longer blindly adds every extracted candidate. Before saving, `_reconcile_candidates` compares each candidate against its top-5 vault neighbors (ngram search) in one batched Haiku call and assigns one of five ops:
 
 - **ADD** — new information; saved normally with a stable deterministic id (`uuid5(session_id+content)` — idempotent re-mining).
 - **UPDATE** — candidate refines a neighbor; `_update_memory` merges content and unions tags/keys. Safety rail: merged content must be ≥ 10 chars and ≥ 30% of neighbor's essence, otherwise degrades to ADD.
-- **SUPERSEDE** — candidate contradicts/replaces a neighbor; new memory saved, neighbor bi-temporally invalidated (`invalid_at`, `replaced_by` frontmatter). Safety rail: L0 and `decay_immune` memories are never superseded.
+- **SUPERSEDE** — candidate contradicts/replaces a neighbor; new memory saved, neighbor bi-temporally invalidated (`invalid_at`, `replaced_by` frontmatter). Safety rail: `decay_immune` memories are never superseded.
 - **NOOP** — candidate is fully redundant; skipped.
+- **PROFILE** (v2.8.0) — candidate is written directly to a user or project profile document instead of saving a vault memory. Capped at ≤3 PROFILE ops per delta. Schema-validated against the profile's allowed section list. Degrades to ADD on any failure.
 
-Cap: at most 5 UPDATE+SUPERSEDE ops per delta. Any reconcile exception falls back to v2.6 ADD-all. Every op writes an audit event (`reconcile_add/update/supersede/noop`) to `~/.memem/events.jsonl`.
+Cap: at most 5 UPDATE+SUPERSEDE ops per delta (PROFILE ops have their own cap of 3). Any reconcile exception falls back to ADD-all. Every op writes an audit event (`reconcile_add/update/supersede/noop/reconcile_profile`) to `~/.memem/events.jsonl`.
 
 **Key expansion (v2.7.0):** Haiku now emits up to 8 `keys` per memory (synonyms, entity names, abbreviations, error strings). Keys are stored in frontmatter (`keys:` block), FTS-indexed via the `tags` column (no schema bump), and included in BM25 text so keyword queries find memories by alias.
 
@@ -140,9 +158,9 @@ Cap: at most 5 UPDATE+SUPERSEDE ops per delta. Any reconcile exception falls bac
 | Tool | What |
 |------|------|
 | `memory_save` | Store a lesson, pattern, or convention |
-| `memory_search` | **[Layer 1]** Compact index search — returns ~50 tok/result, use first |
-| `memory_get` | **[Layer 2]** Full content fetch by IDs — use after memory_search |
-| `memory_timeline` | **[Layer 3]** Chronological thread via related[] graph |
+| `memory_search` | Compact index search — returns ~50 tok/result, use first |
+| `memory_get` | Full content fetch by IDs — use after memory_search |
+| `memory_timeline` | Chronological thread via related[] graph |
 | `memory_recall` | (legacy) Search + fetch full content — prefer search+get for token efficiency |
 | `memory_list` | List all memories with stats |
 | `memory_import` | Import from files, directories, or chat exports |
@@ -151,16 +169,22 @@ Cap: at most 5 UPDATE+SUPERSEDE ops per delta. Any reconcile exception falls bac
 | `active_memory_slice` | On-demand runtime working-state slice from active recall candidates |
 
 **CLI commands** (run in your terminal, not via MCP):
-- `python3 -m memem.server --analyze-recalls` — summarize recall telemetry from `~/.memem/.recall_log.jsonl`: which tools were called, which memories retrieved most often, recall frequency per session, citation rate per tool (v2.7.0: fraction of returned memories later cited in assistant text), top cited memories, and returned-ids count (token-budget proxy). Use this to understand how Claude is (or isn't) pulling memory.
+- `python3 -m memem.server --analyze-recalls` — summarize recall telemetry from `~/.memem/.recall_log.jsonl`: which tools were called, which memories retrieved most often, recall frequency per session, citation rate per tool (fraction of returned memories later cited in assistant text), top cited memories, and returned-ids count (token-budget proxy). Use this to understand how Claude is (or isn't) pulling memory.
 - `python3 -m memem.server --purge-contaminated [--apply]` — identify (dry-run) or delete memories mined from headless mining transcripts. Default is dry-run; pass `--apply` to permanently delete.
-- `python3 -m memem.server --purge-contaminated --exclude id8[,id8,...] [--apply]` — skip specific memories by 8-char id prefix when purging (v2.7.0).
+- `python3 -m memem.server --purge-contaminated --exclude id8[,id8,...] [--apply]` — skip specific memories by 8-char id prefix when purging.
+- `python3 -m memem.server --migrate-layers [--apply] [--exclude id8,...]` — dry-run report (default) or apply migration of legacy L0/L1 memories into profile documents. **HUMAN REVIEW REQUIRED before `--apply`**. Idempotent and additive-only — memories are never deleted.
+- `python3 -m memem.server --dream [--safe-auto]` — run a dream pass. `--safe-auto` auto-applies additive categories (reflection_with_citations, tense_rewrite) and leaves destructive categories (demotions, cluster merges) as dry-run-report-only.
+- `python3 -m memem.server --consolidate` — back-compat alias for `--dream` filtered to cluster_merge proposals only.
 
-## Episodic consolidation (v1.7)
+## Dream cycles (v2.8+)
 
-Run `python3 -m memem.server --consolidate` to cluster near-duplicate memories by
-embedding similarity and merge them into canonical memories (flagging contradictions).
-Recommended cadence: weekly cron. The cron itself is not installed by this module —
-wire it manually if desired (e.g. `0 2 * * 0 python3 -m memem.server --consolidate`).
+The dreamer runs background maintenance on the vault. Categories:
+
+- **`cluster_merge`** — embedding-based greedy clustering; Haiku merges clusters into canonical memories and bi-temporally invalidates only the `supporting_ids` members (not all cluster members). Destructive — requires `--apply` or explicit approval.
+- **`reflection_with_citations`** — when ≥8 new episodic memories have accumulated since last dream, synthesizes ≤3 `type:insight` memories with `related[]` links. Additive — auto-applied in `--safe-auto`.
+- **`tense_rewrite`** — rewrites expired future-tense memories (older than 30 days) to past/present tense. Content-preserving — auto-applied in `--safe-auto`. `type:procedural`, `type:skill`, and `type:insight` memories are excluded.
+
+**Automatic dream trigger**: every 25 substantive mining deltas (deltas that produce ≥1 vault write) spawn a detached `--dream --safe-auto` pass. A `.dream.lock` flock prevents double-firing.
 
 ## Backward compatibility
 

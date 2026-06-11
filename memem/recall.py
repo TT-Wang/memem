@@ -43,7 +43,10 @@ def _layer_summary_from_items(items: list[dict]) -> dict:
     """Return a {layer: count} summary dict from a list of item dicts."""
     summary: dict[int, int] = {}
     for item in items:
-        layer = int(item.get("layer") or DEFAULT_LAYER)
+        # Explicit None check: `or` would coerce legacy layer=0 (falsy) to
+        # DEFAULT_LAYER, miscounting L0 memories in the summary.
+        raw = item.get("layer")
+        layer = int(raw) if raw is not None else DEFAULT_LAYER
         summary[layer] = summary.get(layer, 0) + 1
     return {str(k): v for k, v in sorted(summary.items())}
 

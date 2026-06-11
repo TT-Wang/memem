@@ -517,8 +517,8 @@ def test_apply_creates_pattern_memory(tmp_vault, tmp_cortex_dir):
     from memem.dreamer import apply_diff
     from memem.obsidian_store import _find_memory, _make_memory, _trigger_sweep, _write_obsidian_memory
 
-    # Create real constituent memories using _make_memory with explicit layer
-    # to avoid classify_layer calling _obsidian_memories and partially warming cache.
+    # Create real constituent memories using _make_memory with explicit layer=2.
+    # v2.8.0: classify_layer is deleted; explicit layer param still works.
     mem_a = _make_memory(content="First constituent memory about the shared topic.", title="Constituent A", layer=2)
     _write_obsidian_memory(mem_a)
 

@@ -467,28 +467,20 @@ def _mmr_rerank(
 ) -> list[MemoryHit]:
     """MMR re-rank: select k from candidates balancing relevance vs diversity.
 
-    L0 / decay_immune candidates are pre-seeded into the selected set (always
-    included, no diversity penalty). The remaining slots are filled by MMR
-    iteration over the rest.
+    v2.8.0: L0/decay_immune pre-seeding removed (layer system retired).
+    All candidates go through standard MMR ranking.
+    decay_immune remains a dreamer/decay protection concept but no longer
+    receives retrieval privilege here.
     """
     if not candidates:
         return []
     if len(candidates) <= k:
         return candidates  # nothing to diversify
-    # Pre-seed immunes
     id_to_emb_idx = {mid: i for i, mid in enumerate(ids)}
     selected: list[MemoryHit] = []
     selected_vecs: list[np.ndarray] = []
-    remaining: list[MemoryHit] = []
-    for hit in candidates:
-        if hit.get("layer", 2) == 0 or hit.get("decay_immune", False):
-            selected.append(hit)
-            emb_idx = id_to_emb_idx.get(hit["id"])
-            if emb_idx is not None and emb_idx < len(embeddings_norm):
-                selected_vecs.append(embeddings_norm[emb_idx])
-        else:
-            remaining.append(hit)
-    # MMR loop on remaining
+    remaining: list[MemoryHit] = list(candidates)
+    # MMR loop over all candidates
     while len(selected) < k and remaining:
         best_mmr = -float("inf")
         best_idx = 0

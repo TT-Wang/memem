@@ -431,12 +431,12 @@ def _build_mcp():
                 ge=0,
                 le=3,
                 description=(
-                    "Optional layer override (0=identity, 1=generic, 2=domain, 3=archival). "
-                    "Omit to auto-classify via the same heuristic the miner uses. "
-                    "Use 0 only for project-identity facts ('my-app uses Postgres + Redis'). "
-                    "Use 1 for cross-project conventions. "
-                    "Use 3 for rare/archival lessons that should be tool-call-only. "
-                    "Most saves should leave this unset."
+                    "DEPRECATED (v2.8.0): the layer system is retired. Accepted "
+                    "for backward compatibility but has no effect on storage or "
+                    "retrieval ranking — omit it. Stable identity/convention "
+                    "facts now live in always-injected profiles (the miner "
+                    "routes them automatically). Legacy layer-0/decay_immune "
+                    "protection for existing memories is unaffected."
                 ),
             ),
         ] = None,

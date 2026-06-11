@@ -460,20 +460,15 @@ def _make_memory(content: str, title: str, tags: list[str] | None = None,
         "keys": list(keys) if keys else [],
     }
 
-    # Layer assignment: explicit param wins; otherwise auto-classify.
+    # Layer assignment: explicit param wins; otherwise omit the field entirely.
+    # v2.8.0: auto-classification via classify_layer has been retired.
+    # layer field intentionally omitted from new memories (v2.8.0 layer retirement);
+    # existing vault layer fields are preserved as read-only legacy.
     if layer is not None:
         if not isinstance(layer, int) or not (0 <= layer <= 3):
             raise ValueError(f"layer must be int 0-3, got {layer!r}")
         mem["layer"] = layer
-    else:
-        # Auto-classify via the same heuristic mining uses. Need vault snapshot
-        # for the L0 cap check. Lazy-load to avoid circular import.
-        from memem.mining import classify_layer
-        try:
-            vault_snapshot = _obsidian_memories()
-        except Exception:
-            vault_snapshot = []
-        mem["layer"] = classify_layer(mem, vault_snapshot)
+    # else: do NOT assign layer — omit the field entirely for new memories.
 
     return mem
 
@@ -564,7 +559,10 @@ def _write_obsidian_memory(mem: dict):
     meta["importance"] = mem.get("importance", 3)
     meta["status"] = mem.get("status", "active")
     meta["valid_to"] = mem.get("valid_to", "") or ""
-    meta["layer"] = int(mem.get("layer", DEFAULT_LAYER))
+    # v2.8.0: emit layer only when the field is explicitly set (legacy compat);
+    # new memories written without a layer field won't get a default assigned.
+    if "layer" in mem:
+        meta["layer"] = int(mem["layer"])
     meta["valid_at"] = mem.get("valid_at") or mem.get("created_at", _now())
     if mem.get("invalid_at") is not None:
         meta["invalid_at"] = mem["invalid_at"]
@@ -650,7 +648,8 @@ def _parse_obsidian_memory_file(md_file: Path) -> dict | None:
         "updated_at": "",
         "importance": 3,
         "schema_version": 0,
-        "layer": DEFAULT_LAYER,
+        # v2.8.0: layer field omitted from base dict; only set when present in frontmatter.
+        # Callers use .get("layer") or .get("layer", DEFAULT_LAYER) for back-compat.
     }
 
     # Use python-frontmatter to parse the file. Falls back gracefully if the
@@ -711,7 +710,14 @@ def _parse_obsidian_memory_file(md_file: Path) -> dict | None:
     mem["access_count"] = _int_field("access_count", 0)
     mem["importance"] = _int_field("importance", 3)
     mem["schema_version"] = _int_field("schema_version", 0)
-    mem["layer"] = _int_field("layer", DEFAULT_LAYER)
+    # v2.8.0: layer field only set when present in frontmatter (back-compat read-only).
+    # New memories are written without layer:; absent layer → key absent in parsed dict.
+    _raw_layer = fm_meta.get("layer")
+    if _raw_layer is not None:
+        try:
+            mem["layer"] = int(_raw_layer)
+        except (ValueError, TypeError):
+            pass  # malformed layer: field → omit key
 
     # Boolean fields
     def _bool_field(key: str, default: bool) -> bool:

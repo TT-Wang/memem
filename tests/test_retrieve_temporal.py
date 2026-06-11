@@ -1044,95 +1044,97 @@ class TestMMRDiversification:
             f"found {dup_count} of the pair in results. result_ids={result_ids}"
         )
 
-    def test_l0_memories_always_included(self, retrieve_env):
-        """L0 memories must appear in final-k regardless of raw cosine score."""
-        env = retrieve_env
-        mod = env["retrieve_mod"]
-        mdir = env["memories_dir"]
-        state_dir = env["state_dir"]
+    def test_l0_memories_ranked_normally(self, retrieve_env):
+        """v2.8.0 (layer retirement): L0 memories are ranked by score, not pre-seeded.
+        DELETED(v2.8): layer system retired — L0/decay_immune pre-seeding removed from _mmr_rerank.
+        L0 memories with high cosine relevance are still retrieved normally; they just
+        no longer bypass MMR ranking.
+        """
+        from memem.retrieve import _mmr_rerank
 
         rng = np.random.default_rng(13)
         dim = 384
-        now_iso = datetime.now(UTC).isoformat()
 
-        # L0 memory with a deliberately weak embedding (unlikely to rank via cosine)
+        # L0 memory with STRONG embedding (aligned with others) — should appear
         l0_id = str(uuid.uuid4())
-        l0_vec = rng.random(dim).astype(np.float32)
+        query_like = np.ones(dim, dtype=np.float32)
+        query_like /= np.linalg.norm(query_like)
+        l0_vec = query_like + rng.random(dim).astype(np.float32) * 0.05
         l0_vec /= np.linalg.norm(l0_vec)
-        # Make it orthogonal to all others by subtracting projections later — just use random
 
-        # 9 other strong cosine memories
+        # 9 other memories with similar vectors
         other_ids = [str(uuid.uuid4()) for _ in range(9)]
-        query_vec_approx = np.ones(dim, dtype=np.float32)
-        query_vec_approx /= np.linalg.norm(query_vec_approx)
-
         other_vecs = []
         for _ in other_ids:
-            v = query_vec_approx + rng.random(dim).astype(np.float32) * 0.05
+            v = query_like + rng.random(dim).astype(np.float32) * 0.05
             v /= np.linalg.norm(v)
             other_vecs.append(v)
 
-        mems = [{"id": l0_id, "title": "L0 core identity memory", "created": now_iso,
-                 "vec": l0_vec, "layer": 0}] + [
-            {"id": oid, "title": f"Strong cosine memory {i}", "created": now_iso, "vec": ov}
-            for i, (oid, ov) in enumerate(zip(other_ids, other_vecs, strict=True))
+        all_ids = [l0_id] + other_ids
+        all_vecs = [l0_vec] + other_vecs
+        emb = np.stack(all_vecs).astype(np.float32)
+
+        # L0 memory has high relevance score — should rank normally
+        candidates = [{"id": l0_id, "score": 0.95, "layer": 0, "decay_immune": False,
+                       "path": f"/tmp/{l0_id}.md", "title": "L0 core identity memory"}] + [
+            {"id": oid, "score": 0.8 + 0.01 * i, "layer": 2, "decay_immune": False,
+             "path": f"/tmp/{oid}.md", "title": f"Memory {i}"}
+            for i, oid in enumerate(other_ids)
         ]
 
-        _write_vault_with_embeddings(mdir, state_dir, mems)
-        mod._vault_idx_cache = None
-        mod._emb_cache = None
-        mod._bm25_cache = None
+        result = _mmr_rerank(candidates, emb, all_ids, k=8)
+        result_ids = [r["id"] for r in result]
 
-        results = mod.retrieve("strong cosine memory query", k=8)
-        result_ids = [r["id"] for r in results]
-
+        # L0 with high relevance must appear in results (via normal MMR, not pre-seed)
         assert l0_id in result_ids, (
-            f"L0 memory must always be included in final-k results regardless of cosine score. "
+            f"L0 memory with high relevance score must appear in MMR results. "
             f"Result ids: {result_ids}"
         )
 
-    def test_decay_immune_always_included(self, retrieve_env):
-        """decay_immune=True memories must appear in final-k regardless of raw score."""
-        env = retrieve_env
-        mod = env["retrieve_mod"]
-        mdir = env["memories_dir"]
-        state_dir = env["state_dir"]
+    def test_decay_immune_ranked_normally(self, retrieve_env):
+        """v2.8.0 (layer retirement): decay_immune memories ranked by score, not pre-seeded.
+        DELETED(v2.8): L0/decay_immune pre-seeding removed from _mmr_rerank.
+        decay_immune remains a dreamer/decay protection concept; it no longer
+        bypasses MMR ranking. decay_immune memories with high relevance rank normally.
+        """
+        from memem.retrieve import _mmr_rerank
 
         rng = np.random.default_rng(17)
         dim = 384
-        now_iso = datetime.now(UTC).isoformat()
 
-        # decay_immune memory with weak embedding
+        # decay_immune memory with STRONG embedding — should appear via normal MMR
         immune_id = str(uuid.uuid4())
-        immune_vec = rng.random(dim).astype(np.float32)
+        query_like = np.ones(dim, dtype=np.float32)
+        query_like /= np.linalg.norm(query_like)
+        immune_vec = query_like + rng.random(dim).astype(np.float32) * 0.05
         immune_vec /= np.linalg.norm(immune_vec)
 
-        # 9 other strong cosine memories
+        # 9 other memories with similar vectors
         other_ids = [str(uuid.uuid4()) for _ in range(9)]
-        query_vec_approx = np.ones(dim, dtype=np.float32)
-        query_vec_approx /= np.linalg.norm(query_vec_approx)
         other_vecs = []
         for _ in other_ids:
-            v = query_vec_approx + rng.random(dim).astype(np.float32) * 0.05
+            v = query_like + rng.random(dim).astype(np.float32) * 0.05
             v /= np.linalg.norm(v)
             other_vecs.append(v)
 
-        mems = [{"id": immune_id, "title": "Immune memory critical ref", "created": now_iso,
-                 "vec": immune_vec, "decay_immune": True}] + [
-            {"id": oid, "title": f"Strong cosine memory {i}", "created": now_iso, "vec": ov}
-            for i, (oid, ov) in enumerate(zip(other_ids, other_vecs, strict=True))
+        all_ids = [immune_id] + other_ids
+        all_vecs = [immune_vec] + other_vecs
+        emb = np.stack(all_vecs).astype(np.float32)
+
+        # decay_immune memory has high relevance score — ranked normally
+        candidates = [{"id": immune_id, "score": 0.95, "layer": 2, "decay_immune": True,
+                       "path": f"/tmp/{immune_id}.md", "title": "Immune memory critical ref"}] + [
+            {"id": oid, "score": 0.8 + 0.01 * i, "layer": 2, "decay_immune": False,
+             "path": f"/tmp/{oid}.md", "title": f"Memory {i}"}
+            for i, oid in enumerate(other_ids)
         ]
 
-        _write_vault_with_embeddings(mdir, state_dir, mems)
-        mod._vault_idx_cache = None
-        mod._emb_cache = None
-        mod._bm25_cache = None
+        result = _mmr_rerank(candidates, emb, all_ids, k=8)
+        result_ids = [r["id"] for r in result]
 
-        results = mod.retrieve("strong cosine memory query", k=8)
-        result_ids = [r["id"] for r in results]
-
+        # decay_immune with high relevance must appear in results (via normal MMR)
         assert immune_id in result_ids, (
-            f"decay_immune memory must always be included in final-k results. "
+            f"decay_immune memory with high relevance must appear in MMR results. "
             f"Result ids: {result_ids}"
         )
 

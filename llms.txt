@@ -48,14 +48,16 @@ First-session MCP spawn runs `bootstrap.sh` which installs `uv`, syncs deps into
 ## Key concepts
 
 - **Event-triggered miner**: Stop hook spawns a detached `mine_delta` subprocess after each conversation turn; extracts durable lessons via Haiku and writes them as markdown (no daemon since v2.1.0)
-- **Context assembly**: on session start, a UserPromptSubmit hook sends the user's first message + relevant memories to Haiku, which synthesizes a focused briefing
-- **Playbook**: per-project curated knowledge file that grows and refines over time (inspired by the ACE paper)
-- **Reconcile-at-write pipeline**: ADD / UPDATE / SUPERSEDE / NOOP — how new mined memories evolve the existing corpus. Each candidate is compared against its top-5 vault neighbors in one batched Haiku call; SUPERSEDE bi-temporally invalidates the replaced memory.
+- **Profiles (v2.8.0)**: schema-shaped always-injected documents at `<vault>/memem/profiles/`. `profile_user.md` (Preferences / Conventions / Environment) and `profile_<project>.md` (Identity / Stack & Structure / Conventions). Populated by the miner's `PROFILE` reconcile op; bootstrapped from legacy vault via `--migrate-layers`.
+- **Working rules (v2.8.0)**: `type:procedural` memories (failure→fix, corrections) ranked by citation count, injected as `## Working rules` at session start (≤1200 chars).
+- **Context assembly**: session start injects profiles + working rules + episode index; everything else is on-demand via recall tools
+- **Reconcile-at-write pipeline**: ADD / UPDATE / SUPERSEDE / NOOP / PROFILE — how new mined memories evolve the existing corpus. Each candidate compared against its top-5 vault neighbors in one batched Haiku call; SUPERSEDE bi-temporally invalidates the replaced memory.
+- **Dream cycles (v2.8.0)**: background dreamer categories — `cluster_merge` (consolidation), `reflection_with_citations` (insight synthesis), `tense_rewrite` (expired future-tense correction). `--dream --safe-auto` applies additive categories automatically; fires every 25 substantive mining deltas.
 - **Degraded mode**: when `claude` CLI is missing, memem falls back to FTS-only keyword recall instead of failing
 
 ## MCP tools exposed to the LLM
 
-- `memory_save(content, title, tags)`: store a lesson (security-scanned)
+- `memory_save(content, title, tags)`: store a lesson (security-scanned; `layer` param deprecated in v2.8.0)
 - `memory_recall(query, limit)`: search memories (unified engine: three-way RRF — semantic + BM25 + FTS5 — with usage/scope/link/importance signals and MMR)
 - `memory_list()`: list all memories with stats
 - `memory_import(source_path)`: import from files, directories, chat exports
