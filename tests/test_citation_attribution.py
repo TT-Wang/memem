@@ -110,8 +110,12 @@ class TestLogCitation:
     def test_log_citation_silent_on_error(self, log_env, monkeypatch):
         """log_citation must not raise even if the write fails."""
         rl = log_env["rl"]
-        # Make _LOG_PATH point at a non-writable location
-        monkeypatch.setattr(rl, "_LOG_PATH", Path("/nonexistent_dir/recall_log.jsonl"))
+        # Writes resolve via _current_log_path() (v2.9.0) — patch THAT to a
+        # non-writable location; patching _LOG_PATH alone no longer exercises
+        # the write-failure path.
+        monkeypatch.setattr(
+            rl, "_current_log_path", lambda: Path("/nonexistent_dir/recall_log.jsonl")
+        )
         # Should not raise
         rl.log_citation("sess", ["aaaa1111"])
 

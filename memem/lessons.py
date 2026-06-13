@@ -1,3 +1,6 @@
+# Decision deferred: keep lessons.py. Gate for deletion: >=200 citation rows + >=14 days
+# production data showing no repeated-citation-but-wrong-memory pattern.
+# See docs/improvement-plan-2026-06.md Phase F item 3.
 """A-MemGuard 'lessons' anti-memory store (memem v2 m5).
 
 When a memory is judged to have caused harm, record an explicit
@@ -153,10 +156,24 @@ def query_class_matches(query: str, query_class: str) -> bool:
 def excluded_memory_ids_for_query(query: str) -> set[str]:
     """Return the set of memory_ids that should be EXCLUDED from candidates
     for this query, per the recorded lessons."""
+    import time as _time
     excluded = set()
     for lesson in list_lessons():
         if query_class_matches(query, lesson.get("query_class", "")):
             mem_id = lesson.get("targeted_memory_id")
             if mem_id:
                 excluded.add(mem_id)
+    # Track exclusion events for telemetry analysis.
+    if excluded:
+        try:
+            from memem.recall_log import log_recall
+            log_recall(
+                call_type="lessons_exclusion",
+                query=query,
+                returned_ids=sorted(excluded),
+                latency_ms=0,
+                source="lessons",
+            )
+        except Exception:  # noqa: BLE001
+            pass
     return excluded

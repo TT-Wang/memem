@@ -103,6 +103,45 @@ def _run_integrity_check(verbose: bool = True) -> bool:
     return any_failed
 
 
+def check_canaries_in_doctor() -> None:
+    """Check ALWAYS_REACHABLE canaries via retrieve() and print PASS/WARN per canary.
+
+    Non-blocking: canaries may not be planted on all machines, so this is
+    purely advisory.  Never sets an exit code or raises on failure.
+    """
+    try:
+        from memem.eval.canaries import ALWAYS_REACHABLE
+        from memem.retrieve import retrieve
+
+        passes = 0
+        total = len(ALWAYS_REACHABLE)
+        for c in ALWAYS_REACHABLE:
+            try:
+                hits = retrieve(c["trigger_query"], k=5, log_call_type=None, writeback=False)
+                hit_ids = [str(h.get("id") or "") for h in hits if h.get("id")]
+                expected_id = c["canary_id"]
+                # Check if expected canary_id appears in any hit's id (substring match
+                # since vault ids may be full UUIDs while canary_id is a short label;
+                # also check title as the canary's stable identifier)
+                hit_titles = [str(h.get("title") or "") for h in hits if h.get("title")]
+                hit_canary = c["title"]
+                found = any(
+                    expected_id in hid or hit_canary in ht
+                    for hid in hit_ids
+                    for ht in hit_titles
+                ) or hit_canary in hit_titles
+                if found:
+                    passes += 1
+                    print(f"  [PASS] canary {expected_id}: found in top-5")
+                else:
+                    print(f"  [WARN] canary {expected_id}: NOT found in top-5 (may not be planted)")
+            except Exception as exc:  # noqa: BLE001
+                print(f"  [WARN] canary {c['canary_id']}: error during check: {exc}")
+        print(f"\nCanary check: {passes}/{total} pass (non-blocking — plant canaries first)")
+    except Exception as exc:  # noqa: BLE001
+        print(f"\n[advisory] Canary check skipped: {exc}")
+
+
 def _append_env_list(environment: dict[str, Any], key: str, value: str) -> None:
     values = environment.setdefault(key, [])
     if not isinstance(values, list):
@@ -490,6 +529,12 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         print(f"Search index rebuilt: {count} memories indexed")
         return
 
+    if cmd == "--rebuild-transcript-index":
+        from memem.transcripts import rebuild_transcript_index
+        count = rebuild_transcript_index()
+        print(f"Transcript FTS index rebuilt: {count} sessions indexed")
+        return
+
     if cmd in ("graph", "--graph") and len(argv) >= 3:
         action = argv[2]
         if action == "rebuild":
@@ -608,10 +653,16 @@ def dispatch_cli(argv: list[str], mcp) -> None:
             return
 
         if sub == "replay":
-            from memem.eval_replay import format_replay_report, replay
+            from memem.eval_replay import (
+                format_dual_engine_report,
+                format_replay_report,
+                replay,
+                run_dual_engine_replay,
+            )
 
             baseline: Path | None = None
             k = 5
+            dual_engine = False
             i = 3
             while i < len(argv):
                 arg = argv[i]
@@ -621,12 +672,21 @@ def dispatch_cli(argv: list[str], mcp) -> None:
                 elif arg == "--k" and i + 1 < len(argv):
                     k = int(argv[i + 1])
                     i += 2
+                elif arg == "--dual-engine":
+                    dual_engine = True
+                    i += 1
                 else:
                     i += 1
             if not baseline or not baseline.exists():
-                raise SystemExit("Usage: memem eval replay --against <baseline.ndjson> [--k 5]")
-            result = replay(baseline, k=k)
-            print(format_replay_report(result))
+                raise SystemExit(
+                    "Usage: memem eval replay --against <baseline.ndjson> [--k 5] [--dual-engine]"
+                )
+            if dual_engine:
+                result = run_dual_engine_replay(baseline, k=k)
+                print(format_dual_engine_report(result))
+            else:
+                result = replay(baseline, k=k)
+                print(format_replay_report(result))
             return
 
         raise SystemExit(f"Unknown eval subcommand: {sub} (try: status, export, replay)")
@@ -641,6 +701,67 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         # malformed btree, page-checksum failures (WAL mode does NOT itself ensure
         # this; it just gives concurrent-access semantics).
         integrity_failed = _run_integrity_check(verbose=True)
+        # Telemetry contamination advisory: count rows that look like leaked
+        # test/benchmark traffic. Advisory only — no purge performed here.
+        try:
+            import json as _json
+            from memem.recall_log import _LOG_PATH as _rlog
+            _TEST_QUERIES = {"test query", "warmup query"}
+            _TEST_SUBSTRINGS = ("alpha beta memory", "cache test memory")
+            _contaminated = 0
+            if _rlog.exists():
+                with open(_rlog, encoding="utf-8") as _fh:
+                    for _line in _fh:
+                        _line = _line.strip()
+                        if not _line:
+                            continue
+                        try:
+                            _e = _json.loads(_line)
+                            _q = _e.get("query", "")
+                            if (
+                                _q in _TEST_QUERIES
+                                or any(s in _q for s in _TEST_SUBSTRINGS)
+                                or _e.get("source_tag")
+                            ):
+                                _contaminated += 1
+                        except Exception:
+                            continue
+            if _contaminated:
+                print(
+                    f"\n[advisory] {_contaminated} test-shaped rows in recall log "
+                    f"(telemetry contamination). Rows with a source_tag field are "
+                    f"auto-excluded from --analyze-recalls (pass --include-tagged to inspect). "
+                    f"Legacy rows matched only by hardcoded query strings are flagged here "
+                    f"but are NOT auto-excluded from --analyze-recalls."
+                )
+        except Exception:
+            pass
+        # Transcript FTS advisory: warn if the index is missing or empty.
+        try:
+            import sqlite3 as _sqlite3
+            from memem.transcripts import _db_path as _transcript_db_path
+            _fts_db = _transcript_db_path()
+            if not _fts_db.exists():
+                print(
+                    "\n[advisory] transcript FTS index missing — run "
+                    "python3 -m memem.server --rebuild-transcript-index"
+                )
+            else:
+                try:
+                    _conn = _sqlite3.connect(str(_fts_db), timeout=3.0)
+                    _row_count = _conn.execute("SELECT COUNT(*) FROM transcripts").fetchone()[0]
+                    _conn.close()
+                    if _row_count == 0:
+                        print(
+                            "\n[advisory] transcript FTS index is empty — run "
+                            "python3 -m memem.server --rebuild-transcript-index"
+                        )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # Canary check: non-blocking advisory to detect memory drift/poisoning.
+        check_canaries_in_doctor()
         blockers = not caps.get("mcp") or not caps.get("writable_state_dir") or not caps.get("writable_vault") or integrity_failed
         raise SystemExit(1 if blockers else 0)
 
@@ -998,9 +1119,12 @@ def dispatch_cli(argv: list[str], mcp) -> None:
         raise SystemExit(rc)
 
     if cmd == "--analyze-recalls":
+        include_tagged = "--include-test-rows" in argv
         from memem.recall_log import analyze_recalls
-        summary = analyze_recalls(days=7)
+        summary = analyze_recalls(days=7, include_tagged=include_tagged)
         print(f"=== Recall log summary (last {summary['days']} days) ===")
+        if include_tagged:
+            print("(including tagged/benchmark rows)")
         print(f"Total calls: {summary['total']}")
         if summary['total'] == 0:
             print("(no calls logged yet)")

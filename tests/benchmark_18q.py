@@ -8,11 +8,17 @@ locked the v2.0.0 architecture decision. Skipped by default; run with:
 Or as the v2.0.0 release acceptance gate:
     pytest tests/benchmark_18q.py -m benchmark --tb=short
 """
+import os
 import time
 
 import pytest
 
 from memem.retrieve import retrieve
+
+# Tag all telemetry from this benchmark session so it is excluded from the
+# default --analyze-recalls output (benchmark traffic != production traffic)
+# but remains inspectable with --include-test-rows.
+os.environ.setdefault("MEMEM_TELEMETRY_SOURCE", "benchmark")
 
 QUERIES = [
     ("episodic", "What did I work on yesterday related to memem v1.13.0?"),

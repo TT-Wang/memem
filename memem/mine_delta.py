@@ -231,6 +231,73 @@ _TOOL_SALIENT_ARG: dict[str, str] = {
 
 _TOOL_DIGEST_CAP = 600
 
+# File-path extracting tool names (used by extract_dominant_paths)
+_FILE_PATH_TOOLS = {"Edit", "Write", "Read", "NotebookEdit"}
+
+# Regex to extract a file path from a Bash command (first argument that looks like a path)
+_BASH_PATH_RE = re.compile(r'(?:^|\s)([/~][^\s;"\']+|[a-zA-Z0-9_][^\s;"\']*\.[a-zA-Z]{1,6})(?:\s|$)')
+
+# Minimum frequency for a path to be included in dominant paths
+_PATH_MIN_FREQ = 3
+# Maximum number of dominant paths to return
+_PATH_TOP_N = 3
+
+
+def extract_dominant_paths(turns: list[dict]) -> list[str]:
+    """Return the top-N most frequently touched file paths from raw turns.
+
+    Walks each tool_use block in assistant turns (same extraction logic as
+    _build_tool_digest) without deduplication so that every actual call is
+    counted.  A file edited 5× scores 5, not 1.
+
+    Args:
+        turns: Raw turn list in nested Claude Code JSONL schema
+            (``{"type":"assistant","message":{"role","content":[...]}}``).
+
+    Returns:
+        List of up to _PATH_TOP_N file paths that each appear at least
+        _PATH_MIN_FREQ times.  Returns [] when fewer than 2 paths qualify.
+    """
+    from collections import Counter  # noqa: PLC0415 — stdlib, lazy import
+
+    path_counter: Counter[str] = Counter()
+
+    for t in turns:
+        inner = t.get("message") if isinstance(t.get("message"), dict) else None
+        if inner is None:
+            continue
+        role = inner.get("role") or t.get("type") or ""
+        if role != "assistant":
+            continue
+        content = inner.get("content")
+        if not isinstance(content, list):
+            continue
+
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            name = block.get("name") or ""
+            inp = block.get("input") or {}
+            if not isinstance(inp, dict):
+                inp = {}
+
+            if name in _FILE_PATH_TOOLS:
+                path = str(inp.get("file_path") or "").strip()
+                if path:
+                    path_counter[path] += 1
+            elif name == "Bash":
+                cmd = str(inp.get("command") or "")
+                first_line = cmd.split("\n")[0][:80]
+                for m in _BASH_PATH_RE.finditer(first_line):
+                    candidate = m.group(1).strip()
+                    if "/" in candidate or "." in candidate:
+                        path_counter[candidate] += 1
+
+    # Return top-N paths that appear at least _PATH_MIN_FREQ times
+    qualified = [path for path, count in path_counter.most_common(_PATH_TOP_N * 3)
+                 if count >= _PATH_MIN_FREQ]
+    return qualified[:_PATH_TOP_N]
+
 
 def _build_tool_digest(turns: list[dict]) -> str:
     """Build a compact digest of tool actions taken during the conversation.
@@ -1082,6 +1149,10 @@ def _reconcile_candidates(
                     source_session=session_id,
                     importance=importance,
                 )
+                # Carry over paths: advisory metadata (from dominant path extraction).
+                cand_paths = cand.get("paths") or []
+                if cand_paths:
+                    mem["paths"] = list(cand_paths)
                 # Override id to stable uuid5 for idempotent re-mining (C4)
                 # _stable_mined_memory_id returns a uuid5 string
                 stable_id = _stable_mined_memory_id(session_id, title, content)
@@ -1312,6 +1383,29 @@ def run(session_id: str, transcript_path: str) -> None:
             log.warning("mine_delta: Haiku extraction failed", session_id=session_id, error=str(exc))
             memories = []
 
+        # 6b. Extract dominant paths from raw turns and annotate candidates.
+        # Counts every actual tool call occurrence (no dedup), so a file edited
+        # 5× scores 5.  Only annotate when ≥2 paths appear ≥3 times.
+        dominant_paths: list[str] = []
+        try:
+            dominant_paths = extract_dominant_paths(turns)
+            if len(dominant_paths) >= 2:
+                log.debug(
+                    "mine_delta: dominant paths extracted",
+                    session_id=session_id,
+                    paths=dominant_paths,
+                )
+            else:
+                dominant_paths = []
+        except Exception:  # noqa: BLE001 — path extraction is advisory; never block mining
+            dominant_paths = []
+
+        # Annotate candidates with dominant paths so reconcile/fallback can write paths: frontmatter.
+        if dominant_paths and memories:
+            for cand in memories:
+                if not cand.get("paths"):
+                    cand["paths"] = dominant_paths
+
         # 7. Update empty-streak state
         if not memories:
             new_streak = streak + 1
@@ -1376,6 +1470,13 @@ def run(session_id: str, transcript_path: str) -> None:
             _emit_citations_if_any(session_id, turns)
         except Exception as exc:
             log.warning("mine_delta: citation detection failed", session_id=session_id, error=str(exc))
+
+        # 8e. Index this session into the transcript FTS index (non-fatal).
+        try:
+            from memem.transcripts import index_session as _index_session  # noqa: PLC0415
+            _index_session(Path(transcript_path))
+        except Exception as exc:
+            log.warning("mine_delta: transcript FTS indexing failed (non-fatal)", session_id=session_id, error=str(exc))
 
         # 8d. Feedback EMA — classify session outcome and update relevance scores.
         # Write-side only; read-side deferred to v2.9.

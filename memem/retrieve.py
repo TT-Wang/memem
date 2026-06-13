@@ -55,6 +55,7 @@ import re
 import threading
 import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any, TypedDict
 
 import numpy as np
@@ -690,6 +691,7 @@ def retrieve(
     log_call_type: str | None = "hook_auto",
     scope_id: str = "",
     writeback: bool = True,
+    paths_context: list[str] | None = None,
 ) -> list[MemoryHit]:
     """Main retrieval: three-way RRF (cosine+BM25+FTS) + rerank signals + scope bonus.
 
@@ -706,6 +708,12 @@ def retrieve(
            thread. Callers that record access themselves (recall._search_memories
            with record_access=True) pass False to prevent double-counting the
            same retrieval in the telemetry sidecar.
+        paths_context: Optional list of recently-accessed file paths in the current
+           session (e.g. ['memem/server.py', 'memem/retrieve.py']). When provided,
+           memories whose `paths:` frontmatter field contains at least one glob
+           pattern matching any path in paths_context receive a small bonus multiplier
+           (w_path=1.05x). Applied AFTER the standard RRF+rerank pipeline. Small
+           enough not to override semantic ranking.
 
     Returns:
         List of MemoryHit dicts ordered FTS-literal-first, then by reranked score
@@ -725,11 +733,18 @@ def retrieve(
         8. Temporal 1.2x multiplier for in-window memories (non-temporal → no-op)
         9. Re-sort by score desc
        10. MMR(λ=0.7) diversification → k results
+       11. Path bonus: memories whose `paths:` frontmatter globs match paths_context
+           receive a 1.05x multiplier (w_path=1.05). Advisory metadata only.
 
     Score semantics:
         - FTS literal hits (source="fts"): score=1.0 always.
         - RRF candidates (source="cosine"): min-max normalized base, multiplied by
           signal bundle, optionally boosted by temporal 1.2x. May exceed 1.0.
+
+    Calibration note (w_path):
+        w_path=1.05 is intentionally small — it nudges path-relevant memories
+        slightly higher without overriding semantic ranking. A weakly-relevant
+        path-matched memory won't beat a strongly-relevant non-matched one.
     """
     t0 = time.monotonic()
     vault_idx = load_vault_index()
@@ -888,6 +903,45 @@ def retrieve(
     _emb_for_mmr = embeddings_norm if embeddings_norm is not None else np.zeros((0, 1), dtype=np.float32)
     mmr_selected = _mmr_rerank(cosine_candidates, _emb_for_mmr, ids, k=k)
     results.extend(mmr_selected)
+
+    # Path bonus: memories whose `paths:` frontmatter globs match paths_context
+    # get a small 1.05x multiplier (w_path). Applied AFTER MMR so diversity is
+    # unaffected. The bonus is advisory metadata — too small to override semantic
+    # ranking (a 1.05x multiplier on a 0.5-score hit = 0.525 vs a 1.0-score hit
+    # with no path match stays at 1.0). paths: is read directly from the vault
+    # index file if present; absent → no bonus.
+    if paths_context:
+        import fnmatch  # noqa: PLC0415 — stdlib, lazy import for optional feature
+        for hit in results:
+            hit_file_path = hit.get("path", "")
+            if not hit_file_path:
+                continue
+            # Read paths: from the memory file frontmatter (not stored in vault_idx).
+            # Fast path: check raw file text for the paths: key.
+            try:
+                raw_text = Path(hit_file_path).read_text(encoding="utf-8", errors="replace")
+                # Extract paths: block from frontmatter only
+                front_end = -1
+                if raw_text.startswith("---"):
+                    front_end = raw_text.find("\n---", 4)
+                front_section = raw_text[:front_end + 4] if front_end > 0 else raw_text[:2000]
+                paths_block_m = re.search(r"^paths:\n((?:- .*(?:\n|$))+)", front_section, re.M)
+                if not paths_block_m:
+                    continue
+                mem_paths = re.findall(r"^- (.+)$", paths_block_m.group(1), re.M)
+                mem_paths = [p.strip().strip("'\"") for p in mem_paths if p.strip()]
+                if not mem_paths:
+                    continue
+                # Check if any glob pattern from memory matches any path in paths_context
+                matched = any(
+                    fnmatch.fnmatch(ctx_path, mem_pat) or fnmatch.fnmatch(ctx_path, f"*/{mem_pat}")
+                    for mem_pat in mem_paths
+                    for ctx_path in paths_context
+                )
+                if matched:
+                    hit["score"] = hit["score"] * 1.05
+            except Exception:  # noqa: BLE001 — path bonus is advisory; never crash retrieval
+                continue
 
     # Fire-and-forget access writeback via telemetry sidecar (m3).
     # Only cosine hits are recorded; FTS hits are structural supplements, not

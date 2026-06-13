@@ -1,8 +1,197 @@
 import json
+import os
 import re
+import sqlite3
+import time
 from pathlib import Path
 
+import structlog
+
 from memem.session_state import SESSIONS_DIRS
+
+log = structlog.get_logger("memem-transcripts")
+
+# ---------------------------------------------------------------------------
+# Grep fallback safety caps — prevent hanging on large session dirs
+# ---------------------------------------------------------------------------
+
+MAX_FALLBACK_FILE_BYTES = 10 * 1024 * 1024  # skip files larger than 10 MiB
+MAX_FALLBACK_FILES = 500                     # stop after scanning this many files
+FALLBACK_TIME_BUDGET_S = 5.0                 # hard wall-clock limit for grep fallback
+
+# ---------------------------------------------------------------------------
+# FTS5 index for transcript search
+# ---------------------------------------------------------------------------
+
+_CREATE_TRANSCRIPTS_TABLE = """
+CREATE VIRTUAL TABLE IF NOT EXISTS transcripts USING fts5(
+    session_id UNINDEXED,
+    session_date UNINDEXED,
+    project UNINDEXED,
+    user_text UNINDEXED,
+    assistant_text UNINDEXED,
+    content
+)
+"""
+
+
+def _db_path() -> Path:
+    """Return transcript FTS DB path, resolved from MEMEM_DIR at call time."""
+    state_dir = os.environ.get("MEMEM_DIR") or os.environ.get("CORTEX_DIR")
+    if state_dir:
+        return Path(state_dir) / "transcript_fts.db"
+    from memem.models import MEMEM_DIR as _MEMEM_DIR
+    return _MEMEM_DIR / "transcript_fts.db"
+
+
+def _open_fts_db() -> sqlite3.Connection:
+    """Open (and create if needed) the transcript FTS5 database.
+
+    Detects old single-row-per-session schema (missing user_text / assistant_text
+    columns) and drops + recreates the table so the per-pair schema is enforced.
+    """
+    db_file = _db_path()
+    db_file.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(db_file), timeout=10.0)
+    conn.execute("PRAGMA journal_mode=WAL")
+
+    # Check if the table exists and has the new schema (user_text column).
+    # FTS5 tables store column info in the fts5_data table; simplest check is
+    # to see if a SELECT on user_text succeeds.
+    needs_rebuild = False
+    try:
+        conn.execute("SELECT user_text FROM transcripts LIMIT 0")
+    except sqlite3.OperationalError:
+        # Either table doesn't exist yet, or it has the old schema — either
+        # way we need to (re)create it.
+        needs_rebuild = True
+
+    if needs_rebuild:
+        # Drop old table if it exists (schema migration)
+        conn.execute("DROP TABLE IF EXISTS transcripts")
+        conn.execute(_CREATE_TRANSCRIPTS_TABLE)
+        conn.commit()
+    else:
+        # Table already has correct schema; ensure it exists via IF NOT EXISTS
+        conn.execute(_CREATE_TRANSCRIPTS_TABLE)
+        conn.commit()
+
+    return conn
+
+
+def _fts5_escape_query(query: str) -> str:
+    """Escape a user query for safe FTS5 MATCH use.
+
+    Wraps each whitespace-separated term in double quotes so that FTS5
+    operators (AND, OR, NOT, NEAR, ^, *) and unbalanced quotes in user
+    input are treated as literal strings rather than query syntax.
+
+    Examples:
+        'foo bar'          → '"foo" "bar"'
+        'foo AND bar'      → '"foo" "AND" "bar"'
+        'test "unbalanced' → '"test" "unbalanced"'
+    """
+    terms = query.split()
+    if not terms:
+        return '""'
+    escaped_terms = []
+    for term in terms:
+        # Strip any existing quotes; re-wrap in double quotes.
+        clean = term.replace('"', '')
+        if clean:
+            escaped_terms.append(f'"{clean}"')
+    return " ".join(escaped_terms) if escaped_terms else '""'
+
+
+def index_session(path: Path) -> None:
+    """Index one JSONL session file into the FTS5 database.
+
+    Stores ONE ROW PER Q/A turn-pair so that _transcript_search_fts returns
+    per-exchange granularity matching the grep fallback path.
+
+    Uses _parse_jsonl_session_pairs (the canonical pair parser) to extract
+    turn pairs. Deletes all existing rows for this session_id before inserting
+    fresh rows (idempotent re-index: same file → same rows, no duplicates).
+    """
+    session_id = path.stem  # filename without extension
+    # Derive session_date from mtime (best effort)
+    try:
+        mtime = path.stat().st_mtime
+        import datetime as _dt
+        session_date = _dt.datetime.fromtimestamp(mtime, tz=_dt.timezone.utc).strftime("%Y-%m-%d")
+    except Exception:
+        session_date = ""
+    # Derive project from parent directory name (same logic as mine_delta)
+    try:
+        parent_dir = path.parent.name
+        home = str(Path.home())
+        munged_home = home.replace("/", "-")
+        if parent_dir == munged_home:
+            project = "general"
+        elif parent_dir.startswith(munged_home + "-"):
+            project = parent_dir[len(munged_home) + 1:]
+        else:
+            project = parent_dir or "general"
+    except Exception:
+        project = "general"
+
+    # Extract per-turn pairs using the canonical pair parser
+    try:
+        pairs = _parse_jsonl_session_pairs(str(path))
+    except Exception:
+        return
+
+    if not pairs:
+        return
+
+    conn = _open_fts_db()
+    try:
+        with conn:
+            # DELETE all existing rows for this session_id (idempotent re-index)
+            conn.execute(
+                "DELETE FROM transcripts WHERE session_id = ?",
+                (session_id,),
+            )
+            # INSERT one row per Q/A turn-pair
+            for pair in pairs:
+                user_text = pair.get("user_text", "")
+                assistant_text = pair.get("assistant_text", "")
+                # content is the FTS-indexed column: both sides concatenated
+                content = (user_text + " " + assistant_text).strip()
+                if not content:
+                    continue
+                conn.execute(
+                    "INSERT INTO transcripts"
+                    "(session_id, session_date, project, user_text, assistant_text, content)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (session_id, session_date, project, user_text, assistant_text, content),
+                )
+    finally:
+        conn.close()
+
+
+def rebuild_transcript_index() -> int:
+    """Scan all session dirs and index every JSONL file. Returns count indexed."""
+    count = 0
+    for base_dir in SESSIONS_DIRS:
+        if not base_dir.exists():
+            continue
+        for jsonl_path in base_dir.rglob("*.jsonl"):
+            if "/subagents/" in str(jsonl_path):
+                continue
+            try:
+                if jsonl_path.stat().st_size < 5000:
+                    continue
+                index_session(jsonl_path)
+                count += 1
+            except Exception as exc:
+                log.warning("transcript_fts: failed to index session", path=str(jsonl_path), error=str(exc))
+    return count
+
+
+# ---------------------------------------------------------------------------
+# Regex constants for text extraction
+# ---------------------------------------------------------------------------
 
 _SYSTEM_REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
 _COMMAND_TAGS_RE = re.compile(
@@ -253,21 +442,122 @@ def _extract_conversation(jsonl_path: str) -> list[str]:
     return lines
 
 
+def _format_results(results: list[tuple[str, dict, str]]) -> str:
+    """Render a list of (score_or_rank, pair, filename) tuples as markdown.
+
+    Shared between FTS5 and grep paths so output shape is identical.
+    ``pair`` must have 'user_text' and 'assistant_text' keys.
+    """
+    lines = []
+    for _, pair, filename in results:
+        lines.append(
+            f"- **Q:** {pair['user_text'][:300]}\n"
+            f"  **A:** {pair['assistant_text'][:500]}\n"
+            f"  *Session: {filename}*"
+        )
+    return "\n\n".join(lines)
+
+
+def _transcript_search_fts(query: str, limit: int) -> list[tuple[float, dict, str]] | None:
+    """Try FTS5 search. Returns ranked results or None on any failure.
+
+    Returns None when the DB is missing/empty or when the query errors.
+    The caller should fall back to the grep path on None.
+
+    Each result is a per-Q/A turn-pair (one row = one exchange), mirroring
+    the granularity of the grep fallback path so _format_results output is
+    content-granularity-identical between both paths.
+    """
+    db_file = _db_path()
+    if not db_file.exists():
+        return None
+
+    escaped = _fts5_escape_query(query)
+    if escaped == '""':
+        return None
+
+    try:
+        conn = sqlite3.connect(str(db_file), timeout=5.0)
+        try:
+            # Check the DB has rows
+            row_count = conn.execute("SELECT COUNT(*) FROM transcripts").fetchone()[0]
+            if row_count == 0:
+                return None
+
+            # bm25() returns negative scores; ORDER BY ascending = best first
+            # Select user_text and assistant_text directly — they are stored
+            # per-pair as UNINDEXED columns, so no post-hoc splitting needed.
+            rows = conn.execute(
+                "SELECT session_id, user_text, assistant_text, bm25(transcripts) AS rank "
+                "FROM transcripts WHERE transcripts MATCH ? "
+                "ORDER BY rank LIMIT ?",
+                (escaped, limit),
+            ).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        log.warning("transcript_fts: FTS5 query failed, falling back to grep", query=query, error=str(exc))
+        return None
+
+    results: list[tuple[float, dict, str]] = []
+    for session_id, user_text, assistant_text, rank in rows:
+        pair = {
+            "user_text": user_text or "",
+            "assistant_text": assistant_text or "",
+        }
+        filename = f"{session_id}.jsonl"
+        results.append((float(rank), pair, filename))
+
+    return results if results else None
+
+
 def transcript_search(query: str, limit: int = 5) -> str:
     query_words = set(query.lower().split())
     if not query_words:
         return "No matching transcripts found"
 
+    # --- Try FTS5 first ---
+    fts_results = _transcript_search_fts(query, limit)
+    if fts_results is not None:
+        if not fts_results:
+            return "No matching transcripts found"
+        return _format_results(fts_results)
+
+    # --- Fallback: grep path ---
+    log.warning("transcript_fts: FTS5 unavailable, falling back to grep scan", query=query)
+
     scored = []
+    files_scanned = 0
+    fallback_start = time.monotonic()
+    cap_hit: str | None = None
+
     for base_dir in SESSIONS_DIRS:
         if not base_dir.exists():
             continue
         for jsonl_path in base_dir.rglob("*.jsonl"):
+            # Time-budget cap
+            if time.monotonic() - fallback_start >= FALLBACK_TIME_BUDGET_S:
+                cap_hit = f"time budget {FALLBACK_TIME_BUDGET_S}s exceeded"
+                break
+            # File-count cap
+            if files_scanned >= MAX_FALLBACK_FILES:
+                cap_hit = f"file count cap {MAX_FALLBACK_FILES} reached"
+                break
+
             if "/subagents/" in str(jsonl_path):
                 continue
             try:
-                if jsonl_path.stat().st_size < 5000:
+                fsize = jsonl_path.stat().st_size
+                if fsize < 5000:
                     continue
+                # File-size cap: skip files larger than MAX_FALLBACK_FILE_BYTES
+                if fsize > MAX_FALLBACK_FILE_BYTES:
+                    continue
+            except OSError:
+                continue
+
+            files_scanned += 1
+            try:
                 pairs = _parse_jsonl_session_pairs(str(jsonl_path))
             except Exception:
                 continue
@@ -276,16 +566,23 @@ def transcript_search(query: str, limit: int = 5) -> str:
                 score = len(query_words & text_words) / len(query_words)
                 if score > 0:
                     scored.append((score, pair, jsonl_path.name))
+        else:
+            # inner for completed without break — check outer-loop time cap
+            if time.monotonic() - fallback_start >= FALLBACK_TIME_BUDGET_S:
+                cap_hit = f"time budget {FALLBACK_TIME_BUDGET_S}s exceeded"
+            continue
+        break  # inner loop hit a cap; stop outer loop too
+
+    if cap_hit:
+        log.warning(
+            "transcript_fts: grep fallback truncated",
+            reason=cap_hit,
+            files_scanned=files_scanned,
+            results_so_far=len(scored),
+        )
 
     if not scored:
         return "No matching transcripts found"
 
     scored.sort(key=lambda item: item[0], reverse=True)
-    lines = []
-    for _, pair, filename in scored[:limit]:
-        lines.append(
-            f"- **Q:** {pair['user_text'][:300]}\n"
-            f"  **A:** {pair['assistant_text'][:500]}\n"
-            f"  *Session: {filename}*"
-        )
-    return "\n\n".join(lines)
+    return _format_results(scored[:limit])

@@ -176,3 +176,45 @@ def test_multiple_lessons_target_same_memory_for_different_classes(tmp_vault, tm
     # Either way, it should appear only once (set semantics)
     assert len(result_jwt) == 1
     assert len(result_oauth) == 1
+
+
+# ---------------------------------------------------------------------------
+# Test 12: excluded_memory_ids_for_query logs with call_type='lessons_exclusion'
+# ---------------------------------------------------------------------------
+
+def test_excluded_memory_ids_logs_lessons_exclusion(tmp_vault, tmp_cortex_dir, monkeypatch):
+    """excluded_memory_ids_for_query must call log_recall with call_type='lessons_exclusion'
+    when at least one memory is excluded.
+
+    ISOLATION: monkeypatches log_recall to capture calls without writing to disk.
+    MEMEM_TELEMETRY_SOURCE=test is already set by tmp_cortex_dir fixture, but we
+    also capture calls via monkeypatch to assert on call_type.
+    """
+    from memem import lessons
+    importlib.reload(lessons)
+
+    captured_calls: list[dict] = []
+
+    def _fake_log_recall(call_type, query, returned_ids, latency_ms, source, **kwargs):
+        captured_calls.append({
+            "call_type": call_type,
+            "query": query,
+            "returned_ids": returned_ids,
+            "source": source,
+        })
+
+    monkeypatch.setattr("memem.recall_log.log_recall", _fake_log_recall)
+    # Also patch within lessons module's imported reference
+    import memem.recall_log as rl_mod
+    monkeypatch.setattr(rl_mod, "log_recall", _fake_log_recall)
+
+    lessons.record_lesson("mem-log-test", "JWT", "do not use for JWT queries")
+
+    # Call excluded_memory_ids_for_query with a matching query
+    result = lessons.excluded_memory_ids_for_query("JWT authentication setup")
+
+    assert "mem-log-test" in result
+    # log_recall should have been called with call_type='lessons_exclusion'
+    assert any(c["call_type"] == "lessons_exclusion" for c in captured_calls), (
+        f"Expected a log_recall call with call_type='lessons_exclusion', got: {captured_calls}"
+    )

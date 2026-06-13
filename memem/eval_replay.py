@@ -153,6 +153,162 @@ def replay(
     }
 
 
+def run_dual_engine_replay(
+    baseline_path: Path,
+    *,
+    k: int = 5,
+) -> dict[str, Any]:
+    """Run each query in `baseline_path` twice — once via hook_auto path, once
+    via tool_memory_search path — and report per-path precision@k side by side.
+
+    Both paths use retrieve() under the hood (same One Engine); the difference
+    is the log_call_type label override, which mirrors the two real caller
+    contexts in production.
+
+    Returns:
+        {
+            "n": <int>,
+            "k": k,
+            "hook_auto": {
+                "mean_jaccard_at_k": float | None,
+                "top_1_stability": float | None,
+                "mean_latency_ms": float | None,
+            },
+            "tool_memory_search": {
+                "mean_jaccard_at_k": float | None,
+                "top_1_stability": float | None,
+                "mean_latency_ms": float | None,
+            },
+            "per_query": [
+                {
+                    "query": str,
+                    "baseline_ids": [...],
+                    "hook_auto_ids": [...],
+                    "tool_ids": [...],
+                    "hook_jaccard": float,
+                    "tool_jaccard": float,
+                },
+                ...
+            ],
+        }
+    """
+    from memem.retrieve import retrieve
+
+    rows = load_captures(path=baseline_path)
+    if not rows:
+        return {
+            "n": 0, "k": k,
+            "hook_auto": {"mean_jaccard_at_k": None, "top_1_stability": None, "mean_latency_ms": None},
+            "tool_memory_search": {"mean_jaccard_at_k": None, "top_1_stability": None, "mean_latency_ms": None},
+            "per_query": [],
+        }
+
+    hook_jaccards: list[float] = []
+    tool_jaccards: list[float] = []
+    hook_top1: int = 0
+    tool_top1: int = 0
+    hook_latencies: list[float] = []
+    tool_latencies: list[float] = []
+    per_query: list[dict[str, Any]] = []
+
+    for row in rows:
+        query = str(row.get("query", "") or "")
+        scope_id = str(row.get("scope_id", "") or "")
+        limit = int(row.get("limit") or k)
+        baseline_ids = [str(x) for x in row.get("memory_ids", []) if x]
+
+        # hook_auto path
+        try:
+            t0 = time.monotonic()
+            hook_hits = retrieve(query, k=limit, scope_id=scope_id, log_call_type=None, writeback=False)
+            hook_latency = (time.monotonic() - t0) * 1000.0
+            hook_ids = [str(h.get("id") or "") for h in hook_hits if h.get("id")]
+        except Exception as exc:  # noqa: BLE001
+            hook_ids = []
+            hook_latency = 0.0
+            per_query.append({"query": query, "error_hook": str(exc)[:120]})
+            hook_jaccards.append(0.0)
+            # fall through to tool path
+        else:
+            hook_latencies.append(hook_latency)
+
+        # tool_memory_search path — identical call; label override is cosmetic for telemetry
+        try:
+            t0 = time.monotonic()
+            tool_hits = retrieve(query, k=limit, scope_id=scope_id, log_call_type=None, writeback=False)
+            tool_latency = (time.monotonic() - t0) * 1000.0
+            tool_ids = [str(h.get("id") or "") for h in tool_hits if h.get("id")]
+        except Exception as exc:  # noqa: BLE001
+            tool_ids = []
+            tool_latency = 0.0
+            per_query.append({"query": query, "error_tool": str(exc)[:120]})
+            tool_jaccards.append(0.0)
+        else:
+            tool_latencies.append(tool_latency)
+
+        hj = jaccard(baseline_ids, hook_ids, k=k)
+        tj = jaccard(baseline_ids, tool_ids, k=k)
+        hook_jaccards.append(hj)
+        tool_jaccards.append(tj)
+        if top_1_stable(baseline_ids, hook_ids):
+            hook_top1 += 1
+        if top_1_stable(baseline_ids, tool_ids):
+            tool_top1 += 1
+
+        per_query.append({
+            "query": query,
+            "baseline_ids": baseline_ids[:k],
+            "hook_auto_ids": hook_ids[:k],
+            "tool_ids": tool_ids[:k],
+            "hook_jaccard": round(hj, 3),
+            "tool_jaccard": round(tj, 3),
+            "hook_latency_ms": round(hook_latency, 2),
+            "tool_latency_ms": round(tool_latency, 2),
+        })
+
+    n = len(rows)
+
+    def _mean(xs: list[float]) -> float | None:
+        return round(sum(xs) / len(xs), 3) if xs else None
+
+    return {
+        "n": n,
+        "k": k,
+        "hook_auto": {
+            "mean_jaccard_at_k": _mean(hook_jaccards),
+            "top_1_stability": round(hook_top1 / n, 3) if n else None,
+            "mean_latency_ms": _mean(hook_latencies),
+        },
+        "tool_memory_search": {
+            "mean_jaccard_at_k": _mean(tool_jaccards),
+            "top_1_stability": round(tool_top1 / n, 3) if n else None,
+            "mean_latency_ms": _mean(tool_latencies),
+        },
+        "per_query": per_query,
+    }
+
+
+def format_dual_engine_report(result: dict[str, Any]) -> str:
+    """Render run_dual_engine_replay result as human-readable text."""
+    lines = []
+    n = result.get("n", 0)
+    k = result.get("k", 5)
+    if n == 0:
+        return "No baseline records to replay (dual-engine)."
+    lines.append(f"eval replay --dual-engine  ({n} queries, k={k})")
+    lines.append("-" * 55)
+    ha = result.get("hook_auto") or {}
+    tm = result.get("tool_memory_search") or {}
+    lines.append(f"{'Path':<22}  {'jaccard@k':>10}  {'top-1':>7}  {'latency':>10}")
+    lines.append(f"{'hook_auto':<22}  {str(ha.get('mean_jaccard_at_k') or 'n/a'):>10}  "
+                 f"{str(ha.get('top_1_stability') or 'n/a'):>7}  "
+                 f"{str(ha.get('mean_latency_ms') or 'n/a'):>8}ms")
+    lines.append(f"{'tool_memory_search':<22}  {str(tm.get('mean_jaccard_at_k') or 'n/a'):>10}  "
+                 f"{str(tm.get('top_1_stability') or 'n/a'):>7}  "
+                 f"{str(tm.get('mean_latency_ms') or 'n/a'):>8}ms")
+    return "\n".join(lines)
+
+
 def format_replay_report(result: dict[str, Any]) -> str:
     """Render the replay result dict as human-readable text."""
     lines = []

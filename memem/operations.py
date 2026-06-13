@@ -17,7 +17,8 @@ _MERGE_THRESHOLD = 0.70   # near-duplicate — merge via Haiku
 
 
 def memory_save(content: str, title: str = "", scope_id: str = "default",
-                tags: str = "", layer: int | None = None) -> str:
+                tags: str = "", layer: int | None = None,
+                paths: list[str] | None = None) -> str:
     # Three-band dedup: score >= 0.92 → reject; 0.70 <= score < 0.92 → merge; < 0.70 → save
     domain_tags = [tag.strip() for tag in tags.split(",") if tag.strip()] if tags else []
     effective_title = title or content[:60]
@@ -55,6 +56,10 @@ def memory_save(content: str, title: str = "", scope_id: str = "default",
             source_type="user",
             layer=layer,
         )
+        # paths: advisory metadata written to frontmatter when provided (non-empty list).
+        # Used by retrieve() path bonus to surface path-relevant memories.
+        if paths:
+            mem["paths"] = [str(p) for p in paths if p]
         _save_memory(mem)
         return f'Memory saved: {mem["id"][:8]}... "{effective_title}"'
     except ValueError as exc:

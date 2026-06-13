@@ -13,6 +13,7 @@ def log_env(tmp_path, monkeypatch):
     state_dir.mkdir()
     monkeypatch.setenv("MEMEM_DIR", str(state_dir))
     monkeypatch.delenv("CORTEX_DIR", raising=False)
+    monkeypatch.delenv("MEMEM_TELEMETRY_SOURCE", raising=False)
     import memem.models as _models
     importlib.reload(_models)
     import memem.recall_log as _rl
@@ -83,3 +84,114 @@ def test_analyze_recalls_absent_file(tmp_path, monkeypatch):
     importlib.reload(_rl)
     summary = _rl.analyze_recalls(days=7)
     assert summary["total"] == 0
+
+
+# ---------------------------------------------------------------------------
+# New tests: MEMEM_TELEMETRY_SOURCE guard (m3)
+# ---------------------------------------------------------------------------
+
+def test_log_recall_test_source_blocks_write(tmp_path, monkeypatch):
+    """MEMEM_TELEMETRY_SOURCE=test must prevent any write to the log."""
+    state_dir = tmp_path / ".memem-test-block"
+    state_dir.mkdir()
+    monkeypatch.setenv("MEMEM_DIR", str(state_dir))
+    monkeypatch.delenv("CORTEX_DIR", raising=False)
+    monkeypatch.setenv("MEMEM_TELEMETRY_SOURCE", "test")
+    import memem.models as _models
+    importlib.reload(_models)
+    import memem.recall_log as _rl
+    importlib.reload(_rl)
+
+    _rl.log_recall("hook_auto", "test query", ["id1"], 100, "hook")
+    log_path = state_dir / ".recall_log.jsonl"
+    assert not log_path.exists() or log_path.read_text().strip() == "", (
+        "FAIL: log_recall wrote to log when MEMEM_TELEMETRY_SOURCE=test"
+    )
+
+
+def test_log_citation_test_source_blocks_write(tmp_path, monkeypatch):
+    """MEMEM_TELEMETRY_SOURCE=test must prevent citation writes too."""
+    state_dir = tmp_path / ".memem-test-citation-block"
+    state_dir.mkdir()
+    monkeypatch.setenv("MEMEM_DIR", str(state_dir))
+    monkeypatch.delenv("CORTEX_DIR", raising=False)
+    monkeypatch.setenv("MEMEM_TELEMETRY_SOURCE", "test")
+    import memem.models as _models
+    importlib.reload(_models)
+    import memem.recall_log as _rl
+    importlib.reload(_rl)
+
+    _rl.log_citation("session123", ["abc12345"], "mine_delta")
+    log_path = state_dir / ".recall_log.jsonl"
+    assert not log_path.exists() or log_path.read_text().strip() == "", (
+        "FAIL: log_citation wrote to log when MEMEM_TELEMETRY_SOURCE=test"
+    )
+
+
+def test_log_recall_benchmark_source_writes_with_source_tag(tmp_path, monkeypatch):
+    """MEMEM_TELEMETRY_SOURCE=benchmark must write a row with source_tag='benchmark'."""
+    state_dir = tmp_path / ".memem-benchmark"
+    state_dir.mkdir()
+    monkeypatch.setenv("MEMEM_DIR", str(state_dir))
+    monkeypatch.delenv("CORTEX_DIR", raising=False)
+    monkeypatch.setenv("MEMEM_TELEMETRY_SOURCE", "benchmark")
+    import memem.models as _models
+    importlib.reload(_models)
+    import memem.recall_log as _rl
+    importlib.reload(_rl)
+
+    _rl.log_recall("hook_auto", "warmup query", ["id1"], 55, "hook")
+    log_path = state_dir / ".recall_log.jsonl"
+    assert log_path.exists(), "FAIL: no log written for benchmark source"
+    lines = log_path.read_text().splitlines()
+    assert len(lines) == 1, f"Expected 1 line, got {len(lines)}"
+    entry = json.loads(lines[0])
+    assert entry.get("source_tag") == "benchmark", (
+        f"Expected source_tag='benchmark', got: {entry}"
+    )
+
+
+def test_log_recall_untagged_production_has_no_source_tag(log_env):
+    """Untagged production calls must not include source_tag field (backward compat)."""
+    rl = log_env["rl"]
+    rl.log_recall("hook_auto", "prod query", ["id1"], 75, "hook")
+    log_path = log_env["state_dir"] / ".recall_log.jsonl"
+    lines = log_path.read_text().splitlines()
+    assert len(lines) == 1
+    entry = json.loads(lines[0])
+    assert "source_tag" not in entry, (
+        f"Production rows must not have source_tag, got: {entry}"
+    )
+
+
+def test_analyze_recalls_excludes_tagged_rows_by_default(tmp_path, monkeypatch):
+    """analyze_recalls must exclude rows with source_tag by default."""
+    state_dir = tmp_path / ".memem-analyze-tagged"
+    state_dir.mkdir()
+    monkeypatch.setenv("MEMEM_DIR", str(state_dir))
+    monkeypatch.delenv("CORTEX_DIR", raising=False)
+    monkeypatch.delenv("MEMEM_TELEMETRY_SOURCE", raising=False)
+    import memem.models as _models
+    importlib.reload(_models)
+    import memem.recall_log as _rl
+    importlib.reload(_rl)
+
+    # Write one production row and one benchmark-tagged row directly
+    log_path = state_dir / ".recall_log.jsonl"
+    import json as _json
+    from datetime import UTC, datetime
+    ts = datetime.now(UTC).isoformat()
+    prod_row = {"ts": ts, "call_type": "hook_auto", "query": "prod q", "returned_ids": [], "latency_ms": 50, "source": "hook"}
+    bm_row = {"ts": ts, "call_type": "hook_auto", "query": "warmup query", "returned_ids": [], "latency_ms": 30, "source": "hook", "source_tag": "benchmark"}
+    with open(log_path, "w") as f:
+        f.write(_json.dumps(prod_row) + "\n")
+        f.write(_json.dumps(bm_row) + "\n")
+
+    # Default: only production row counted
+    summary = _rl.analyze_recalls(days=7)
+    assert summary["total"] == 1, f"Expected 1 (excluding tagged), got {summary['total']}"
+    assert summary["top_queries"] == [("prod q", 1)]
+
+    # With include_tagged=True: both rows counted
+    summary_all = _rl.analyze_recalls(days=7, include_tagged=True)
+    assert summary_all["total"] == 2, f"Expected 2 (including tagged), got {summary_all['total']}"

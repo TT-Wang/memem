@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import json
 
 
@@ -106,3 +107,98 @@ def test_import_plaintext_dedup(tmp_vault, tmp_cortex_dir, tmp_path):
     assert second_count == 0, (
         f"Expected 0 memories on second import (dedup), got {second_count}"
     )
+
+
+# ---------------------------------------------------------------------------
+# m5: paths parameter in memory_save()
+# ---------------------------------------------------------------------------
+
+def test_memory_save_has_paths_parameter():
+    """memory_save() must accept a 'paths' parameter."""
+    from memem.operations import memory_save
+    params = inspect.signature(memory_save).parameters
+    assert "paths" in params, "memory_save() must have a 'paths' parameter"
+
+
+def test_memory_save_paths_written_to_frontmatter(tmp_vault, tmp_cortex_dir):
+    """memory_save(content, title, paths=[...]) writes paths: to frontmatter."""
+    operations, obsidian_store = _reload_modules()
+
+    result = operations.memory_save(
+        content="A test memory with path context for the server module",
+        title="Test paths frontmatter",
+        scope_id="default",
+        paths=["memem/server.py", "memem/retrieve.py"],
+    )
+    assert "saved" in result.lower() or "merged" in result.lower() or "exists" in result.lower(), (
+        f"memory_save should return a status string, got: {result}"
+    )
+
+    # If saved (not rejected), verify paths: appears in the written file
+    if "saved" in result.lower():
+        from memem.models import OBSIDIAN_MEMORIES_DIR
+        md_files = list(OBSIDIAN_MEMORIES_DIR.glob("*.md"))
+        assert md_files, "At least one memory file should exist after memory_save"
+
+        # Find the file that was just written
+        found_paths_field = False
+        for md_file in md_files:
+            content = md_file.read_text(encoding="utf-8")
+            if "paths:" in content and "memem/server.py" in content:
+                found_paths_field = True
+                break
+
+        assert found_paths_field, (
+            "The saved memory file should contain paths: frontmatter with 'memem/server.py'"
+        )
+
+
+def test_memory_save_paths_none_writes_no_paths_field(tmp_vault, tmp_cortex_dir):
+    """memory_save() without paths= does not write paths: frontmatter."""
+    operations, obsidian_store = _reload_modules()
+
+    result = operations.memory_save(
+        content="A test memory without path context for verify no paths field",
+        title="Test no paths frontmatter",
+        scope_id="default",
+        # No paths= argument
+    )
+
+    if "saved" in result.lower():
+        from memem.models import OBSIDIAN_MEMORIES_DIR
+        md_files = list(OBSIDIAN_MEMORIES_DIR.glob("*.md"))
+        for md_file in md_files:
+            content = md_file.read_text(encoding="utf-8")
+            if "Test no paths frontmatter" in content:
+                # The frontmatter should NOT contain a paths: block
+                # Extract just the frontmatter
+                front_end = content.find("\n---", 4)
+                front = content[:front_end + 4] if front_end > 0 else content[:2000]
+                assert "paths:" not in front, (
+                    f"Memory saved without paths= should not have paths: in frontmatter"
+                )
+                break
+
+
+def test_memory_save_paths_empty_list_writes_no_paths_field(tmp_vault, tmp_cortex_dir):
+    """memory_save() with paths=[] does not write paths: frontmatter."""
+    operations, obsidian_store = _reload_modules()
+
+    result = operations.memory_save(
+        content="A test memory with empty paths list should not have paths field",
+        title="Test empty paths list",
+        scope_id="default",
+        paths=[],
+    )
+
+    if "saved" in result.lower():
+        from memem.models import OBSIDIAN_MEMORIES_DIR
+        md_files = list(OBSIDIAN_MEMORIES_DIR.glob("*.md"))
+        for md_file in md_files:
+            content = md_file.read_text(encoding="utf-8")
+            if "Test empty paths list" in content:
+                front_end = content.find("\n---", 4)
+                front = content[:front_end + 4] if front_end > 0 else content[:2000]
+                assert "paths:" not in front, (
+                    "Memory saved with paths=[] should not have paths: in frontmatter"
+                )

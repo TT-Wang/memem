@@ -9,12 +9,28 @@ no fcntl lock needed. NO threads, NO queue. Synchronous I/O only.
 from __future__ import annotations
 
 import json
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
 from memem.models import MEMEM_DIR
 
 _LOG_PATH = Path(MEMEM_DIR) / ".recall_log.jsonl"
+
+
+def _current_log_path() -> Path:
+    """Return the recall log path resolved from the current MEMEM_DIR env var.
+
+    This is called at write time (not import time) so that tests that
+    monkeypatch MEMEM_DIR automatically redirect writes to their tmp dir
+    without needing to reload this module. ``_LOG_PATH`` (module-level) is
+    kept for read paths — they stay correct either via importlib.reload()
+    in fixture setup (conftest) or via local ``from memem.recall_log import
+    _LOG_PATH`` statements that re-resolve the module attribute at call time
+    (dreamer.py, cli.py). Both see the current value after a reload.
+    """
+    state_dir = os.environ.get("MEMEM_DIR") or os.environ.get("CORTEX_DIR") or str(MEMEM_DIR)
+    return Path(state_dir) / ".recall_log.jsonl"
 
 
 def log_recall(
@@ -26,8 +42,18 @@ def log_recall(
     session_id: str = "",
 ) -> None:
     """Append one JSONL line. Silent no-op on any error (telemetry must
-    never break the caller)."""
+    never break the caller).
+
+    Telemetry source guard (MEMEM_TELEMETRY_SOURCE env var):
+    - "test"      → silently discarded; no write.
+    - "<other>"   → written with an extra source_tag field for filtering.
+    - unset/empty → written as production row (no source_tag — backward compat).
+    """
+    src = os.environ.get("MEMEM_TELEMETRY_SOURCE", "")
+    if src == "test":
+        return
     try:
+        log_path = _current_log_path()
         entry = {
             "ts": datetime.now(UTC).isoformat(),
             "call_type": call_type,
@@ -38,8 +64,10 @@ def log_recall(
         }
         if session_id:
             entry["session_id"] = session_id
-        Path(MEMEM_DIR).mkdir(parents=True, exist_ok=True)
-        with open(_LOG_PATH, "a", encoding="utf-8") as f:
+        if src:
+            entry["source_tag"] = src
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
     except Exception:  # noqa: BLE001
         pass
@@ -50,8 +78,18 @@ def log_citation(
     cited_ids: list[str],
     source: str = "mine_delta",
 ) -> None:
-    """Append a citation row to the recall log. Silent no-op on any error."""
+    """Append a citation row to the recall log. Silent no-op on any error.
+
+    Telemetry source guard (MEMEM_TELEMETRY_SOURCE env var):
+    - "test"      → silently discarded; no write.
+    - "<other>"   → written with an extra source_tag field for filtering.
+    - unset/empty → written as production row (no source_tag — backward compat).
+    """
+    src = os.environ.get("MEMEM_TELEMETRY_SOURCE", "")
+    if src == "test":
+        return
     try:
+        log_path = _current_log_path()
         entry = {
             "ts": datetime.now(UTC).isoformat(),
             "type": "citation",
@@ -59,14 +97,16 @@ def log_citation(
             "cited_ids": list(cited_ids),
             "source": source,
         }
-        Path(MEMEM_DIR).mkdir(parents=True, exist_ok=True)
-        with open(_LOG_PATH, "a", encoding="utf-8") as f:
+        if src:
+            entry["source_tag"] = src
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
     except Exception:  # noqa: BLE001
         pass
 
 
-def analyze_recalls(days: int = 7) -> dict:
+def analyze_recalls(days: int = 7, include_tagged: bool = False) -> dict:
     """Read .recall_log.jsonl and return summary for last N days.
 
     Row types:
@@ -75,6 +115,10 @@ def analyze_recalls(days: int = 7) -> dict:
 
     Citation rows are counted separately and excluded from recall aggregations
     (by_call_type, latency, queries, etc.).
+
+    By default rows with a ``source_tag`` field are excluded (these originate
+    from benchmark / non-production callers).  Pass ``include_tagged=True`` to
+    include them (e.g. for inspecting benchmark traffic).
     """
     if not _LOG_PATH.exists():
         return {"total": 0, "by_call_type": {}, "top_queries": [],
@@ -93,6 +137,12 @@ def analyze_recalls(days: int = 7) -> dict:
                     e = json.loads(line)
                     ts = datetime.fromisoformat(e["ts"]).timestamp()
                     if ts >= cutoff:
+                        # Skip tagged rows unless caller opts in. Note: this
+                        # also excludes CITATION rows from tagged sessions
+                        # (e.g. benchmark runs), which is deliberate — the
+                        # citation_rate metric stays a production-only signal.
+                        if not include_tagged and e.get("source_tag"):
+                            continue
                         if e.get("type") == "citation":
                             citation_entries.append(e)
                         else:

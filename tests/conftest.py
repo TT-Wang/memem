@@ -47,13 +47,20 @@ def tmp_cortex_dir(tmp_path, monkeypatch):
     creates is now ~/.memem/, not ~/.cortex/. Tests that take this fixture
     don't need to be renamed — they get whatever the package considers the
     current state dir.
+
+    Telemetry isolation: sets MEMEM_TELEMETRY_SOURCE=test so that any
+    log_recall / log_citation calls during the test are silently discarded,
+    and reloads recall_log so _LOG_PATH points at the tmp state dir (not the
+    live ~/.memem/ path baked in at module import time).
     """
     state = tmp_path / ".memem"
     state.mkdir()
     monkeypatch.setenv("MEMEM_DIR", str(state))
     monkeypatch.delenv("CORTEX_DIR", raising=False)
-    from memem import graph_index, models, search_index, telemetry
+    monkeypatch.setenv("MEMEM_TELEMETRY_SOURCE", "test")
+    from memem import graph_index, models, recall_log, search_index, telemetry
     importlib.reload(models)
+    importlib.reload(recall_log)
     importlib.reload(telemetry)
     importlib.reload(search_index)
     importlib.reload(graph_index)

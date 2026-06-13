@@ -849,3 +849,218 @@ def test_session_id_malformed_file_returns_empty(isolated_env):
     importlib.reload(retrieve_mod_pkg)
     result = retrieve_mod_pkg._read_session_id()
     assert result == "", f"Expected empty string for malformed JSON, got '{result}'"
+
+
+# ---------------------------------------------------------------------------
+# 11. Path bonus tests (m5): paths_context parameter
+# ---------------------------------------------------------------------------
+
+
+class TestPathBonus:
+    """Tests for paths_context parameter and path-matching 1.05x bonus."""
+
+    def test_retrieve_accepts_paths_context(self, isolated_env):
+        """retrieve(query, paths_context=[...]) must not raise and returns a list."""
+        mod = isolated_env["retrieve_mod"]
+        mdir = isolated_env["memories_dir"]
+        state_dir = isolated_env["state_dir"]
+
+        mid = _make_uuid()
+        _write_full_memory(mdir, mid, title="path context test memory")
+        _write_embeddings(state_dir, [mid])
+        _reset_retrieve_caches(mod)
+
+        # Must not raise TypeError
+        results = mod.retrieve(
+            "path context test",
+            k=8,
+            paths_context=["memem/server.py"],
+            log_call_type=None,
+        )
+        assert isinstance(results, list), "retrieve() with paths_context must return a list"
+
+    def test_retrieve_accepts_empty_paths_context(self, isolated_env):
+        """retrieve() with paths_context=[] or None should not raise."""
+        mod = isolated_env["retrieve_mod"]
+        mdir = isolated_env["memories_dir"]
+        state_dir = isolated_env["state_dir"]
+
+        mid = _make_uuid()
+        _write_full_memory(mdir, mid, title="path test empty")
+        _write_embeddings(state_dir, [mid])
+        _reset_retrieve_caches(mod)
+
+        results_empty = mod.retrieve("path test empty", k=8, paths_context=[], log_call_type=None)
+        results_none = mod.retrieve("path test empty", k=8, paths_context=None, log_call_type=None)
+        assert isinstance(results_empty, list)
+        assert isinstance(results_none, list)
+
+    def test_path_matching_memory_scores_higher(self, isolated_env):
+        """A memory with paths: matching paths_context scores higher (1.05x multiplier).
+
+        Set up two memories with identical text but different paths: frontmatter.
+        The one whose paths: matches paths_context should score higher.
+        """
+        mod = isolated_env["retrieve_mod"]
+        mdir = isolated_env["memories_dir"]
+        state_dir = isolated_env["state_dir"]
+
+        # Memory with matching paths: frontmatter
+        path_matched_id = _make_uuid()
+        path_no_match_id = _make_uuid()
+
+        # Write memory with paths: field
+        slug_match = f"path-match-{path_matched_id[:8]}"
+        (mdir / f"{slug_match}.md").write_text(
+            "---\n"
+            f"id: {path_matched_id}\n"
+            "schema_version: 1\n"
+            "title: path match test memory\n"
+            "project: test\n"
+            "tags: []\n"
+            "paths:\n"
+            "- memem/server.py\n"
+            "- memem/retrieve.py\n"
+            "created: '2025-01-15T10:00:00'\n"
+            "updated: '2025-01-15T10:00:00'\n"
+            "source_type: user\n"
+            "source_session: ''\n"
+            "importance: 3\n"
+            "status: active\n"
+            "valid_to: ''\n"
+            "layer: 2\n"
+            "valid_at: '2025-01-15T10:00:00'\n"
+            "last_accessed_at: '2025-01-15T10:00:00'\n"
+            "access_count: 0\n"
+            "decay_immune: false\n"
+            "---\n\n"
+            "Body text for path match test memory.\n",
+            encoding="utf-8",
+        )
+
+        # Write memory WITHOUT paths: (no path bonus)
+        slug_no = f"path-nomatch-{path_no_match_id[:8]}"
+        (mdir / f"{slug_no}.md").write_text(
+            "---\n"
+            f"id: {path_no_match_id}\n"
+            "schema_version: 1\n"
+            "title: path no match test memory\n"
+            "project: test\n"
+            "tags: []\n"
+            "created: '2025-01-15T10:00:00'\n"
+            "updated: '2025-01-15T10:00:00'\n"
+            "source_type: user\n"
+            "source_session: ''\n"
+            "importance: 3\n"
+            "status: active\n"
+            "valid_to: ''\n"
+            "layer: 2\n"
+            "valid_at: '2025-01-15T10:00:00'\n"
+            "last_accessed_at: '2025-01-15T10:00:00'\n"
+            "access_count: 0\n"
+            "decay_immune: false\n"
+            "---\n\n"
+            "Body text for path no match test memory.\n",
+            encoding="utf-8",
+        )
+
+        _write_embeddings(state_dir, [path_matched_id, path_no_match_id])
+        _reset_retrieve_caches(mod)
+
+        # Query with paths_context matching path_matched_id
+        results = mod.retrieve(
+            "path match test memory",
+            k=8,
+            paths_context=["memem/server.py"],
+            log_call_type=None,
+        )
+
+        matched_hit = next((r for r in results if r["id"] == path_matched_id), None)
+        no_match_hit = next((r for r in results if r["id"] == path_no_match_id), None)
+
+        # Query without paths_context for baseline scores
+        _reset_retrieve_caches(mod)
+        results_no_ctx = mod.retrieve(
+            "path match test memory",
+            k=8,
+            paths_context=None,
+            log_call_type=None,
+        )
+        matched_no_ctx = next((r for r in results_no_ctx if r["id"] == path_matched_id), None)
+
+        if matched_hit is not None and matched_no_ctx is not None:
+            # The path-matched memory should score >= 1.05x its baseline
+            assert matched_hit["score"] >= matched_no_ctx["score"] * 1.04, (
+                f"Path-matched memory should score higher with paths_context "
+                f"(with_ctx={matched_hit['score']:.4f}, without_ctx={matched_no_ctx['score']:.4f})"
+            )
+
+    def test_path_bonus_multiplier_is_1_05(self, isolated_env, tmp_path):
+        """Verify the path bonus is exactly 1.05x — applied to score post-MMR.
+
+        We directly read a memory file with paths:, inject it as a result hit,
+        and verify the multiplier matches.
+        """
+        mod = isolated_env["retrieve_mod"]
+        mdir = isolated_env["memories_dir"]
+        state_dir = isolated_env["state_dir"]
+
+        test_id = _make_uuid()
+        slug = f"bonus-test-{test_id[:8]}"
+        mem_file = mdir / f"{slug}.md"
+        mem_file.write_text(
+            "---\n"
+            f"id: {test_id}\n"
+            "schema_version: 1\n"
+            "title: bonus test\n"
+            "project: test\n"
+            "tags: []\n"
+            "paths:\n"
+            "- memem/server.py\n"
+            "created: '2025-01-15T10:00:00'\n"
+            "updated: '2025-01-15T10:00:00'\n"
+            "source_type: user\n"
+            "source_session: ''\n"
+            "importance: 3\n"
+            "status: active\n"
+            "valid_to: ''\n"
+            "layer: 2\n"
+            "valid_at: '2025-01-15T10:00:00'\n"
+            "last_accessed_at: '2025-01-15T10:00:00'\n"
+            "access_count: 0\n"
+            "decay_immune: false\n"
+            "---\n\nBonus test body.\n",
+            encoding="utf-8",
+        )
+
+        _write_embeddings(state_dir, [test_id])
+        _reset_retrieve_caches(mod)
+
+        results_with = mod.retrieve("bonus test", k=8, paths_context=["memem/server.py"], log_call_type=None)
+        _reset_retrieve_caches(mod)
+        results_without = mod.retrieve("bonus test", k=8, paths_context=None, log_call_type=None)
+
+        hit_with = next((r for r in results_with if r["id"] == test_id), None)
+        hit_without = next((r for r in results_without if r["id"] == test_id), None)
+
+        if hit_with is not None and hit_without is not None and hit_without["score"] > 0:
+            ratio = hit_with["score"] / hit_without["score"]
+            assert abs(ratio - 1.05) < 0.01, (
+                f"Path bonus multiplier should be ~1.05x, got {ratio:.4f} "
+                f"(with={hit_with['score']:.4f}, without={hit_without['score']:.4f})"
+            )
+
+
+# ---------------------------------------------------------------------------
+# 12. retrieve() paths_context signature check
+# ---------------------------------------------------------------------------
+
+
+def test_retrieve_paths_context_in_signature():
+    """retrieve() must have paths_context parameter."""
+    import inspect
+    from memem.retrieve import retrieve
+    params = inspect.signature(retrieve).parameters
+    assert "paths_context" in params, (
+        "retrieve() must have a 'paths_context' parameter"
+    )

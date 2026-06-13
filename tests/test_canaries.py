@@ -8,6 +8,8 @@ Covers:
 5. test_verify_detects_layer_drift_for_always_reachable
 6. test_verify_detects_promotion_for_never_elevate
 7. test_verify_passes_when_canary_missing_for_never_elevate
+8. test_check_canaries_in_doctor_prints_canary_check_line (non-blocking advisory)
+9. test_check_canaries_in_doctor_prints_warn_when_not_planted (empty vault)
 """
 from __future__ import annotations
 
@@ -167,3 +169,61 @@ def test_verify_passes_when_canary_missing_for_never_elevate(tmp_vault, tmp_cort
         f"verify should pass when never-elevate canaries are absent: {result['errors']}"
     )
     assert result["never_elevate_failures"] == [], "Absent never-elevate canaries must not cause failure"
+
+
+# ---------------------------------------------------------------------------
+# Test 8: check_canaries_in_doctor prints a "Canary check" line (non-blocking)
+# ---------------------------------------------------------------------------
+
+
+def test_check_canaries_in_doctor_prints_canary_check_line(
+    tmp_vault, tmp_cortex_dir, capsys, monkeypatch
+):
+    """check_canaries_in_doctor() must always print 'Canary check: N/5 pass' line.
+
+    TEST ISOLATION: retrieve() is monkeypatched to avoid scanning the real
+    vault or real session dirs. The monkeypatched retrieve returns empty
+    results (WARN path) which is fine — we only need the 'Canary check' line.
+    """
+    import importlib
+    import memem.cli as cli_module
+    import memem.retrieve as retrieve_mod
+
+    importlib.reload(cli_module)
+
+    def _fake_retrieve(query, k=8, log_call_type=None, scope_id="", writeback=True, **kwargs):
+        return []
+
+    monkeypatch.setattr(retrieve_mod, "retrieve", _fake_retrieve)
+
+    cli_module.check_canaries_in_doctor()
+    captured = capsys.readouterr()
+    assert "Canary check" in captured.out, (
+        f"Expected 'Canary check' in output, got: {captured.out!r}"
+    )
+    # Non-blocking: no SystemExit raised, function returns normally
+
+
+def test_check_canaries_in_doctor_prints_warn_when_not_planted(
+    tmp_vault, tmp_cortex_dir, capsys, monkeypatch
+):
+    """When canaries are not planted, each should print WARN (not raise)."""
+    import importlib
+    import memem.cli as cli_module
+    import memem.retrieve as retrieve_mod
+
+    importlib.reload(cli_module)
+
+    # retrieve() returns empty — no canaries in index
+    def _fake_retrieve(query, k=8, log_call_type=None, scope_id="", writeback=True, **kwargs):
+        return []
+
+    monkeypatch.setattr(retrieve_mod, "retrieve", _fake_retrieve)
+
+    # Should not raise even though all canaries are missing
+    cli_module.check_canaries_in_doctor()
+    captured = capsys.readouterr()
+
+    # Must print WARN for each canary and a summary line
+    assert "WARN" in captured.out or "Canary check" in captured.out
+    assert "Canary check: 0/5 pass" in captured.out

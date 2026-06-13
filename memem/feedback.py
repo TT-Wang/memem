@@ -134,6 +134,10 @@ def update_relevance_scores(session_id: str, outcome: float) -> None:
     The read-modify-write cycle is performed under a single flock so that
     concurrent calls (e.g. two sessions completing close together) don't
     clobber each other's writes.
+
+    Read-side wiring deferred. Gate: >=200 citation rows over >=14 days.
+    Current data: 1 citation row (2026-06-11). Do not wire until gate met.
+    Write-side EMA (below) is the only active path.
     """
     recalled = get_session_recalls(session_id)
     if not recalled:

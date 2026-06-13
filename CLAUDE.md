@@ -38,8 +38,6 @@ At session start you also receive a `## Episode index` of up to 25 recent `type:
 2. **`memory_get(ids=[...])`** — full content (~500 tok/result). Use AFTER memory_search when you know which specific memories you need.
 3. **`memory_timeline(memory_id)`** — chronological thread via `related[]` graph + same-project window. Use when you need the narrative around a memory (what led to it, what came after).
 
-`memory_recall` (legacy) still works as a backward-compat alias that's equivalent to memory_search + memory_get on top results.
-
 **Always-wake recall (auto mode only)** — when `MEMEM_INJECTION_MODE=auto`, the `UserPromptSubmit` hook runs `active_memory_slice` on every prompt. In the default `tool` mode this hook produces no auto-injection; you call `active_memory_slice` manually when context is needed.
 
 **Injection mode (`MEMEM_INJECTION_MODE`)** — controls whether the hook auto-injects context into every prompt (v1.9+):
@@ -60,10 +58,10 @@ Selective-recall tunables (env vars, all optional):
 | Var | Default | Behaviour |
 |-----|---------|-----------|
 | `MEMEM_RECALL_MIN_ITEM_SCORE` | `0.0` | Per-item composite-score floor for recall results (0.0 = disabled). Clamped to `[0.0, 1.0]`. |
-| `MEMEM_RERANK_MODEL` | `""` | Cross-encoder reranker model name (e.g. `cross-encoder/ms-marco-MiniLM-L-12-v2`). When set, all `memory_search`/`memory_recall` calls apply a CE reranking pass over the top-50 unified-engine candidates before truncating to `limit`. Model downloaded on first use. Not required — three-way RRF produces strong results without CE. |
+| `MEMEM_RERANK_MODEL` | `""` | Cross-encoder reranker model name (e.g. `cross-encoder/ms-marco-MiniLM-L-12-v2`). When set, all `memory_search` calls apply a CE reranking pass over the top-50 unified-engine candidates before truncating to `limit`. Model downloaded on first use. Not required — three-way RRF produces strong results without CE. |
 | `MEMEM_DREAM_AUTO` | `1` | Set `0` to disable the autonomous every-25-deltas dream pass (unattended Haiku spend + auto-applied additive vault mutations). Manual `--dream` is unaffected. |
 
-**Retrieval engine (v2.6.0+)** — `memory_search`, `memory_recall`, and `active_memory_slice` all use the same unified engine: three-way RRF (cosine + BM25 + FTS5) with a rerank signal bundle (usage, scope, link, importance) and MMR diversification. There is no separate heuristic engine.
+**Retrieval engine (v2.6.0+)** — `memory_search` and `active_memory_slice` use the same unified engine: three-way RRF (cosine + BM25 + FTS5) with a rerank signal bundle (usage, scope, link, importance) and MMR diversification. There is no separate heuristic engine.
 
 **Scope semantics (v2.6.0+)** — `scope_id` is a **soft bonus** (not a hard filter). Memories in the named project rank higher, but strong cross-project results are not excluded. Default `"default"` applies no scope bonus.
 
@@ -161,11 +159,7 @@ Cap: at most 5 UPDATE+SUPERSEDE ops per delta (PROFILE ops have their own cap of
 | `memory_search` | Compact index search — returns ~50 tok/result, use first |
 | `memory_get` | Full content fetch by IDs — use after memory_search |
 | `memory_timeline` | Chronological thread via related[] graph |
-| `memory_recall` | (legacy) Search + fetch full content — prefer search+get for token efficiency |
-| `memory_list` | List all memories with stats |
-| `memory_import` | Import from files, directories, or chat exports |
 | `transcript_search` | Search raw Claude Code session logs |
-| `context_assemble` | On-demand query-tailored briefing from all knowledge |
 | `active_memory_slice` | On-demand runtime working-state slice from active recall candidates |
 
 **CLI commands** (run in your terminal, not via MCP):
@@ -175,6 +169,12 @@ Cap: at most 5 UPDATE+SUPERSEDE ops per delta (PROFILE ops have their own cap of
 - `python3 -m memem.server --migrate-layers [--apply] [--exclude id8,...]` — dry-run report (default) or apply migration of legacy L0/L1 memories into profile documents. **HUMAN REVIEW REQUIRED before `--apply`**. Idempotent and additive-only — memories are never deleted.
 - `python3 -m memem.server --dream [--safe-auto]` — run a dream pass. `--safe-auto` auto-applies additive categories (reflection_with_citations, tense_rewrite) and leaves destructive categories (demotions, cluster merges) as dry-run-report-only.
 - `python3 -m memem.server --consolidate` — back-compat alias for `--dream` filtered to cluster_merge proposals only.
+- `python3 -m memem.server graph rebuild [scope]` — rebuild the typed graph side index from Obsidian memories. Optional scope arg limits to one project. (Replaces removed `memory_graph_rebuild` MCP tool.)
+- `python3 -m memem.server graph audit` — audit graph quality: orphans, dead links, one-way links, hubs, stale edges. (Replaces removed `memory_graph_audit` MCP tool.)
+- `python3 -m memem.server graph neighbors <memory_id> [--history]` — inspect typed, scored graph neighbors for one memory. `--history` includes supersedes/contradicts edges. (Replaces removed `memory_graph` MCP tool.)
+- `python3 -m memem.server --assemble-context <query>` — assemble a narrative briefing from playbook, memories, and transcripts. (Replaces removed `context_assemble` MCP tool.)
+- `python3 -m memem.server --compact-index` — list memories as a compact index (ranked by importance × recency). (Replaces removed `memory_list` MCP tool.)
+- Note: `memory_import` and `memory_remind` (cross-vault search) have no direct CLI equivalent — use the library functions `memem.operations.memory_import()` and `memem.cross_vault.search_across_vaults()` directly from Python scripts.
 
 ## Dream cycles (v2.8+)
 

@@ -579,6 +579,11 @@ def _write_obsidian_memory(mem: dict):
     meta["last_accessed_at"] = mem.get("last_accessed_at", mem.get("created_at", _now()))
     meta["access_count"] = int(mem.get("access_count", 0) or 0)
     meta["decay_immune"] = bool(mem.get("decay_immune", False))
+    # paths: advisory metadata — glob patterns for files this memory is relevant to.
+    # Written only when non-empty; used by retrieve() path-context bonus (w_path=1.05x).
+    mem_paths = mem.get("paths") or []
+    if mem_paths and isinstance(mem_paths, list):
+        meta["paths"] = [str(p) for p in mem_paths if p]
 
     essence = _strip_generated_related_section(str(mem.get("essence", "") or ""))
 
