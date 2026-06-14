@@ -30,6 +30,14 @@ memem is a Claude Code plugin that gives Claude persistent memory across session
 
 It's **local-first**: no cloud services, no API keys required, no vendor lock-in. Everything lives in `~/obsidian-brain/memem/memories/` as human-readable markdown.
 
+### What's new in v2.9.1 (Path-Scope Activation)
+
+v2.9.1 activates the path-scoped retrieval that shipped dormant in v2.9.0: recall now **auto-derives `paths_context`** from the current session so the `paths:` bonus actually fires without any caller action. The new `recent_session_paths()` in `memem/transcripts.py` resolves `session_id` → JSONL via a direct CWD-slug stat first (O(1)), falling back to `next(base_dir.rglob(...), None)` (short-circuit on first match); it then **tail-reads the last 512 KB** of the file (~5 ms even on a 64 MB session, vs ~390 ms for a full read), walks assistant turns most-recent-first, and extracts the top-N deduplicated file paths from `Read`/`Edit`/`Write`/`NotebookEdit` `file_path` inputs and Bash command first-line path tokens via `_extract_paths_from_content_blocks()`. The auto-derivation is wired into `active_memory_slice` (MCP tool), the `auto-recall.sh` UserPromptSubmit hook, and the `cli.py` slice path; caller-supplied `paths_context` still wins; derivation failures are logged at `debug`/`warning` and never propagate — any exception returns `[]` silently. No API or schema changes; 12 new tests in `tests/test_recent_paths.py` cover extraction, recency/dedup/limit, missing/malformed sessions, and end-to-end `active_memory_slice` integration. See [CHANGELOG](CHANGELOG.md) for full details.
+
+### What's new in v2.9.0 (Tool Diet + Transcript FTS5 + Path Scope)
+
+v2.9.0 trims the MCP surface from **14 tools to 6** — removing `memory_recall`, `memory_graph`, `memory_graph_audit`, `memory_graph_rebuild`, `memory_list`, `memory_import`, `context_assemble`, and `memory_remind` from the MCP layer (CLI and library equivalents remain for all eight) — and cuts total tool-description schema size **57%** (12,827 → 5,474 chars). `transcript_search` is backed by a **persistent FTS5 index** at `~/.memem/transcript_fts.db` (one row per Q/A turn-pair, `index_session()` called incrementally from `mine_delta`; old single-row-per-session indexes auto-migrate; the grep fallback is bounded by size/count/time caps and never silently truncates). **Path-scoped memories** arrive via a new `paths:` frontmatter field and a 1.05× `w_path` bonus in `retrieve()` for memories whose path globs match `paths_context`; `memory_save` gains an optional `paths` param; `active_memory_slice` accepts `paths_context`; and the miner annotates candidates with `paths:` when ≥2 paths each appear ≥3 times. Telemetry isolation is hardened via `MEMEM_TELEMETRY_SOURCE`. Closed-loop evaluation tooling is wired: a canary `--doctor` check, `--dual-engine` replay, and deferred-gate comments in `lessons.py` / `feedback.py`. Benchmark **79.3% (119/150)**, all acceptance gates pass. See [CHANGELOG](CHANGELOG.md) for full details.
+
 ### What's new in v2.8.0 (Vault Structure)
 
 v2.8.0 retires the L0–L3 layer system and replaces it with a context model that reflects how memory actually works. The starting point was honest data: 462 memories had been auto-classified L0 ("always relevant"), which was not a layer, it was a full briefing that no session could absorb. The new model has three tiers: (1) **profiles** — schema-shaped always-injected documents per user (`profile_user.md`: Preferences / Conventions / Environment) and per project (`profile_<project>.md`: Identity / Stack & Structure / Conventions), stored at `<vault>/memem/profiles/`, populated by the miner's new `PROFILE` reconcile op and bootstrappable from your existing vault via `--migrate-layers`; (2) **working rules** — `type:procedural` memories (failure→fix patterns, corrections) ranked by citation count and injected as a `## Working rules` block at session start (≤1200 chars); (3) **episode index** — the existing 25-entry episodic title index, unchanged. Consolidation logic moves from the deleted `consolidation.py` into the dreamer's `cluster_merge` category with a bug fix: only the members listed in `supporting_ids` are bi-temporally invalidated after a successful merge, not all cluster members unconditionally. The dreamer gains `reflection_with_citations` (synthesizes `type:insight` memories from episodic clusters) and `tense_rewrite` (corrects expired future-tense memories) as additive-safe categories that fire automatically every 25 substantive mining deltas via `--dream --safe-auto`. The 18-query benchmark improved to **80.0% (120/150)** after L0 MMR pre-seeding was removed — the anchor mechanism was penalizing relevance, not helping it (measured during release validation; up from 79.3%/119/150 in v2.7.0). See [CHANGELOG](CHANGELOG.md) for full details.
@@ -161,7 +169,7 @@ The lower-level recall tools still exist for explicit drilling:
 1. `memory_search(query)` -> compact index
 2. `memory_get(ids=[...])` -> full content
 3. `memory_timeline(id)` -> chronological thread
-4. `context_assemble(query, project)` -> optional secondary narrative briefing
+4. `active_memory_slice(query)` -> on-demand working-state slice
 
 **Context model (v2.8+) — three tiers injected at session start:**
 
@@ -325,23 +333,29 @@ You can point memem elsewhere via `MEMEM_DIR` and `MEMEM_OBSIDIAN_VAULT` env var
 
 ## What are the MCP tools Claude can call?
 
-All recall tools return **slice-formatted markdown** via a unified `render_slice_markdown` dispatcher (introduced in v1.1) so output structure is consistent across tools.
+As of v2.9.0, memem exposes **6 MCP tools** (reduced from 14; removed tools are available via CLI or Python library — see note below).
 
-| Tool | What it does |
-|------|------|
-| `memory_save(content, title, tags, layer?)` | Store a lesson. Security-scanned for prompt injection and credential exfil before writing. `layer` param is accepted for backward compat but deprecated (v2.8.0: new memories carry no layer field). |
-| `memory_search(query, limit, scope_id)` | Compact index slice — IDs + title + 1-line snippet. Use first to narrow candidates. |
-| `memory_get(ids, scope_id)` | Full content slice for specific memory IDs. Use after `memory_search`. |
-| `memory_timeline(memory_id, scope_id)` | Chronological thread via `related[]` graph + same-project window. |
-| `memory_recall(query, scope_id, limit)` | Legacy alias — search + full content in one slice. |
-| `memory_list(scope_id)` | List all memories with stats, grouped by project. |
-| `memory_import(source_path)` | Bulk import from files, directories, or chat exports. |
-| `transcript_search(query)` | Search raw Claude Code session JSONL logs (not the mined memories). |
-| `context_assemble(query, project)` | Composite briefing: calls `active_memory_slice` 1-2 times (project + general scope when sparse), merges into one assembled slice. |
-| `memory_graph(memory_id)` | Inspect typed/scored graph neighbors for one memory. |
-| `memory_graph_audit()` | Report graph quality issues: orphans, dead links, hubs, stale edges. |
-| `memory_graph_rebuild(scope_id)` | Rebuild the graph side index from the Obsidian vault. |
-| `active_memory_slice(query, task_mode?)` | On-demand working-state slice. Uses three-way RRF (cosine + BM25 + FTS5, top-20 pool) + MMR diversification (λ=0.7, 8 results). |
+| Tool | Signature | What it does |
+|------|-----------|------|
+| `memory_save` | `content, title?, scope_id?, tags?, layer?(deprecated), paths?` | Store one atomic durable lesson. Security-scanned for prompt injection and credential exfil. Three-band dedup: ≥0.92 rejects as duplicate, 0.70–0.92 merges into existing memory, <0.70 saves new. `layer` is accepted for backward compat but has no effect (deprecated v2.8.0). `paths` is an optional list of file-glob patterns stored as `paths:` frontmatter for path-scoped recall. |
+| `memory_search` | `query, limit?=10, scope_id?="default"` | Compact-index search (~50 tok/result) via three-way RRF (cosine + BM25 + FTS5). Use first to narrow candidates; returns IDs + titles + 1-line snippets. `scope_id` is a soft bonus, not a hard filter. |
+| `memory_get` | `ids, scope_id?="default"` | Full content fetch by IDs (~500 tok/result). Use after `memory_search` when you know which memories you need. `ids` is a list of 8-character ID prefixes. |
+| `memory_timeline` | `memory_id, depth_before?=5, depth_after?=5, scope_id?="default"` | Chronological thread via `related[]` graph + same-project window. Use when you need the narrative around a memory (what led to it, what came after). |
+| `transcript_search` | `query, limit?=5` | Search raw Claude Code session JSONL logs via persistent FTS5 index at `~/.memem/transcript_fts.db` (grep fallback when index is empty). Different corpus from the vault — use for actual back-and-forth conversation lookup. |
+| `active_memory_slice` | `query, task_mode?=None, scope_id?="", paths_context?=None` | Query-shaped working-state slice (~150 ms). Uses three-way RRF + MMR diversification (λ=0.7, top-20 → 8 results). Auto-derives `paths_context` from the current session (v2.9.1) when the caller does not supply it; caller-supplied value takes precedence. Memories whose `paths:` frontmatter globs match `paths_context` receive a 1.05× bonus. |
+
+**Removed in v2.9.0** — 8 tools were removed from the MCP surface; their replacements:
+
+| Removed tool | Replacement |
+|---|---|
+| `memory_recall` | Use `memory_search` then `memory_get` |
+| `memory_list` | CLI: `python3 -m memem.server --compact-index` |
+| `memory_graph` | CLI: `python3 -m memem.server graph neighbors <memory_id>` |
+| `memory_graph_audit` | CLI: `python3 -m memem.server graph audit` |
+| `memory_graph_rebuild` | CLI: `python3 -m memem.server graph rebuild [scope]` |
+| `context_assemble` | CLI: `python3 -m memem.server --assemble-context <query>` |
+| `memory_import` | Python: `memem.operations.memory_import()` |
+| `memory_remind` | Python: `memem.cross_vault.search_across_vaults()` |
 
 ## How do I inspect slices or writeback manually?
 
@@ -423,9 +437,9 @@ memem is split into small, focused modules:
 - `retrieve.py` — v2.0.0: cosine top-K + FTS-conditional supplement for version/date literals. Mtime-invalidated vault index + embedding caches.
 - `render.py` — v2.0.0: 2-section renderer (`## Working` + `## Relevant`).
 - `obsidian_store.py` — memory I/O, dedup scoring, contradiction detection, layer auto-classification on save
-- `recall.py` — slice-format recall tools (`memory_search`/`memory_get`/`memory_timeline`/`memory_recall`) — surgically rewritten in v2.0.0 with inline `_render_recall_markdown` (the legacy `active_slice` renderer is gone)
+- `recall.py` — slice-format recall library (`memory_search`/`memory_get`/`memory_timeline`; `memory_recall` still available as a library function) — surgically rewritten in v2.0.0 with inline `_render_recall_markdown` (the legacy `active_slice` renderer is gone)
 - `playbook.py` — per-project playbook grow + refine
-- `assembly.py` — `context_assemble` composes via `recall` pipeline
+- `assembly.py` — `context_assemble` narrative briefing (used by CLI `--assemble-context`; removed from MCP surface in v2.9.0)
 - `capabilities.py` — runtime feature detection for degraded mode
 - `server.py` — thin MCP entrypoint (FastMCP imported lazily; `storage.py` server-lifecycle helpers folded in v2.5.0)
 - `cli.py` — command dispatcher for non-MCP entrypoints
