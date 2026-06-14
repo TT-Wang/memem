@@ -511,6 +511,174 @@ def _transcript_search_fts(query: str, limit: int) -> list[tuple[float, dict, st
     return results if results else None
 
 
+# ---------------------------------------------------------------------------
+# Path-scope helper: derive recently-accessed file paths from a session
+# ---------------------------------------------------------------------------
+
+# File-path extracting tool names (mirrors mine_delta._FILE_PATH_TOOLS)
+_FILE_PATH_TOOLS_RS = frozenset({"Edit", "Write", "Read", "NotebookEdit"})
+
+# Regex to extract a plausible file path token from a Bash command first line.
+# Mirrors mine_delta._BASH_PATH_RE exactly: matches absolute paths (/…, ~…) or
+# relative paths with a file extension (word.ext, up to 6 chars).
+# Requires leading/trailing whitespace boundary so partial fragments are skipped.
+_BASH_PATH_RE_RS = re.compile(
+    r'(?:^|\s)([/~][^\s;"\']+|[a-zA-Z0-9_][^\s;"\']*\.[a-zA-Z]{1,6})(?:\s|$)'
+)
+
+
+def _extract_paths_from_content_blocks(content) -> list[str]:
+    """Extract file paths from raw JSONL content blocks (assistant tool_use entries only).
+
+    Only inspects tool_use blocks — file ops live in ASSISTANT messages' tool_use
+    blocks, never in user messages.  Mirrors mine_delta.extract_dominant_paths:
+
+    - Read/Edit/Write/NotebookEdit → inp['file_path']
+    - Bash → first-line plausible path tokens via _BASH_PATH_RE_RS (absolute paths
+      or relative paths with a recognised extension; bare fragments are skipped)
+    """
+    paths: list[str] = []
+    if not isinstance(content, list):
+        return paths
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "tool_use":
+            continue
+        name = block.get("name") or ""
+        inp = block.get("input") or {}
+        if not isinstance(inp, dict):
+            inp = {}
+        if name in _FILE_PATH_TOOLS_RS:
+            path = str(inp.get("file_path") or "").strip()
+            if path:
+                paths.append(path)
+        elif name == "Bash":
+            cmd = str(inp.get("command") or "")
+            first_line = cmd.split("\n")[0][:80]
+            for m in _BASH_PATH_RE_RS.finditer(first_line):
+                candidate = m.group(1).strip()
+                # Only keep candidates that look like real paths (absolute or have ext)
+                if candidate.startswith(("/", "~")) or ("." in candidate and "/" in candidate):
+                    paths.append(candidate)
+    return paths
+
+
+def recent_session_paths(session_id: str, limit: int = 5) -> list[str]:
+    """Return the most recently accessed file paths from a session transcript.
+
+    Resolves session_id → JSONL file using a direct stat on the CWD-derived
+    path first (fast O(1)); falls back to ``next(base_dir.rglob(...), None)``
+    (short-circuit on first match) when the direct path misses.
+
+    Tail-reads the last 512 KB of the file (enough for many recent turns) and
+    walks the JSONL records most-recent-first, collecting file paths from
+    ASSISTANT tool_use blocks only (Read/Edit/Write/NotebookEdit ``file_path``
+    inputs and Bash command first-line path tokens).  Returns the top ``limit``
+    distinct paths in recency order (newest first, first-occurrence-wins dedup).
+
+    Fully graceful: any exception returns [].  Never raises.
+
+    Args:
+        session_id: Session UUID string (without .jsonl extension).
+        limit:      Maximum number of distinct paths to return.
+
+    Returns:
+        List of up to ``limit`` file path strings, newest first.
+    """
+    if not session_id:
+        return []
+    try:
+        # --- Resolve session_id → transcript path ---
+        # Fast path: Claude Code stores sessions at
+        #   ~/.claude/projects/<slugified-cwd>/<session_id>.jsonl
+        # where slug = cwd with '/' and '.' replaced by '-'.
+        # Try each SESSIONS_DIRS entry as the projects root and construct the
+        # direct path from the current working directory slug.
+        session_file: Path | None = None
+        try:
+            cwd_slug = str(Path.cwd()).replace("/", "-").replace(".", "-")
+            for base_dir in SESSIONS_DIRS:
+                candidate = base_dir / cwd_slug / f"{session_id}.jsonl"
+                try:
+                    candidate.stat()
+                    session_file = candidate
+                    break
+                except OSError:
+                    pass
+        except Exception:  # noqa: BLE001
+            pass
+
+        # Fallback: short-circuit rglob (stops on first match, never builds a list)
+        if session_file is None:
+            for base_dir in SESSIONS_DIRS:
+                if not base_dir.exists():
+                    continue
+                found = next(base_dir.rglob(f"{session_id}.jsonl"), None)
+                if found is not None:
+                    session_file = found
+                    break
+
+        if session_file is None:
+            return []
+
+        # --- Tail-read the file (belt-and-suspenders size guard) ---
+        try:
+            size = session_file.stat().st_size
+        except OSError:
+            return []
+
+        if size > MAX_FALLBACK_FILE_BYTES:
+            log.debug(
+                "recent_session_paths: file very large, tail-reading",
+                session_id=session_id,
+                size_bytes=size,
+            )
+
+        _TAIL = 512 * 1024  # 512 KB tail window
+        try:
+            with open(session_file, "rb") as fh:
+                if size > _TAIL:
+                    fh.seek(size - _TAIL)
+                    fh.readline()  # discard potentially partial first line
+                raw = fh.read()
+        except OSError:
+            return []
+
+        lines = raw.decode("utf-8", errors="ignore").splitlines()
+
+        # Walk most-recent-first, collect paths with first-occurrence-wins dedup.
+        # Only inspect ASSISTANT messages — file-op tool_use blocks live there.
+        seen: set[str] = set()
+        result: list[str] = []
+
+        for line in reversed(lines):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            # Only look at assistant messages (they contain tool_use blocks)
+            if obj.get("type") != "assistant":
+                continue
+
+            content = obj.get("message", {}).get("content", "")
+            paths = _extract_paths_from_content_blocks(content)
+            for p in paths:
+                if p and p not in seen:
+                    seen.add(p)
+                    result.append(p)
+                    if len(result) >= limit:
+                        return result
+
+        return result
+
+    except Exception as exc:  # noqa: BLE001
+        log.debug("recent_session_paths: failed to extract paths", session_id=session_id, error=str(exc))
+        return []
+
+
 def transcript_search(query: str, limit: int = 5) -> str:
     query_words = set(query.lower().split())
     if not query_words:

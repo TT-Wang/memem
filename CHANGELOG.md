@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > they have been left untouched as historical record. See the v0.7.0 entry
 > for the rename details, backward-compat strategy, and migration path.
 
+## v2.9.1 — Path-Scope Activation (2026-06-14)
+
+Activates the path-scoped retrieval that shipped (dormant) in v2.9.0: recall now auto-derives `paths_context` from the current session, so the `paths:` bonus actually fires. No API or schema changes.
+
+### Added
+
+- **`recent_session_paths()` + `_extract_paths_from_content_blocks()` (`memem/transcripts.py`)** — resolves `session_id` → JSONL via a direct CWD-slug stat first (O(1)), falling back to `next(base_dir.rglob(...), None)` (short-circuit on first match, never builds a list); **tail-reads** the last 512 KB instead of the whole transcript (measured ~5 ms even on a 64 MB session, vs ~390 ms for a full read); walks most-recent-first; extracts deduplicated top-N paths from `Read`/`Edit`/`Write`/`NotebookEdit` `file_path` inputs and Bash command path tokens; restricts the walk to assistant-role messages; fully graceful — any exception returns `[]` and logs at `debug`/`warning` (never raises, never silently swallows).
+- **Recall auto-derives `paths_context`** — when the caller does not supply it, `active_memory_slice` (`memem/server.py`), the `auto-recall.sh` UserPromptSubmit hook, and the `cli.py` slice path now derive `paths_context` from the current session via `recent_session_paths()` (session id from `_get_current_session_id()` / the hook envelope). This makes the v2.9.0 path bonus fire automatically; caller-supplied `paths_context` still takes precedence. Derivation failures are logged, never silent. `tests/test_recent_paths.py` (12 tests) covers extraction, recency/dedup/limit, missing/malformed sessions, and drives the real `active_memory_slice` tool end-to-end.
+
 ## v2.9.0 — Tool Diet + Transcript FTS5 + Path Scope (2026-06-13)
 
 Reduces MCP tool surface from 14 to 6, slashes docstring schema size by 57%, adds FTS5-indexed transcript search, introduces path-scoped memory retrieval, hardens telemetry isolation, and wires closed-loop evaluation tooling (canary doctor, dual-engine replay, lessons/feedback gates).

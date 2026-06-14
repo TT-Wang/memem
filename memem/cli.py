@@ -408,7 +408,24 @@ def dispatch_cli(argv: list[str], mcp) -> None:
             print("memem.retrieve / memem.render not available.")
             return
 
-        results = retrieve(query, k=8, log_call_type="cli_slice")
+        # Derive paths_context from the current session transcript
+        _paths_ctx = None
+        try:
+            from memem.recall import _get_current_session_id as _gsid
+            from memem.transcripts import recent_session_paths as _rsp
+            _sid = _gsid()
+            if _sid:
+                _derived = _rsp(_sid)
+                _paths_ctx = _derived or None
+        except Exception as _exc:  # noqa: BLE001
+            import structlog as _structlog
+            _structlog.get_logger("memem-cli").debug(
+                "cli slice: failed to derive paths_context",
+                error=str(_exc),
+            )
+            _paths_ctx = None
+
+        results = retrieve(query, k=8, log_call_type="cli_slice", paths_context=_paths_ctx)
         working: dict = {}
         if environment:
             if environment.get("task_mode"):

@@ -72,8 +72,23 @@ except ImportError:
     print(json.dumps({}))
     sys.exit(0)
 
+session_id = (envelope.get("session_id") or "").strip()
+paths_context = None
 try:
-    results = retrieve(query, k=8)
+    from memem.transcripts import recent_session_paths as _rsp
+    derived = _rsp(session_id) if session_id else []
+    paths_context = derived or None
+except Exception as _exc:
+    import structlog as _structlog
+    _structlog.get_logger("memem-hook").warning(
+        "auto-recall: failed to derive paths_context",
+        session_id=session_id,
+        error=str(_exc),
+    )
+    paths_context = None
+
+try:
+    results = retrieve(query, k=8, paths_context=paths_context)
 except Exception:
     print(json.dumps({}))
     sys.exit(0)

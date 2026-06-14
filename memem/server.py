@@ -28,8 +28,11 @@ def _build_mcp():
     import time
     from typing import Annotated
 
+    import structlog as _structlog
     from mcp.server.fastmcp import FastMCP
     from pydantic import Field
+
+    _log = _structlog.get_logger("memem-server")
 
     def _extract_ids_from_markdown(md: str) -> list[str]:
         """Extract 8-hex memory IDs from compact result lines (e.g. '[abcd1234] ...')."""
@@ -48,6 +51,7 @@ def _build_mcp():
         memory_timeline as _memory_timeline,
     )
     from memem.transcripts import transcript_search as _transcript_search
+    from memem.transcripts import recent_session_paths as _recent_session_paths
 
     mcp = FastMCP("memem")
 
@@ -198,6 +202,19 @@ def _build_mcp():
         session_id = _get_current_session_id()
         from memem.render import render_slice
         from memem.retrieve import retrieve
+
+        # Auto-derive paths_context from session transcript when caller didn't supply it
+        if paths_context is None:
+            try:
+                derived = _recent_session_paths(session_id) if session_id else []
+                paths_context = derived or None
+            except Exception as _exc:  # noqa: BLE001
+                _log.warning(
+                    "active_memory_slice: failed to derive paths_context",
+                    session_id=session_id,
+                    error=str(_exc),
+                )
+                paths_context = None
 
         results = retrieve(query, k=8, log_call_type=None, scope_id=scope_id, paths_context=paths_context)
         working = {"task_mode": task_mode} if task_mode else {}
